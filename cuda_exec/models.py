@@ -7,7 +7,7 @@ Documentation placement rule:
 
 Important public conventions captured in this file:
 - Compile inputs are inline file maps: Dict[relative_path, content].
-- Public response files are returned as Dict[relative_path, ReturnedFile].
+- Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
 - `artifacts` means kept results.
 - `logs` means process output.
@@ -126,14 +126,19 @@ class HealthResponse(BaseModel):
     service: str
 
 
-class ReturnedFile(BaseModel):
-    """Returned public file payload.
+class FilePayload(BaseModel):
+    """Public file payload returned in responses.
 
     Public responses use:
-        relative_path -> ReturnedFile
+        relative_path -> FilePayload
 
-    `encoding` is kept minimal but explicit so that both text logs and binary
-    artifacts can share the same response shape.
+    Why this exists:
+    - request-side compile inputs are simple text maps, so Dict[path, content] is enough
+    - response-side files may be either text or binary
+    - response-side files may also be truncated by service limits
+
+    So the response needs a tiny wrapper object around `content` to carry the
+    extra metadata that request-side inputs do not need.
     """
 
     content: str = Field(..., description="File payload content. Text uses utf8; binary uses base64")
@@ -147,9 +152,10 @@ class ReturnedFile(BaseModel):
     )
 
 
-class StageResponseBase(BaseModel):
+class ResponseBase(BaseModel):
     """Shared public response fields.
 
+    This is the response-side counterpart to RequestBase.
     Public responses stay intentionally small. They describe stage outcome and
     return only stage-relevant artifacts/logs, not internal workflow state.
     """
@@ -159,18 +165,18 @@ class StageResponseBase(BaseModel):
     attempt: int
 
 
-class CompileResponse(StageResponseBase):
+class CompileResponse(ResponseBase):
     """Minimal compile response.
 
     - `artifacts` contains kept compile outputs, typically the compiled binary.
     - `logs` contains compile.log/stdout/stderr keyed by relative path.
     """
 
-    artifacts: Dict[str, ReturnedFile] = Field(
+    artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed kept compile outputs",
     )
-    logs: Dict[str, ReturnedFile] = Field(
+    logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed compile log/stdout/stderr files",
     )
@@ -181,13 +187,13 @@ class ConfigStageResult(BaseModel):
 
     config_id: str
     ok: bool
-    logs: Dict[str, ReturnedFile] = Field(
+    logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed per-config log/stdout/stderr files",
     )
 
 
-class EvaluateResponse(StageResponseBase):
+class EvaluateResponse(ResponseBase):
     """Minimal evaluate response with one result per runtime config."""
 
     results: List[ConfigStageResult] = Field(default_factory=list)
@@ -201,30 +207,30 @@ class ProfileConfigResult(BaseModel):
 
     config_id: str
     ok: bool
-    artifacts: Dict[str, ReturnedFile] = Field(
+    artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed kept profiling outputs for this config",
     )
-    logs: Dict[str, ReturnedFile] = Field(
+    logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed profile log/stdout/stderr files for this config",
     )
 
 
-class ProfileResponse(StageResponseBase):
+class ProfileResponse(ResponseBase):
     """Minimal profile response with one result per runtime config."""
 
     results: List[ProfileConfigResult] = Field(default_factory=list)
 
 
-class ExecuteResponse(StageResponseBase):
+class ExecuteResponse(ResponseBase):
     """Minimal execute response.
 
     Execute is logs-only in the public API by design.
     Any higher-level meaning of command outputs is left to the caller.
     """
 
-    logs: Dict[str, ReturnedFile] = Field(
+    logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed execute log/stdout/stderr files",
     )

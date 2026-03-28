@@ -200,10 +200,8 @@ class CudaExecE2ETest(unittest.TestCase):
                 self.assertIn("logs", first)
                 correctness_meta = first["correctness"].get("metadata", {})
                 perf_meta = first["performance"].get("metadata", {})
-                self.assertEqual(correctness_meta.get("shape_kind"), self._config_map()[first_slug]["extra"]["shape_kind"])
-                self.assertEqual(perf_meta.get("input_size"), self._config_map()[first_slug]["extra"]["input_size"])
-        else:
-            self.assertIn("detail", body)
+                self.assertEqual(correctness_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
+                self.assertEqual(perf_meta.get("input_size"), self._config_map()[first_slug]["input_size"])
         else:
             self.assertIn("detail", body)
 
@@ -231,10 +229,8 @@ class CudaExecE2ETest(unittest.TestCase):
                 self.assertIn("artifacts", first)
                 self.assertIn("logs", first)
                 summary_meta = first["summary"].get("metadata", {})
-                self.assertEqual(summary_meta.get("rank"), self._config_map()[first_slug]["extra"]["rank"])
-                self.assertEqual(summary_meta.get("shape_kind"), self._config_map()[first_slug]["extra"]["shape_kind"])
-        else:
-            self.assertIn("detail", body)
+                self.assertEqual(summary_meta.get("rank"), self._config_map()[first_slug]["rank"])
+                self.assertEqual(summary_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
         else:
             self.assertIn("detail", body)
 

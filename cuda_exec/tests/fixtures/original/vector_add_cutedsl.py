@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - fixture may be read/copied without CuTe 
 
 
 def _config_from_env() -> dict[str, Any]:
-    shape_raw = os.environ.get("CUDA_EXEC_EXTRA_SHAPE", "[1048576]")
+    shape_raw = os.environ.get("CUDA_EXEC_PARAM_SHAPE") or os.environ.get("CUDA_EXEC_EXTRA_SHAPE", "[1048576]")
     try:
         shape = json.loads(shape_raw)
     except json.JSONDecodeError:
@@ -25,9 +25,9 @@ def _config_from_env() -> dict[str, Any]:
     if not isinstance(shape, list) or not shape:
         shape = [1048576]
 
-    input_size = int(os.environ.get("CUDA_EXEC_EXTRA_INPUT_SIZE", str(_product(shape))))
-    rank = int(os.environ.get("CUDA_EXEC_EXTRA_RANK", str(len(shape))))
-    shape_kind = os.environ.get("CUDA_EXEC_EXTRA_SHAPE_KIND", f"{rank}d")
+    input_size = int(os.environ.get("CUDA_EXEC_PARAM_INPUT_SIZE") or os.environ.get("CUDA_EXEC_EXTRA_INPUT_SIZE", str(_product(shape))))
+    rank = int(os.environ.get("CUDA_EXEC_PARAM_RANK") or os.environ.get("CUDA_EXEC_EXTRA_RANK", str(len(shape))))
+    shape_kind = os.environ.get("CUDA_EXEC_PARAM_SHAPE_KIND") or os.environ.get("CUDA_EXEC_EXTRA_SHAPE_KIND", f"{rank}d")
 
     return {
         "shape": shape,

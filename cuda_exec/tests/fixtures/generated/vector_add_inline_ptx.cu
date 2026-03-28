@@ -35,10 +35,12 @@ static int env_int_or(const char* name, int fallback) {
 
 int main() {
   const char* config_slug = env_or("CUDA_EXEC_CONFIG_ID", "default-config");
-  const char* shape_json = env_or("CUDA_EXEC_EXTRA_SHAPE", "[1048576]");
-  const char* shape_kind = env_or("CUDA_EXEC_EXTRA_SHAPE_KIND", "1d");
-  int rank = env_int_or("CUDA_EXEC_EXTRA_RANK", 1);
-  int input_size = env_int_or("CUDA_EXEC_EXTRA_INPUT_SIZE", 1 << 20);
+  const char* shape_json = getenv("CUDA_EXEC_PARAM_SHAPE");
+  if (!shape_json) shape_json = env_or("CUDA_EXEC_EXTRA_SHAPE", "[1048576]");
+  const char* shape_kind = getenv("CUDA_EXEC_PARAM_SHAPE_KIND");
+  if (!shape_kind) shape_kind = env_or("CUDA_EXEC_EXTRA_SHAPE_KIND", "1d");
+  int rank = getenv("CUDA_EXEC_PARAM_RANK") ? env_int_or("CUDA_EXEC_PARAM_RANK", 1) : env_int_or("CUDA_EXEC_EXTRA_RANK", 1);
+  int input_size = getenv("CUDA_EXEC_PARAM_INPUT_SIZE") ? env_int_or("CUDA_EXEC_PARAM_INPUT_SIZE", 1 << 20) : env_int_or("CUDA_EXEC_EXTRA_INPUT_SIZE", 1 << 20);
 
   double base = (double)input_size / 1000000.0;
   double min_ms = 0.10 + base * 0.15 + rank * 0.02;

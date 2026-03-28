@@ -375,12 +375,13 @@ def _config_env(
                 env[env_key] = json.dumps(extra_value) if not isinstance(extra_value, str) else extra_value
             continue
 
-        if isinstance(value, (str, int, float, bool)):
-            env_key = "CUDA_EXEC_PARAM_" + _slugify(str(key)).upper().replace(".", "_")
-            if isinstance(value, bool):
-                env[env_key] = "1" if value else "0"
-            else:
-                env[env_key] = str(value)
+        env_key = "CUDA_EXEC_PARAM_" + _slugify(str(key)).upper().replace(".", "_")
+        if isinstance(value, bool):
+            env[env_key] = "1" if value else "0"
+        elif isinstance(value, (str, int, float)):
+            env[env_key] = str(value)
+        else:
+            env[env_key] = json.dumps(value)
 
     return env
 

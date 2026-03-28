@@ -1,56 +1,44 @@
 {
   "vec1d-n65536": {
-    "extra": {
-      "family": "integration-vector-add",
-      "rank": 1,
-      "shape": [65536],
-      "input_size": 65536,
-      "shape_kind": "1d"
-    }
+    "family": "integration-vector-add",
+    "rank": 1,
+    "shape": [65536],
+    "input_size": 65536,
+    "shape_kind": "1d"
   },
   "vec1d-n1048576": {
-    "extra": {
-      "family": "integration-vector-add",
-      "rank": 1,
-      "shape": [1048576],
-      "input_size": 1048576,
-      "shape_kind": "1d"
-    }
+    "family": "integration-vector-add",
+    "rank": 1,
+    "shape": [1048576],
+    "input_size": 1048576,
+    "shape_kind": "1d"
   },
   "vec1d-n4194304": {
-    "extra": {
-      "family": "integration-vector-add",
-      "rank": 1,
-      "shape": [4194304],
-      "input_size": 4194304,
-      "shape_kind": "1d"
-    }
+    "family": "integration-vector-add",
+    "rank": 1,
+    "shape": [4194304],
+    "input_size": 4194304,
+    "shape_kind": "1d"
   },
   "tensor2d-1024x1024": {
-    "extra": {
-      "family": "integration-vector-add",
-      "rank": 2,
-      "shape": [1024, 1024],
-      "input_size": 1048576,
-      "shape_kind": "2d"
-    }
+    "family": "integration-vector-add",
+    "rank": 2,
+    "shape": [1024, 1024],
+    "input_size": 1048576,
+    "shape_kind": "2d"
   },
   "tensor2d-2048x512": {
-    "extra": {
-      "family": "integration-vector-add",
-      "rank": 2,
-      "shape": [2048, 512],
-      "input_size": 1048576,
-      "shape_kind": "2d"
-    }
+    "family": "integration-vector-add",
+    "rank": 2,
+    "shape": [2048, 512],
+    "input_size": 1048576,
+    "shape_kind": "2d"
   },
   "tensor3d-64x64x64": {
-    "extra": {
-      "family": "integration-vector-add",
-      "rank": 3,
-      "shape": [64, 64, 64],
-      "input_size": 262144,
-      "shape_kind": "3d"
-    }
+    "family": "integration-vector-add",
+    "rank": 3,
+    "shape": [64, 64, 64],
+    "input_size": 262144,
+    "shape_kind": "3d"
   }
 }

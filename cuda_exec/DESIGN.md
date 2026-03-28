@@ -235,8 +235,8 @@ information through environment variables such as:
 - `CUDA_EXEC_CONFIG_ID` (set to the config slug)
 - `CUDA_EXEC_CONFIG_PATH`
 - `CUDA_EXEC_CONFIG_JSON`
-- `CUDA_EXEC_PARAM_<KEY>` for simple top-level scalar config values
-- `CUDA_EXEC_EXTRA_<KEY>` for values nested under a config `extra` object
+- `CUDA_EXEC_PARAM_<KEY>` for top-level config values; structured values are JSON-encoded when needed
+- `CUDA_EXEC_EXTRA_<KEY>` for values nested under a config `extra` object (still supported, but top-level config fields are the preferred shape)
 
 ---
 

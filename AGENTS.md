@@ -80,8 +80,9 @@ All public request/response file names should use relative paths.
 - `compile` is code-level
 - `evaluate` / `profile` are runtime-config-level
 - one compile may fan out into many configs
-- runtime configs are passed as `configs: Dict[config_slug, ConfigSpec]`
+- runtime configs are passed as `configs: Dict[config_slug, Dict[str, Any]]`
 - the same config slug is the stable identity on both request and response
+- the config body is intentionally kernel-specific and flexible; do not overfit it to one workload family
 
 #### Public response boundary
 

@@ -197,17 +197,15 @@ FA4-style example:
 
 `evaluate` and `profile` accept slug-keyed config maps:
 
-- `configs: Dict[config_slug, ConfigSpec]`
+- `configs: Dict[config_slug, Dict[str, Any]]`
 
 The config slug is the stable identity for a config across both request and response.
+The config body itself is intentionally flexible and kernel-specific.
 
-Optional standard config fields:
+In other words:
 
-- `num_layers`
-- `embedding_size`
-- `num_heads`
-- `causal`
-- `extra`
+- the service owns the transport shape of config
+- the kernel owns the semantic shape of config
 
 Conceptual example:
 
@@ -215,17 +213,17 @@ Conceptual example:
 {
   "metadata": { "...": "..." },
   "configs": {
-    "fa4-causal-l12-e4096-h32": {
-      "num_layers": 12,
-      "embedding_size": 4096,
-      "num_heads": 32,
-      "causal": true
+    "tensor2d-1024x1024": {
+      "shape": [1024, 1024],
+      "rank": 2,
+      "input_size": 1048576
     },
-    "fa4-noncausal-l12-e4096-h32": {
-      "num_layers": 12,
-      "embedding_size": 4096,
+    "attention-b1-s4096-h32-d128": {
+      "batch_size": 1,
+      "seq_len": 4096,
       "num_heads": 32,
-      "causal": false
+      "head_dim": 128,
+      "causal": true
     }
   }
 }
@@ -237,10 +235,8 @@ information through environment variables such as:
 - `CUDA_EXEC_CONFIG_ID` (set to the config slug)
 - `CUDA_EXEC_CONFIG_PATH`
 - `CUDA_EXEC_CONFIG_JSON`
-- `CUDA_EXEC_NUM_LAYERS`
-- `CUDA_EXEC_EMBEDDING_SIZE`
-- `CUDA_EXEC_NUM_HEADS`
-- `CUDA_EXEC_CAUSAL`
+- `CUDA_EXEC_PARAM_<KEY>` for simple top-level scalar config values
+- `CUDA_EXEC_EXTRA_<KEY>` for values nested under a config `extra` object
 
 ---
 
@@ -577,24 +573,20 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "timeout_seconds": 180,
   "configs": {
-    "fa4-causal-l12-e4096-h32": {
-      "num_layers": 12,
-      "embedding_size": 4096,
-      "num_heads": 32,
-      "causal": true,
-      "extra": {}
+    "tensor2d-1024x1024": {
+      "shape": [1024, 1024],
+      "rank": 2,
+      "input_size": 1048576
     },
-    "fa4-noncausal-l12-e4096-h32": {
-      "num_layers": 12,
-      "embedding_size": 4096,
-      "num_heads": 32,
-      "causal": false,
-      "extra": {}
+    "tensor3d-64x64x64": {
+      "shape": [64, 64, 64],
+      "rank": 3,
+      "input_size": 262144
     }
   }
 }
@@ -656,17 +648,15 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "timeout_seconds": 180,
   "configs": {
-    "fa4-causal-l12-e4096-h32": {
-      "num_layers": 12,
-      "embedding_size": 4096,
-      "num_heads": 32,
-      "causal": true,
-      "extra": {}
+    "tensor2d-1024x1024": {
+      "shape": [1024, 1024],
+      "rank": 2,
+      "input_size": 1048576
     }
   }
 }

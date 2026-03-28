@@ -7,7 +7,7 @@ Documentation placement rule:
 
 Important public conventions captured in this file:
 - Compile inputs are inline file maps: Dict[relative_path, content].
-- Evaluate/profile configs are slug-keyed maps: Dict[config_slug, ConfigSpec].
+- Evaluate/profile configs are slug-keyed maps: Dict[config_slug, Dict[str, Any]].
 - Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
 - `artifacts` means kept results.
@@ -17,7 +17,7 @@ Important public conventions captured in this file:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal
 
 from pydantic import BaseModel, Field
 
@@ -30,16 +30,6 @@ class Metadata(BaseModel):
     direction_id: int = Field(..., ge=0, description="Stable integer id for a research direction")
     direction_slug: str = Field(..., min_length=1, description="Readable slug for a research direction")
     turn: int = Field(..., ge=0, description="Turn index within the direction")
-
-
-class ConfigSpec(BaseModel):
-    """Runtime config body keyed by a stable config slug."""
-
-    num_layers: Optional[int] = Field(default=None, ge=1)
-    embedding_size: Optional[int] = Field(default=None, ge=1)
-    num_heads: Optional[int] = Field(default=None, ge=1)
-    causal: Optional[bool] = Field(default=None)
-    extra: Dict[str, Any] = Field(default_factory=dict, description="Extra config-specific runtime fields")
 
 
 class RequestBase(BaseModel):
@@ -70,22 +60,33 @@ class CompileRequest(RequestBase):
 
 
 class EvaluateRequest(RequestBase):
-    """Evaluate request over slug-keyed runtime configs."""
+    """Evaluate request over slug-keyed runtime configs.
 
-    configs: Dict[str, ConfigSpec] = Field(
+    `configs` is intentionally flexible:
+        config_slug -> arbitrary kernel-specific config payload
+
+    The service owns the transport shape of config. The kernel owns the semantic
+    shape of config.
+    """
+
+    configs: Dict[str, Dict[str, Any]] = Field(
         ...,
         min_length=1,
-        description="Slug-keyed runtime configs to evaluate against the compiled artifact",
+        description="Slug-keyed kernel-specific runtime config payloads for evaluate",
     )
 
 
 class ProfileRequest(RequestBase):
-    """Profile request over slug-keyed runtime configs."""
+    """Profile request over slug-keyed runtime configs.
 
-    configs: Dict[str, ConfigSpec] = Field(
+    `configs` is intentionally flexible:
+        config_slug -> arbitrary kernel-specific config payload
+    """
+
+    configs: Dict[str, Dict[str, Any]] = Field(
         ...,
         min_length=1,
-        description="Slug-keyed runtime configs to profile against the compiled artifact",
+        description="Slug-keyed kernel-specific runtime config payloads for profile",
     )
 
 
@@ -151,10 +152,10 @@ class ResponseBase(BaseModel):
 class LatencySummary(BaseModel):
     """Structured latency statistics in milliseconds."""
 
-    min: Optional[float] = None
-    median: Optional[float] = None
-    max: Optional[float] = None
-    mean: Optional[float] = None
+    min: float | None = None
+    median: float | None = None
+    max: float | None = None
+    mean: float | None = None
 
 
 class CorrectnessSummary(BaseModel):
@@ -165,13 +166,13 @@ class CorrectnessSummary(BaseModel):
     """
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    passed: Optional[bool] = None
-    max_abs_error: Optional[float] = None
-    mean_abs_error: Optional[float] = None
-    abs_variance: Optional[float] = None
-    max_rel_error: Optional[float] = None
-    mean_rel_error: Optional[float] = None
-    rel_variance: Optional[float] = None
+    passed: bool | None = None
+    max_abs_error: float | None = None
+    mean_abs_error: float | None = None
+    abs_variance: float | None = None
+    max_rel_error: float | None = None
+    mean_rel_error: float | None = None
+    rel_variance: float | None = None
 
 
 class PerformanceSummary(BaseModel):
@@ -179,7 +180,7 @@ class PerformanceSummary(BaseModel):
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
     latency_ms: LatencySummary = Field(default_factory=LatencySummary)
-    runs: Optional[int] = None
+    runs: int | None = None
 
 
 class CompileResponse(ResponseBase):
@@ -210,7 +211,7 @@ class EvaluateResponse(ResponseBase):
         {
           "all_ok": true,
           "configs": {
-            "fa4-causal-l12-e4096-h32": {
+            "tensor2d-1024x1024": {
               "status": "ok",
               "correctness": {
                 "passed": true,

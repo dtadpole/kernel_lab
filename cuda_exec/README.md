@@ -15,7 +15,8 @@ FastAPI-based remote CUDA execution service.
 - compile is code-level and runs once per turn
 - evaluate/profile are config-level and may run many configs per compile
 - compile inputs use `Dict[relative_path, content]`
-- evaluate/profile configs use `Dict[config_slug, ConfigSpec]`
+- evaluate/profile configs use `Dict[config_slug, Dict[str, Any]]`
+- config payloads are intentionally kernel-specific and flexible
 - public responses return stage-relevant `artifacts` and `logs` as relative-path keyed dictionaries
 - top-level public responses use `all_ok`
 - evaluate/profile responses mirror request shape with `configs: Dict[config_slug, ...]`

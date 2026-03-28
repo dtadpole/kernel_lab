@@ -8,7 +8,6 @@ from typing import Any, Dict, List
 
 from fastapi import HTTPException
 
-from cuda_exec.models import ConfigSpec
 from cuda_exec.runner import (
     capture_turn_file,
     resolve_workspace_bundle,
@@ -270,17 +269,17 @@ def _parse_structured_stdout(stdout: str) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _config_metadata(config: ConfigSpec) -> dict:
-    meta = {
-        "num_layers": config.num_layers,
-        "embedding_size": config.embedding_size,
-        "num_heads": config.num_heads,
-    }
-    meta.update(config.extra)
+def _config_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    for key, value in config.items():
+        if key == "extra" and isinstance(value, dict):
+            meta.update(value)
+        else:
+            meta[key] = value
     return {k: v for k, v in meta.items() if v is not None}
 
 
-def _fallback_performance_summary(run_result: dict, *, source: str, config: ConfigSpec) -> dict:
+def _fallback_performance_summary(run_result: dict, *, source: str, config: dict) -> dict:
     duration_ms = run_result["duration_seconds"] * 1000.0
     return {
         "metadata": {"source": source, **_config_metadata(config)},
@@ -294,7 +293,7 @@ def _fallback_performance_summary(run_result: dict, *, source: str, config: Conf
     }
 
 
-def _evaluate_correctness_summary(run_result: dict, *, config: ConfigSpec) -> dict:
+def _evaluate_correctness_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("correctness"), dict):
         correctness = payload["correctness"]
@@ -304,7 +303,7 @@ def _evaluate_correctness_summary(run_result: dict, *, config: ConfigSpec) -> di
     return {"metadata": {"source": "not_provided", **_config_metadata(config)}}
 
 
-def _evaluate_performance_summary(run_result: dict, *, config: ConfigSpec) -> dict:
+def _evaluate_performance_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("performance"), dict):
         performance = payload["performance"]
@@ -314,7 +313,7 @@ def _evaluate_performance_summary(run_result: dict, *, config: ConfigSpec) -> di
     return _fallback_performance_summary(run_result, source="process_duration_fallback", config=config)
 
 
-def _profile_summary(run_result: dict, *, config: ConfigSpec) -> dict:
+def _profile_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("summary"), dict):
         summary = payload["summary"]
@@ -341,11 +340,11 @@ def _summarize_config_outputs(config_results: Dict[str, dict]) -> dict:
     }
 
 
-def _config_payload(config_slug: str, config: ConfigSpec) -> dict:
-    return {"slug": config_slug, **config.model_dump()}
+def _config_payload(config_slug: str, config: dict[str, Any]) -> dict[str, Any]:
+    return {"slug": config_slug, "params": config}
 
 
-def _write_config_record(workspace: dict, stage: str, attempt: int, config_slug: str, config: ConfigSpec) -> str:
+def _write_config_record(workspace: dict, stage: str, attempt: int, config_slug: str, config: dict) -> str:
     rel_path = _config_state_rel(stage, attempt, config_slug)
     abs_path = Path(workspace["root_path"]) / rel_path
     _write_manifest(abs_path, {"config": _config_payload(config_slug, config)})
@@ -357,7 +356,7 @@ def _config_env(
     stage: str,
     attempt: int,
     config_slug: str,
-    config: ConfigSpec,
+    config: dict[str, Any],
     config_rel: str,
 ) -> Dict[str, str]:
     config_abs = str((Path(workspace["root_path"]) / config_rel).resolve())
@@ -368,24 +367,28 @@ def _config_env(
         "CUDA_EXEC_CONFIG_PATH": config_abs,
         "CUDA_EXEC_CONFIG_JSON": json.dumps(_config_payload(config_slug, config), sort_keys=True),
     }
-    if config.num_layers is not None:
-        env["CUDA_EXEC_NUM_LAYERS"] = str(config.num_layers)
-    if config.embedding_size is not None:
-        env["CUDA_EXEC_EMBEDDING_SIZE"] = str(config.embedding_size)
-    if config.num_heads is not None:
-        env["CUDA_EXEC_NUM_HEADS"] = str(config.num_heads)
-    if config.causal is not None:
-        env["CUDA_EXEC_CAUSAL"] = "1" if config.causal else "0"
-    for key, value in config.extra.items():
-        env_key = "CUDA_EXEC_EXTRA_" + _slugify(str(key)).upper().replace(".", "_")
-        env[env_key] = json.dumps(value) if not isinstance(value, str) else value
+
+    for key, value in config.items():
+        if key == "extra" and isinstance(value, dict):
+            for extra_key, extra_value in value.items():
+                env_key = "CUDA_EXEC_EXTRA_" + _slugify(str(extra_key)).upper().replace(".", "_")
+                env[env_key] = json.dumps(extra_value) if not isinstance(extra_value, str) else extra_value
+            continue
+
+        if isinstance(value, (str, int, float, bool)):
+            env_key = "CUDA_EXEC_PARAM_" + _slugify(str(key)).upper().replace(".", "_")
+            if isinstance(value, bool):
+                env[env_key] = "1" if value else "0"
+            else:
+                env[env_key] = str(value)
+
     return env
 
 
 def _config_result_payload(
     *,
     config_slug: str,
-    config: ConfigSpec,
+    config: dict,
     run_result: dict,
     artifacts: List[dict] | None = None,
     correctness: dict | None = None,
@@ -575,7 +578,7 @@ def run_evaluate_task(
     *,
     metadata,
     timeout_seconds: int,
-    configs: Dict[str, ConfigSpec],
+    configs: Dict[str, dict],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
@@ -668,7 +671,7 @@ def run_profile_task(
     *,
     metadata,
     timeout_seconds: int,
-    configs: Dict[str, ConfigSpec],
+    configs: Dict[str, dict],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)

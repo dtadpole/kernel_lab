@@ -467,14 +467,25 @@ The service does not guarantee that an invoked program will remain inside that d
 program itself changes cwd, writes to absolute paths, or spawns child processes with different
 path behavior.
 
-### Test isolation note
+### Test isolation and retention note
 
-For integration tests, the runtime root may be redirected by setting:
+For integration tests or manual validation runs, the runtime root may be redirected by setting:
 
 - `CUDA_EXEC_ROOT=<temporary-directory>`
 
-This allows tests to run against a real uvicorn subprocess while avoiding lingering runtime files
-under the user's normal `~/.cuda_exec` tree.
+Preferred layout for preserved runs:
+
+- place run roots under `~/temp/`
+- use a kebab-case slug plus PID in the run directory name
+- when a temporary uv-managed environment is created there, prefer `<run-dir>/.venv`
+
+Retention policy direction:
+
+- do **not** immediately delete the run environment or intermediate outputs after a successful run
+- preserve request/response logs, service logs, runtime root contents, and temporary `.venv` for later inspection
+- handle cleanup through a separate retention process, for example deleting runs older than 7 days
+
+This keeps recent integration trajectories available without committing them into Git.
 
 ---
 

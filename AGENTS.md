@@ -120,6 +120,8 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - prefer placing temporary test roots under `~/temp/` with a kebab-case slug plus PID in the subfolder name
 - preferred isolation direction: provision the uvicorn Python environment from `cuda_exec/requirements.txt` using `uv`, with the environment itself created under a temporary folder for the test run
 - when using a temp-folder uv-managed environment, prefer naming it `<temp-run-dir>/.venv`
+- preserve run environments and intermediate outputs by default for later inspection; do not rely on immediate deletion after each run
+- cleanup should happen via a separate retention process (for example pruning runs older than 7 days)
 - current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed `.venv` is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 

@@ -147,6 +147,78 @@ All command-style endpoints return the required `metadata` object back in the re
 }
 ```
 
+## CLI scripts
+
+Under `cuda_exec/scripts/` there are now three command-line helpers:
+
+- `compile.py`
+- `evaluate.py`
+- `profile.py`
+
+These scripts are meant to show the exact underlying CUDA Toolkit invocation and can also execute it.
+
+### Compile examples
+
+Show the exact `nvcc` command without executing it:
+
+```bash
+cd /home/centos/kernel_lab
+source cuda_exec/.venv/bin/activate
+python cuda_exec/scripts/compile.py nvcc \
+  --workdir /home/centos/cuda_example \
+  --source vector_add_inline_ptx.cu \
+  --output /tmp/vector_add_inline_ptx.ptx \
+  --mode ptx \
+  --arch native \
+  --dry-run-only
+```
+
+Show the exact `ptxas` command without executing it:
+
+```bash
+python cuda_exec/scripts/compile.py ptxas \
+  --workdir /home/centos/cuda_example \
+  --input build/intermediate/vector_add_inline_ptx.ptx \
+  --output /tmp/vector_add_inline_ptx.cubin \
+  --arch sm_120 \
+  --verbose \
+  --dry-run-only
+```
+
+### Evaluate example
+
+```bash
+python cuda_exec/scripts/evaluate.py \
+  --workdir /home/centos/cuda_example \
+  -- bash -lc './build/bin/vector_add_inline_ptx --bench --warmup 10 --iterations 20'
+```
+
+### Profile examples
+
+Show the exact `ncu` command without executing it:
+
+```bash
+python cuda_exec/scripts/profile.py ncu \
+  --workdir /home/centos/cuda_example \
+  --set-name default \
+  --target-processes all \
+  --export /tmp/vector_add_inline_ptx-ncu \
+  --dry-run-only \
+  -- ./build/bin/vector_add_inline_ptx_profile
+```
+
+Show the exact `nsys` command without executing it:
+
+```bash
+python cuda_exec/scripts/profile.py nsys \
+  --workdir /home/centos/cuda_example \
+  --trace cuda,nvtx,osrt \
+  --output /tmp/vector_add_inline_ptx-nsys \
+  --force-overwrite \
+  --dry-run-only \
+  -- ./build/bin/vector_add_inline_ptx_profile
+```
+
 ## Deployment / local run
 
 Create a dedicated environment for `cuda_exec`:

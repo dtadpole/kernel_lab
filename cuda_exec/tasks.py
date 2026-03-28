@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import List
 
 from fastapi import HTTPException
 
-from cuda_exec.runner import resolve_workspace_bundle, run_generic_command
+from cuda_exec.runner import capture_turn_file, resolve_workspace_bundle, run_generic_command
 
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
 PROFILE_SCRIPT = SCRIPTS_DIR / "profile.sh"
+DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
 
 
 def _absolute_input_path(path_value: str) -> Path:
@@ -57,37 +59,6 @@ def _pick_single_cuda_source(generated: List[Path], original: List[Path]) -> Pat
     )
 
 
-def _default_executable(outputs_path: Path) -> Path:
-    files = [path for path in outputs_path.iterdir() if path.is_file() and path.suffix != ".log"]
-    executable_files = [path for path in files if path.suffix == "" and path.stat().st_mode & 0o111]
-    if len(executable_files) == 1:
-        return executable_files[0]
-    if len(executable_files) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="multiple executable artifacts found in outputs; provide target_files explicitly",
-        )
-    raise HTTPException(
-        status_code=400,
-        detail="no executable artifact found in outputs; compile may need to run first or target_files must be provided",
-    )
-
-
-def _resolve_target_files(target_files: List[str], workspace: dict) -> List[Path]:
-    if target_files:
-        resolved: List[Path] = []
-        for value in target_files:
-            path = Path(value).expanduser()
-            if not path.is_absolute():
-                path = Path(workspace["root_path"]) / path
-            path = path.resolve()
-            if not path.exists():
-                raise HTTPException(status_code=400, detail=f"target file does not exist: {path}")
-            resolved.append(path)
-        return resolved
-    return [_default_executable(Path(workspace["outputs_path"]))]
-
-
 def _unique_paths(values: List[str]) -> List[str]:
     seen: set[str] = set()
     out: List[str] = []
@@ -98,18 +69,73 @@ def _unique_paths(values: List[str]) -> List[str]:
     return out
 
 
+def _build_artifact(*, artifact_id: str, kind: str, path: str, description: str | None = None) -> dict:
+    payload = {
+        "artifact_id": artifact_id,
+        "kind": kind,
+        "path": path,
+    }
+    if description:
+        payload["description"] = description
+    return payload
+
+
+def _write_manifest(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_compile_manifest(workspace: dict) -> dict:
+    manifest_path = Path(workspace["state_path"]) / "compile.json"
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "compile state is missing for this turn: "
+                f"{manifest_path}. Run compile first or use a different turn."
+            ),
+        )
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _artifact_path_from_manifest(workspace: dict, artifact_id: str | None) -> tuple[str, Path, dict]:
+    manifest = _load_compile_manifest(workspace)
+    requested_id = artifact_id or DEFAULT_COMPILE_ARTIFACT_ID
+    for artifact in manifest.get("artifacts", []):
+        if artifact.get("artifact_id") == requested_id:
+            rel_path = artifact["path"]
+            abs_path = (Path(workspace["root_path"]) / rel_path).resolve()
+            if not abs_path.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"artifact path recorded in compile state does not exist: {abs_path}",
+                )
+            return requested_id, abs_path, artifact
+    raise HTTPException(
+        status_code=400,
+        detail=f"artifact_id not found in compile state: {requested_id}",
+    )
+
+
+def _append_file_entry(result: dict, rel_path: str) -> None:
+    existing_paths = {item["path"] for item in result.get("files", [])}
+    file_entry = capture_turn_file(rel_path, result["workspace_path"])
+    if file_entry["path"] not in existing_paths:
+        result.setdefault("files", []).append(file_entry)
+
+
 def run_compile_task(
     *,
     metadata,
     timeout_seconds: int,
     original_files: List[str],
     generated_files: List[str],
-    artifacts: List[str],
     return_files: List[str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     workspace_path = Path(workspace["workspace_path"])
     outputs_path = Path(workspace["outputs_path"])
+    state_path = Path(workspace["state_path"])
 
     copied_original = _copy_inputs(original_files, workspace_path / "original")
     copied_generated = _copy_inputs(generated_files, workspace_path / "generated")
@@ -131,15 +157,42 @@ def run_compile_task(
         workspace_path=str(workspace_path),
         env={},
         timeout_seconds=timeout_seconds,
-        return_files=_unique_paths(
-            [
-                f"outputs/{source.stem}",
-                *(artifacts or []),
-                *(return_files or []),
-            ]
-        ),
+        return_files=_unique_paths([f"outputs/{source.stem}", *(return_files or [])]),
         log_file="logs/compile.log",
     )
+
+    artifacts = [
+        _build_artifact(
+            artifact_id=DEFAULT_COMPILE_ARTIFACT_ID,
+            kind="binary",
+            path=f"outputs/{source.stem}",
+            description="Default executable artifact produced by compile",
+        ),
+        _build_artifact(
+            artifact_id="compile:log",
+            kind="log",
+            path="logs/compile.log",
+            description="Compile log",
+        ),
+        _build_artifact(
+            artifact_id="compile:state",
+            kind="state",
+            path="state/compile.json",
+            description="Compile manifest for this turn",
+        ),
+    ]
+
+    manifest = {
+        "metadata": metadata.model_dump(),
+        "status": "ok" if result["ok"] else "error",
+        "primary_artifact_id": DEFAULT_COMPILE_ARTIFACT_ID,
+        "selected_source": str(source.relative_to(workspace_path)),
+        "artifacts": artifacts,
+    }
+    manifest_path = state_path / "compile.json"
+    _write_manifest(manifest_path, manifest)
+    _append_file_entry(result, "state/compile.json")
+    result["artifacts"] = artifacts
     return result
 
 
@@ -147,51 +200,71 @@ def run_evaluate_task(
     *,
     metadata,
     timeout_seconds: int,
-    target_files: List[str],
+    target_artifact_id: str | None,
     return_files: List[str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
-    targets = _resolve_target_files(target_files, workspace)
-    if len(targets) != 1:
-        raise HTTPException(status_code=400, detail="evaluate expects exactly one target file in this hardened flow")
-    target = targets[0]
+    _, target_path, target_artifact = _artifact_path_from_manifest(workspace, target_artifact_id)
     workspace_path = Path(workspace["workspace_path"])
-    return run_generic_command(
+    result = run_generic_command(
         kind="evaluate",
-        command=[str(target)],
+        command=[str(target_path)],
         workspace_path=str(workspace_path),
         env={},
         timeout_seconds=timeout_seconds,
-        return_files=return_files,
+        return_files=_unique_paths([*(return_files or [])]),
         log_file="logs/evaluate.log",
     )
+
+    artifacts = [
+        _build_artifact(
+            artifact_id="evaluate:log",
+            kind="log",
+            path="logs/evaluate.log",
+            description="Evaluate log",
+        ),
+        _build_artifact(
+            artifact_id="evaluate:state",
+            kind="state",
+            path="state/evaluate.json",
+            description="Evaluate manifest for this turn",
+        ),
+    ]
+    manifest = {
+        "metadata": metadata.model_dump(),
+        "status": "ok" if result["ok"] else "error",
+        "input_artifact_id": target_artifact["artifact_id"],
+        "input_path": target_artifact["path"],
+        "artifacts": artifacts,
+    }
+    _write_manifest(Path(workspace["state_path"]) / "evaluate.json", manifest)
+    _append_file_entry(result, "state/evaluate.json")
+    result["artifacts"] = artifacts
+    return result
 
 
 def run_profile_task(
     *,
     metadata,
     timeout_seconds: int,
-    target_files: List[str],
+    target_artifact_id: str | None,
     return_files: List[str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
-    targets = _resolve_target_files(target_files, workspace)
-    if len(targets) != 1:
-        raise HTTPException(status_code=400, detail="profile expects exactly one target file in this hardened flow")
-    target = targets[0]
+    _, target_path, target_artifact = _artifact_path_from_manifest(workspace, target_artifact_id)
     workspace_path = Path(workspace["workspace_path"])
-    report_prefix = Path(workspace["profiles_path"]) / f"{target.stem}-ncu"
+    report_prefix = Path(workspace["profiles_path"]) / f"{target_path.stem}-ncu"
     command = [
         "/usr/bin/env",
         "bash",
         str(PROFILE_SCRIPT),
         "--target",
-        str(target),
+        str(target_path),
         "--export-prefix",
         str(report_prefix),
     ]
-    report_file = f"profiles/{target.stem}-ncu.ncu-rep"
-    return run_generic_command(
+    report_file = f"profiles/{target_path.stem}-ncu.ncu-rep"
+    result = run_generic_command(
         kind="profile",
         command=command,
         workspace_path=str(workspace_path),
@@ -200,3 +273,36 @@ def run_profile_task(
         return_files=_unique_paths([report_file, *(return_files or [])]),
         log_file="logs/profile.log",
     )
+
+    artifacts = [
+        _build_artifact(
+            artifact_id="profile:ncu_report",
+            kind="profile_report",
+            path=report_file,
+            description="NCU report for the selected executable artifact",
+        ),
+        _build_artifact(
+            artifact_id="profile:log",
+            kind="log",
+            path="logs/profile.log",
+            description="Profile log",
+        ),
+        _build_artifact(
+            artifact_id="profile:state",
+            kind="state",
+            path="state/profile.json",
+            description="Profile manifest for this turn",
+        ),
+    ]
+    manifest = {
+        "metadata": metadata.model_dump(),
+        "status": "ok" if result["ok"] else "error",
+        "input_artifact_id": target_artifact["artifact_id"],
+        "input_path": target_artifact["path"],
+        "profiler": "ncu",
+        "artifacts": artifacts,
+    }
+    _write_manifest(Path(workspace["state_path"]) / "profile.json", manifest)
+    _append_file_entry(result, "state/profile.json")
+    result["artifacts"] = artifacts
+    return result

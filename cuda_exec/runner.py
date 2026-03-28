@@ -62,6 +62,7 @@ def resolve_workspace_bundle(
         "outputs_path": str(turn_root / "outputs"),
         "logs_path": str(turn_root / "logs"),
         "profiles_path": str(turn_root / "profiles"),
+        "state_path": str(turn_root / "state"),
         "tmp_path": str(turn_root / "tmp"),
     }
     for path in bundle.values():
@@ -88,15 +89,16 @@ def _turn_root_from_workspace(workspace_path: Path) -> Path:
     return workspace_path.parent
 
 
-def _resolve_turn_artifact_path(path_value: str, workspace_path: Path) -> Path:
+def resolve_turn_artifact_path(path_value: str, workspace_path: Path) -> Path:
     path = Path(path_value).expanduser()
     if not path.is_absolute():
         path = _turn_root_from_workspace(workspace_path) / path
     return path.resolve()
 
 
-def _capture_file(path_value: str, workspace_path: Path) -> dict:
-    path = _resolve_turn_artifact_path(path_value, workspace_path)
+def capture_turn_file(path_value: str, workspace_path: str) -> dict:
+    workspace = _resolve_existing_directory(workspace_path)
+    path = resolve_turn_artifact_path(path_value, workspace)
     if not path.exists():
         return {
             "path": str(path),
@@ -151,7 +153,7 @@ def _collect_files(paths: List[str], workspace_path: Path) -> List[dict]:
         if value not in seen:
             deduped.append(value)
             seen.add(value)
-    return [_capture_file(value, workspace_path) for value in deduped]
+    return [capture_turn_file(value, str(workspace_path)) for value in deduped]
 
 
 def _run_command(
@@ -186,7 +188,7 @@ def _run_command(
 
     extra_files = list(return_files or [])
     if log_file:
-        log_path = _resolve_turn_artifact_path(log_file, resolved_workspace)
+        log_path = resolve_turn_artifact_path(log_file, resolved_workspace)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_text = (
             f"command: {' '.join(command)}\n"

@@ -22,7 +22,7 @@ class RequestBase(BaseModel):
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
     return_files: List[str] = Field(
         default_factory=list,
-        description="Files to load and return in the response after command execution",
+        description="Additional turn-root-relative files to load and return in the response",
     )
 
 
@@ -35,29 +35,32 @@ class CompileRequest(RequestBase):
         default_factory=list,
         description="Generated/candidate source artifacts for this turn",
     )
-    artifacts: List[str] = Field(
-        default_factory=list,
-        description="Additional compile artifacts to return in the response",
-    )
 
 
 class EvaluateRequest(RequestBase):
-    target_files: List[str] = Field(
-        default_factory=list,
-        description="Target artifacts to evaluate; if omitted, use the convention default",
+    target_artifact_id: Optional[str] = Field(
+        default=None,
+        description="Optional artifact id override. Defaults to compile:primary_binary",
     )
 
 
 class ProfileRequest(RequestBase):
-    target_files: List[str] = Field(
-        default_factory=list,
-        description="Target artifacts to profile with the hardened profiler flow",
+    target_artifact_id: Optional[str] = Field(
+        default=None,
+        description="Optional artifact id override. Defaults to compile:primary_binary",
     )
 
 
 class ExecuteRequest(RequestBase):
     command: List[str] = Field(..., min_length=1, description="Executable plus arguments")
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
+
+
+class ArtifactRef(BaseModel):
+    artifact_id: str
+    kind: str
+    path: str
+    description: Optional[str] = None
 
 
 class CommandOutput(BaseModel):
@@ -84,6 +87,7 @@ class CommandResponse(BaseModel):
     workspace_path: str
     returncode: int
     duration_seconds: float
+    artifacts: List[ArtifactRef] = Field(default_factory=list)
     output: CommandOutput
     files: List[ResponseFile] = Field(default_factory=list)
 

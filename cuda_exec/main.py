@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from cuda_exec.models import (
+    ArtifactRef,
     CommandOutput,
     CommandResponse,
     CompileRequest,
@@ -32,6 +33,7 @@ def _to_response(metadata, result: dict) -> CommandResponse:
         workspace_path=result["workspace_path"],
         returncode=result["returncode"],
         duration_seconds=result["duration_seconds"],
+        artifacts=[ArtifactRef(**item) for item in result.get("artifacts", [])],
         output=CommandOutput(**result["output"]),
         files=[ResponseFile(**item) for item in result["files"]],
     )
@@ -44,7 +46,6 @@ def compile_endpoint(request: CompileRequest) -> CommandResponse:
         timeout_seconds=request.timeout_seconds,
         original_files=request.original_files,
         generated_files=request.generated_files,
-        artifacts=request.artifacts,
         return_files=request.return_files,
     )
     return _to_response(request.metadata, result)
@@ -55,7 +56,7 @@ def evaluate_endpoint(request: EvaluateRequest) -> CommandResponse:
     result = run_evaluate_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        target_files=request.target_files,
+        target_artifact_id=request.target_artifact_id,
         return_files=request.return_files,
     )
     return _to_response(request.metadata, result)
@@ -66,7 +67,7 @@ def profile_endpoint(request: ProfileRequest) -> CommandResponse:
     result = run_profile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        target_files=request.target_files,
+        target_artifact_id=request.target_artifact_id,
         return_files=request.return_files,
     )
     return _to_response(request.metadata, result)
@@ -82,6 +83,6 @@ def execute_endpoint(request: ExecuteRequest) -> CommandResponse:
         env=request.env,
         timeout_seconds=request.timeout_seconds,
         return_files=request.return_files,
-        log_file=f"{workspace['logs_path']}/execute.log",
+        log_file="logs/execute.log",
     )
     return _to_response(request.metadata, result)

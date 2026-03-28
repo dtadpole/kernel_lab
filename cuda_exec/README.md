@@ -56,6 +56,7 @@ workspace/
 outputs/
 logs/
 profiles/
+state/
 tmp/
 ```
 
@@ -76,9 +77,20 @@ Relative artifact paths such as:
 - `outputs/...`
 - `logs/...`
 - `profiles/...`
+- `state/...`
 - `tmp/...`
 
 are interpreted relative to the turn root, not relative to `workspace/`.
+
+## Simplified interface design
+
+The interface is now intentionally asymmetric:
+
+- `compile` accepts source inputs and produces shared turn state
+- `evaluate` and `profile` default to consuming that shared compile state
+- `execute` remains the only general-purpose command interface
+
+This is meant to reduce redundant parameter passing for agent callers.
 
 ## Request model (current hardened direction)
 
@@ -97,8 +109,7 @@ Convention-driven. No free-form command and no per-request environment variables
   "timeout_seconds": 300,
   "original_files": ["/abs/path/baseline_kernel.cu"],
   "generated_files": ["/abs/path/candidate_kernel.cu"],
-  "artifacts": ["outputs/candidate_kernel"],
-  "return_files": ["logs/compile.log"]
+  "return_files": []
 }
 ```
 
@@ -108,11 +119,19 @@ Current compile convention:
 - choose exactly one `.cu` file, preferring `generated_files` over `original_files`
 - invoke the hardened Bash script:
   - `/home/centos/kernel_lab/cuda_exec/scripts/compile.sh`
-- the Bash script then calls:
+- the Bash script calls:
 
 ```text
 /usr/local/cuda/bin/nvcc -arch=native -std=c++17 -O3 -lineinfo <absolute_source> -o <turn_root>/outputs/<stem>
 ```
+
+Compile also writes shared turn state to:
+
+- `state/compile.json`
+
+That manifest includes the default artifact id:
+
+- `compile:primary_binary`
 
 ### `EvaluateRequest`
 Convention-driven. No free-form command and no per-request environment variables.
@@ -127,13 +146,14 @@ Convention-driven. No free-form command and no per-request environment variables
     "turn": 12
   },
   "timeout_seconds": 300,
-  "target_files": ["outputs/candidate_kernel"],
+  "target_artifact_id": null,
   "return_files": []
 }
 ```
 
 Current evaluate convention:
-- if `target_files` is empty, use the single executable artifact found in `outputs/`
+- if `target_artifact_id` is omitted, use `compile:primary_binary`
+- resolve the target from `state/compile.json`
 - execute exactly one target artifact
 - evaluate remains Python-driven
 
@@ -150,16 +170,17 @@ Convention-driven. Hardened to NCU in the current version.
     "turn": 12
   },
   "timeout_seconds": 1800,
-  "target_files": ["outputs/candidate_kernel"],
+  "target_artifact_id": null,
   "return_files": []
 }
 ```
 
 Current profile convention:
-- if `target_files` is empty, use the single executable artifact found in `outputs/`
+- if `target_artifact_id` is omitted, use `compile:primary_binary`
+- resolve the target from `state/compile.json`
 - invoke the hardened Bash script:
   - `/home/centos/kernel_lab/cuda_exec/scripts/profile.sh`
-- the Bash script then calls:
+- the Bash script calls:
 
 ```text
 /usr/local/cuda/bin/ncu --set default --target-processes all --force-overwrite --export <turn_root>/profiles/<stem>-ncu <absolute_target>
@@ -189,22 +210,66 @@ Current execute rule:
 
 ## Response contract (fixed structure)
 
-Command-style responses contain two structured sections:
+Command-style responses contain three important structured sections:
 
-1. `output`
+1. `artifacts`
+   - structured artifact refs that the agent can reuse
+2. `output`
    - `stdout`
    - `stderr`
-
-2. `files`
+3. `files`
    - structured returned files with path, name, encoding, and content
 
-If the caller wants files returned, it should specify them in `return_files`.
-For `compile`, `artifacts` are also collected and returned as files.
+If the caller wants additional files returned, it should specify them in `return_files`.
 
 Current file capture behavior:
 - text files are returned as UTF-8 when possible
 - binary files are returned as Base64
 - files larger than 1 MiB are truncated in the response and marked with `truncated: true`
+
+### Example response shape
+
+```json
+{
+  "metadata": {
+    "run_tag": "blackwell_agent_a",
+    "version": "v1",
+    "direction_id": 3,
+    "direction_slug": "warp_specialized_async_pipeline",
+    "turn": 12
+  },
+  "ok": true,
+  "kind": "compile",
+  "command": ["/usr/bin/env", "bash", "/home/centos/kernel_lab/cuda_exec/scripts/compile.sh", "--source", "...", "--output", "..."],
+  "workspace_path": "/home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/workspace",
+  "returncode": 0,
+  "duration_seconds": 0.123,
+  "artifacts": [
+    {
+      "artifact_id": "compile:primary_binary",
+      "kind": "binary",
+      "path": "outputs/candidate_kernel",
+      "description": "Default executable artifact produced by compile"
+    }
+  ],
+  "output": {
+    "stdout": "...",
+    "stderr": "..."
+  },
+  "files": [
+    {
+      "path": "/home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/state/compile.json",
+      "name": "compile.json",
+      "exists": true,
+      "size_bytes": 512,
+      "encoding": "utf8",
+      "truncated": false,
+      "content": "{...}",
+      "error": null
+    }
+  ]
+}
+```
 
 ## API surface (v0)
 
@@ -212,13 +277,13 @@ Current file capture behavior:
 Simple health check.
 
 ### `POST /compile`
-Runs the hardened compile flow described above.
+Runs the hardened compile flow and writes `state/compile.json`.
 
 ### `POST /evaluate`
-Runs the hardened evaluate flow described above.
+Runs the hardened evaluate flow. Defaults to `compile:primary_binary` from `state/compile.json`.
 
 ### `POST /profile`
-Runs the hardened profile flow described above (currently NCU only).
+Runs the hardened profile flow. Defaults to `compile:primary_binary` from `state/compile.json`.
 
 ### `POST /execute`
 Runs a caller-specified CUDA Toolkit command.
@@ -252,8 +317,7 @@ python cuda_exec/scripts/evaluate.py \
   --version v1 \
   --direction-id 3 \
   --direction-slug warp_specialized_async_pipeline \
-  --turn 12 \
-  --target-file outputs/candidate_kernel
+  --turn 12
 ```
 
 ### Profile example

@@ -66,6 +66,7 @@ workspace/
 outputs/
 logs/
 profiles/
+state/
 tmp/
 ```
 
@@ -84,6 +85,8 @@ Current execution cwd is:
 - `compile` is implemented through the Bash script `/home/centos/kernel_lab/cuda_exec/scripts/compile.sh`.
 - `profile` is implemented through the Bash script `/home/centos/kernel_lab/cuda_exec/scripts/profile.sh`.
 - `evaluate` remains Python-driven.
+- `compile` writes shared turn state to `state/compile.json`.
+- `evaluate` and `profile` default to consuming `compile:primary_binary` from `state/compile.json` unless an explicit artifact id override is provided.
 
 ### 5. `cuda_exec` response structure is fixed
 
@@ -91,6 +94,7 @@ Command-style responses return:
 
 - `metadata`
 - command status fields (`ok`, `kind`, `command`, `workspace_path`, `returncode`, `duration_seconds`)
+- `artifacts[]` for structured reusable artifact references
 - `output.stdout`
 - `output.stderr`
 - `files[]` for requested returned files

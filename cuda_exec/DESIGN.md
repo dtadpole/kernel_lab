@@ -215,7 +215,6 @@ logs/compile.attempt_001.stderr
 
 state/evaluate.attempt_001.json
 state/profile.attempt_001.json
-state/execute.attempt_001.json
 ```
 
 For config-specific stage runs, logs and kept artifacts carry both the attempt and config identity.
@@ -281,9 +280,8 @@ Process output:
 - `logs/execute.attempt_###.stdout`
 - `logs/execute.attempt_###.stderr`
 
-Workflow record:
-
-- `state/execute.attempt_###.json`
+`execute` does **not** write a stage state file.
+It is intentionally treated as a tool-style execution path, not a workflow-record stage.
 
 If `execute` generates meaningful kept results, those files should be written explicitly to `artifacts/`.
 Scratch/intermediate files can remain in `workspace/`.
@@ -294,6 +292,9 @@ Scratch/intermediate files can remain in `workspace/`.
 
 Public API responses should stay stage-specific and minimal.
 The response is a **summary**, not a mirror of the full runtime directory.
+
+`state` is internal-first. It is kept for compile/evaluate/profile bookkeeping and inspection,
+but it should not be part of the default public response.
 
 ### Compile response
 
@@ -306,7 +307,6 @@ Return only:
 - `log_path`
 - `stdout_path`
 - `stderr_path`
-- `state_path`
 
 ### Evaluate response
 
@@ -315,7 +315,6 @@ Return only:
 - `metadata`
 - `ok`
 - `attempt`
-- `state_path`
 - `results[]`
 
 Each evaluate result contains:
@@ -325,7 +324,6 @@ Each evaluate result contains:
 - `log_path`
 - `stdout_path`
 - `stderr_path`
-- `config_state_path`
 
 ### Profile response
 
@@ -334,7 +332,6 @@ Return only:
 - `metadata`
 - `ok`
 - `attempt`
-- `state_path`
 - `results[]`
 
 Each profile result contains:
@@ -345,7 +342,6 @@ Each profile result contains:
 - `log_path`
 - `stdout_path`
 - `stderr_path`
-- `config_state_path`
 
 ### Execute response
 
@@ -357,7 +353,6 @@ Return only:
 - `log_path`
 - `stdout_path`
 - `stderr_path`
-- `state_path`
 
 ### What should not be exposed in the default public response
 

@@ -159,8 +159,23 @@ def _existing_attempts(workspace: dict, stage: str) -> List[int]:
     return sorted(out)
 
 
-def _next_attempt(workspace: dict, stage: str) -> int:
-    attempts = _existing_attempts(workspace, stage)
+def _existing_log_attempts(workspace: dict, stage: str) -> List[int]:
+    logs_path = Path(workspace["logs_path"])
+    pattern = re.compile(rf"^{re.escape(stage)}\.attempt_(\d{{3}})\.log$")
+    out: List[int] = []
+    if not logs_path.exists():
+        return out
+    for item in logs_path.iterdir():
+        if not item.is_file():
+            continue
+        match = pattern.match(item.name)
+        if match:
+            out.append(int(match.group(1)))
+    return sorted(out)
+
+
+def _next_attempt(workspace: dict, stage: str, source: str = "state") -> int:
+    attempts = _existing_attempts(workspace, stage) if source == "state" else _existing_log_attempts(workspace, stage)
     return (max(attempts) if attempts else 0) + 1
 
 
@@ -668,7 +683,7 @@ def run_execute_task(
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     workspace_path = Path(workspace["workspace_path"])
-    attempt = _next_attempt(workspace, "execute")
+    attempt = _next_attempt(workspace, "execute", source="logs")
     started = time.perf_counter()
 
     run_result = run_cuda_command(
@@ -680,39 +695,14 @@ def run_execute_task(
         log_file=_stage_log_rel("execute", attempt),
     )
 
-    manifest = _workflow_payload(
-        metadata,
-        stage="execute",
-        attempt=attempt,
-        status="ok" if run_result["ok"] else "error",
-    )
-    manifest.update(
-        {
-            "command": run_result["command"],
-            "env": env,
-            "artifacts": [
-                _build_artifact(
-                    artifact_id="execute:state",
-                    kind="state",
-                    path=_stage_manifest_rel("execute", attempt),
-                    description="Execute manifest for this turn and attempt",
-                )
-            ],
-        }
-    )
-    manifest_path = _stage_manifest_path(workspace, "execute", attempt)
-    _write_manifest(manifest_path, manifest)
-    stage_files = list(run_result["files"])
-    stage_files.append(capture_turn_file(_stage_manifest_rel("execute", attempt), str(workspace_path)))
-
     return _finalize_stage_result(
         metadata=metadata,
         workspace=workspace,
         kind="execute",
         attempt=attempt,
         command=run_result["command"],
-        stage_artifacts=manifest["artifacts"],
-        stage_files=stage_files,
+        stage_artifacts=[],
+        stage_files=list(run_result["files"]),
         duration_seconds=time.perf_counter() - started,
         returncode=run_result["returncode"],
         ok=run_result["ok"],

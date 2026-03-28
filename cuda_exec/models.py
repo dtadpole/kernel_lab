@@ -82,7 +82,6 @@ class CompileResponse(StageResponseBase):
     log_path: str
     stdout_path: str
     stderr_path: str
-    state_path: str
 
 
 class ConfigStageResult(BaseModel):
@@ -91,11 +90,9 @@ class ConfigStageResult(BaseModel):
     log_path: str
     stdout_path: str
     stderr_path: str
-    config_state_path: str
 
 
 class EvaluateResponse(StageResponseBase):
-    state_path: str
     results: List[ConfigStageResult] = Field(default_factory=list)
 
 
@@ -104,7 +101,6 @@ class ProfileConfigResult(ConfigStageResult):
 
 
 class ProfileResponse(StageResponseBase):
-    state_path: str
     results: List[ProfileConfigResult] = Field(default_factory=list)
 
 
@@ -112,4 +108,3 @@ class ExecuteResponse(StageResponseBase):
     log_path: str
     stdout_path: str
     stderr_path: str
-    state_path: str

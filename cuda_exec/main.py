@@ -46,10 +46,6 @@ def _config_suffix(config_id: str) -> str:
     return f"config_{_slugify(config_id)}"
 
 
-def _stage_state_path(stage: str, attempt: int) -> str:
-    return f"state/{stage}.{_attempt_tag(attempt)}.json"
-
-
 def _stage_log_base(stage: str, attempt: int, config_id: str | None = None) -> str:
     base = f"logs/{stage}.{_attempt_tag(attempt)}"
     if config_id is not None:
@@ -89,7 +85,6 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
         log_path=f"{log_base}.log",
         stdout_path=f"{log_base}.stdout",
         stderr_path=f"{log_base}.stderr",
-        state_path=_stage_state_path("compile", attempt),
     )
 
 
@@ -108,9 +103,6 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
             log_path=f"{_stage_log_base('evaluate', attempt, item['config']['config_id'])}.log",
             stdout_path=f"{_stage_log_base('evaluate', attempt, item['config']['config_id'])}.stdout",
             stderr_path=f"{_stage_log_base('evaluate', attempt, item['config']['config_id'])}.stderr",
-            config_state_path=(
-                f"state/configs/evaluate.{_attempt_tag(attempt)}.{_config_suffix(item['config']['config_id'])}.json"
-            ),
         )
         for item in result.get("config_results", [])
     ]
@@ -118,7 +110,6 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
         metadata=request.metadata,
         ok=result["ok"],
         attempt=attempt,
-        state_path=_stage_state_path("evaluate", attempt),
         results=items,
     )
 
@@ -139,9 +130,6 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
             log_path=f"{_stage_log_base('profile', attempt, item['config']['config_id'])}.log",
             stdout_path=f"{_stage_log_base('profile', attempt, item['config']['config_id'])}.stdout",
             stderr_path=f"{_stage_log_base('profile', attempt, item['config']['config_id'])}.stderr",
-            config_state_path=(
-                f"state/configs/profile.{_attempt_tag(attempt)}.{_config_suffix(item['config']['config_id'])}.json"
-            ),
         )
         for item in result.get("config_results", [])
     ]
@@ -149,7 +137,6 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         metadata=request.metadata,
         ok=result["ok"],
         attempt=attempt,
-        state_path=_stage_state_path("profile", attempt),
         results=items,
     )
 
@@ -171,5 +158,4 @@ def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
         log_path=f"{log_base}.log",
         stdout_path=f"{log_base}.stdout",
         stderr_path=f"{log_base}.stderr",
-        state_path=_stage_state_path("execute", attempt),
     )

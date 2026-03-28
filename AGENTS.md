@@ -111,6 +111,13 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - `cuda_exec/runner.py` documents runtime-layout semantics
 - `cuda_exec/main.py` stays thin and keeps only lightweight endpoint/helper docstrings
 
+### 6. `cuda_exec/tests` is integration-only
+
+- `cuda_exec/tests/` is reserved for end-to-end integration tests
+- do not put unit tests there
+- tests should start the service and call HTTP interfaces with realistic payloads
+- expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
+
 ## Owner
 
 - d.t.p

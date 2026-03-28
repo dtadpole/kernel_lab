@@ -19,6 +19,7 @@ kernel_lab/
     scripts/
     requirements.txt
     README.md
+    DESIGN.md
   AGENTS.md
   LICENSE
   .gitignore
@@ -29,8 +30,7 @@ kernel_lab/
 ### 1. `cuda_exec` owns its own Python environment
 
 - `cuda_exec` manages its own Python dependencies and its own `uv` environment.
-- the repo root does **not** define a shared `uv` / `venv` environment for all future components.
-- future agent-side environment management can live in a separate directory and be managed independently.
+- the repo root does **not** define a shared Python environment for all future components.
 
 ### 2. `cuda_exec` request metadata is mandatory
 
@@ -43,20 +43,18 @@ Within `metadata`, the required fields are:
 - `direction_slug`
 - `turn`
 
-### 3. `cuda_exec` does not accept an explicit working directory
-
-`cuda_exec` resolves execution paths by convention from metadata instead of accepting a caller-specified working directory.
+### 3. `cuda_exec` uses a fixed turn-root convention
 
 The root convention is:
 
 ```text
-~/.code_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
+~/.cuda_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
 ```
 
 On this machine, that means:
 
 ```text
-/home/centos/.code_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
+/home/centos/.cuda_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
 ```
 
 Within each turn directory, `cuda_exec` creates these fixed subdirectories:
@@ -76,30 +74,58 @@ Current execution cwd is:
 .../turn_<turn>/workspace/
 ```
 
-### 4. `cuda_exec` is convention-driven for compile/evaluate/profile
+### 4. `cuda_exec` workflow is convention-driven and immutable per turn
 
-- `compile`, `evaluate`, and `profile` are hardened flows and should not expose free-form command/env configuration in the API.
-- `execute` is the only command-style API that currently accepts a caller-provided command and environment variables.
-- `profile` is currently hardened to NCU.
-- `compile` stages original/generated files into the metadata-derived workspace and compiles exactly one `.cu` file with a fixed `nvcc` convention.
-- `compile` is implemented through the Bash script `/home/centos/kernel_lab/cuda_exec/scripts/compile.sh`.
-- `profile` is implemented through the Bash script `/home/centos/kernel_lab/cuda_exec/scripts/profile.sh`.
-- `evaluate` remains Python-driven.
-- `compile` writes shared turn state to `state/compile.json`.
-- `evaluate` and `profile` default to consuming `compile:primary_binary` from `state/compile.json` unless an explicit artifact id override is provided.
-- after a successful `compile`, callers should not need to resend `original_files`, `generated_files`, or output binary paths for normal `evaluate` / `profile` calls in the same metadata scope.
-- each stage still writes its own outputs (`logs/*`, `profiles/*`, `state/*`) and returns its own structured response.
+- `compile` must run first for a turn.
+- `compile` runs exactly once per turn.
+- `evaluate` and `profile` are only valid after compile state exists for that turn.
+- if new files are uploaded after `compile`, that work must move to a new turn.
+- old turns are immutable and should not be modified in place.
+- `execute` remains the general-purpose CUDA-tool command endpoint for special cases only.
 
-### 5. `cuda_exec` response structure is fixed
+### 5. `cuda_exec` stage outputs are fixed by convention
+
+The caller does not choose target artifacts or return-file sets in V0.
+
+#### Compile returns
+
+- primary binary in `outputs/<stem>`
+- `logs/compile.log`
+- `logs/compile.stdout`
+- `logs/compile.stderr`
+- `state/compile.json`
+
+#### Evaluate returns
+
+- `logs/evaluate.log`
+- `logs/evaluate.stdout`
+- `logs/evaluate.stderr`
+- `state/evaluate.json`
+
+#### Profile returns
+
+- `profiles/<stem>-ncu.ncu-rep`
+- `logs/profile.log`
+- `logs/profile.stdout`
+- `logs/profile.stderr`
+- `state/profile.json`
+
+#### Execute returns
+
+- `logs/execute.log`
+- `logs/execute.stdout`
+- `logs/execute.stderr`
+
+### 6. `cuda_exec` response structure is fixed
 
 Command-style responses return:
 
 - `metadata`
-- command status fields (`ok`, `kind`, `command`, `workspace_path`, `returncode`, `duration_seconds`)
-- `artifacts[]` for structured reusable artifact references
+- command status fields (`ok`, `kind`, `command`, `turn_root`, `workspace_path`, `returncode`, `duration_seconds`)
+- `artifacts[]` for structured output description
 - `output.stdout`
 - `output.stderr`
-- `files[]` for requested returned files
+- `files[]` for convention-returned files
 
 ## Owner
 

@@ -14,11 +14,9 @@ from cuda_exec.tasks import run_evaluate_task  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Hardened evaluate helper for cuda_exec. Evaluates the default compile artifact unless an artifact id override is given.",
+        description="Hardened evaluate helper for cuda_exec. Compile must already have run once for this turn.",
     )
     add_metadata_args(parser)
-    parser.add_argument("--target-artifact-id", default=None, help="Optional artifact id override")
-    parser.add_argument("--return-file", action="append", default=[], help="Additional file to return")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds")
     args = parser.parse_args()
 
@@ -32,8 +30,6 @@ def main() -> int:
     result = run_evaluate_task(
         metadata=metadata,
         timeout_seconds=args.timeout,
-        target_artifact_id=args.target_artifact_id,
-        return_files=args.return_file,
     )
     print(json.dumps(result, indent=2))
     return 0 if result["ok"] else result["returncode"]

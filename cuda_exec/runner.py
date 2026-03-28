@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
 CUDA_TOOLKIT_BIN = CUDA_TOOLKIT_ROOT / "bin"
-CODE_EXEC_ROOT = Path.home() / ".code_exec"
+CUDA_EXEC_ROOT = Path.home() / ".cuda_exec"
 MAX_CAPTURE_BYTES = 1024 * 1024
 SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -50,7 +50,7 @@ def resolve_workspace_bundle(
         raise HTTPException(status_code=400, detail="turn must be >= 0")
 
     turn_root = (
-        CODE_EXEC_ROOT
+        CUDA_EXEC_ROOT
         / safe_run_tag
         / safe_version
         / f"{direction_id}_{safe_direction_slug}"
@@ -156,6 +156,10 @@ def _collect_files(paths: List[str], workspace_path: Path) -> List[dict]:
     return [capture_turn_file(value, str(workspace_path)) for value in deduped]
 
 
+def _relative_to_turn_root(path: Path, workspace_path: Path) -> str:
+    return str(path.relative_to(_turn_root_from_workspace(workspace_path)))
+
+
 def _run_command(
     *,
     kind: str,
@@ -190,15 +194,28 @@ def _run_command(
     if log_file:
         log_path = resolve_turn_artifact_path(log_file, resolved_workspace)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path = log_path.with_suffix(".stdout")
+        stderr_path = log_path.with_suffix(".stderr")
+
         log_text = (
             f"command: {' '.join(command)}\n"
             f"returncode: {completed.returncode}\n"
+            f"stdout_file: {stdout_path.name}\n"
+            f"stderr_file: {stderr_path.name}\n"
             f"--- stdout ---\n{completed.stdout}\n"
             f"--- stderr ---\n{completed.stderr}\n"
         )
         log_path.write_text(log_text, encoding="utf-8")
-        relative_log = str(log_path.relative_to(_turn_root_from_workspace(resolved_workspace)))
-        extra_files.append(relative_log)
+        stdout_path.write_text(completed.stdout, encoding="utf-8")
+        stderr_path.write_text(completed.stderr, encoding="utf-8")
+
+        extra_files.extend(
+            [
+                _relative_to_turn_root(log_path, resolved_workspace),
+                _relative_to_turn_root(stdout_path, resolved_workspace),
+                _relative_to_turn_root(stderr_path, resolved_workspace),
+            ]
+        )
 
     duration = time.perf_counter() - started
     files = _collect_files(extra_files, resolved_workspace)
@@ -206,6 +223,7 @@ def _run_command(
         "ok": completed.returncode == 0,
         "kind": kind,
         "command": command,
+        "turn_root": str(_turn_root_from_workspace(resolved_workspace)),
         "workspace_path": str(resolved_workspace),
         "returncode": completed.returncode,
         "duration_seconds": duration,

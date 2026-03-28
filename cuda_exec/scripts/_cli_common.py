@@ -58,8 +58,8 @@ def emit_result(result: dict, *, as_json: bool = False) -> None:
 
 
 def add_metadata_args(parser) -> None:
-    parser.add_argument("--run-tag", required=True, help="Run namespace tag used under ~/.code_exec")
-    parser.add_argument("--version", required=True, help="Version component used under ~/.code_exec")
+    parser.add_argument("--run-tag", required=True, help="Run namespace tag used under ~/.cuda_exec")
+    parser.add_argument("--version", required=True, help="Version component used under ~/.cuda_exec")
     parser.add_argument("--direction-id", type=int, required=True, help="Direction id")
     parser.add_argument("--direction-slug", required=True, help="Direction slug")
     parser.add_argument("--turn", type=int, required=True, help="Turn number")

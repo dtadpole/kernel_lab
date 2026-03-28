@@ -85,22 +85,26 @@ def _write_manifest(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _compile_manifest_path(workspace: dict) -> Path:
+    return Path(workspace["state_path"]) / "compile.json"
+
+
 def _load_compile_manifest(workspace: dict) -> dict:
-    manifest_path = Path(workspace["state_path"]) / "compile.json"
+    manifest_path = _compile_manifest_path(workspace)
     if not manifest_path.exists():
         raise HTTPException(
             status_code=400,
             detail=(
-                "compile state is missing for this turn: "
-                f"{manifest_path}. Run compile first or use a different turn."
+                "Workflow violation: compile must run first for this turn before evaluate/profile. "
+                f"Missing compile state: {manifest_path}. Start with /compile, or use a new turn."
             ),
         )
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def _artifact_path_from_manifest(workspace: dict, artifact_id: str | None) -> tuple[str, Path, dict]:
+def _primary_artifact_from_manifest(workspace: dict) -> tuple[Path, dict]:
     manifest = _load_compile_manifest(workspace)
-    requested_id = artifact_id or DEFAULT_COMPILE_ARTIFACT_ID
+    requested_id = manifest.get("primary_artifact_id") or DEFAULT_COMPILE_ARTIFACT_ID
     for artifact in manifest.get("artifacts", []):
         if artifact.get("artifact_id") == requested_id:
             rel_path = artifact["path"]
@@ -110,10 +114,10 @@ def _artifact_path_from_manifest(workspace: dict, artifact_id: str | None) -> tu
                     status_code=400,
                     detail=f"artifact path recorded in compile state does not exist: {abs_path}",
                 )
-            return requested_id, abs_path, artifact
+            return abs_path, artifact
     raise HTTPException(
         status_code=400,
-        detail=f"artifact_id not found in compile state: {requested_id}",
+        detail=f"compile state is missing its primary artifact entry: {requested_id}",
     )
 
 
@@ -124,87 +128,148 @@ def _append_file_entry(result: dict, rel_path: str) -> None:
         result.setdefault("files", []).append(file_entry)
 
 
+def _stage_default_files(kind: str, extras: List[str] | None = None) -> List[str]:
+    defaults = [
+        f"logs/{kind}.log",
+        f"logs/{kind}.stdout",
+        f"logs/{kind}.stderr",
+        f"state/{kind}.json",
+    ]
+    if extras:
+        defaults.extend(extras)
+    return _unique_paths(defaults)
+
+
+def _workflow_compile_stub(metadata, *, status: str, detail: str) -> dict:
+    return {
+        "metadata": metadata.model_dump(),
+        "workflow": {
+            "compile_required_first": True,
+            "compile_once_per_turn": True,
+            "new_inputs_require_new_turn": True,
+            "turns_are_immutable": True,
+        },
+        "status": status,
+        "detail": detail,
+        "artifacts": [],
+    }
+
+
 def run_compile_task(
     *,
     metadata,
     timeout_seconds: int,
     original_files: List[str],
     generated_files: List[str],
-    return_files: List[str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     workspace_path = Path(workspace["workspace_path"])
     outputs_path = Path(workspace["outputs_path"])
     state_path = Path(workspace["state_path"])
+    manifest_path = _compile_manifest_path(workspace)
 
-    copied_original = _copy_inputs(original_files, workspace_path / "original")
-    copied_generated = _copy_inputs(generated_files, workspace_path / "generated")
-    source = _pick_single_cuda_source(copied_generated, copied_original)
+    if manifest_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Workflow violation: compile may run only once per turn. "
+                "If you have new files or want to retry with different inputs, start a new turn."
+            ),
+        )
 
-    binary_output = outputs_path / source.stem
-    command = [
-        "/usr/bin/env",
-        "bash",
-        str(COMPILE_SCRIPT),
-        "--source",
-        str(source),
-        "--output",
-        str(binary_output),
-    ]
-    result = run_generic_command(
-        kind="compile",
-        command=command,
-        workspace_path=str(workspace_path),
-        env={},
-        timeout_seconds=timeout_seconds,
-        return_files=_unique_paths([f"outputs/{source.stem}", *(return_files or [])]),
-        log_file="logs/compile.log",
+    _write_manifest(
+        manifest_path,
+        _workflow_compile_stub(
+            metadata,
+            status="running",
+            detail="compile has started for this turn",
+        ),
     )
 
-    artifacts = [
-        _build_artifact(
-            artifact_id=DEFAULT_COMPILE_ARTIFACT_ID,
-            kind="binary",
-            path=f"outputs/{source.stem}",
-            description="Default executable artifact produced by compile",
-        ),
-        _build_artifact(
-            artifact_id="compile:log",
-            kind="log",
-            path="logs/compile.log",
-            description="Compile log",
-        ),
-        _build_artifact(
-            artifact_id="compile:state",
-            kind="state",
-            path="state/compile.json",
-            description="Compile manifest for this turn",
-        ),
-    ]
+    try:
+        copied_original = _copy_inputs(original_files, workspace_path / "original")
+        copied_generated = _copy_inputs(generated_files, workspace_path / "generated")
+        source = _pick_single_cuda_source(copied_generated, copied_original)
 
-    manifest = {
-        "metadata": metadata.model_dump(),
-        "status": "ok" if result["ok"] else "error",
-        "primary_artifact_id": DEFAULT_COMPILE_ARTIFACT_ID,
-        "selected_source": str(source.relative_to(workspace_path)),
-        "artifacts": artifacts,
-    }
-    manifest_path = state_path / "compile.json"
-    _write_manifest(manifest_path, manifest)
-    _append_file_entry(result, "state/compile.json")
-    result["artifacts"] = artifacts
-    return result
+        binary_output = outputs_path / source.stem
+        command = [
+            "/usr/bin/env",
+            "bash",
+            str(COMPILE_SCRIPT),
+            "--source",
+            str(source),
+            "--output",
+            str(binary_output),
+        ]
+        result = run_generic_command(
+            kind="compile",
+            command=command,
+            workspace_path=str(workspace_path),
+            env={},
+            timeout_seconds=timeout_seconds,
+            return_files=_stage_default_files("compile", [f"outputs/{source.stem}"]),
+            log_file="logs/compile.log",
+        )
+
+        artifacts = [
+            _build_artifact(
+                artifact_id=DEFAULT_COMPILE_ARTIFACT_ID,
+                kind="binary",
+                path=f"outputs/{source.stem}",
+                description="Default executable artifact produced by compile",
+            ),
+            _build_artifact(
+                artifact_id="compile:log",
+                kind="log",
+                path="logs/compile.log",
+                description="Compile log",
+            ),
+            _build_artifact(
+                artifact_id="compile:state",
+                kind="state",
+                path="state/compile.json",
+                description="Compile manifest for this turn",
+            ),
+        ]
+
+        manifest = {
+            "metadata": metadata.model_dump(),
+            "workflow": {
+                "compile_required_first": True,
+                "compile_once_per_turn": True,
+                "new_inputs_require_new_turn": True,
+                "turns_are_immutable": True,
+            },
+            "status": "ok" if result["ok"] else "error",
+            "selected_source": str(source.relative_to(workspace_path)),
+            "primary_artifact_id": DEFAULT_COMPILE_ARTIFACT_ID,
+            "artifacts": artifacts,
+        }
+        _write_manifest(manifest_path, manifest)
+        _append_file_entry(result, "state/compile.json")
+        result["artifacts"] = artifacts
+        return result
+    except HTTPException as exc:
+        _write_manifest(
+            manifest_path,
+            _workflow_compile_stub(metadata, status="error", detail=str(exc.detail)),
+        )
+        raise
+    except Exception as exc:
+        _write_manifest(
+            manifest_path,
+            _workflow_compile_stub(metadata, status="error", detail=str(exc)),
+        )
+        raise
 
 
 def run_evaluate_task(
     *,
     metadata,
     timeout_seconds: int,
-    target_artifact_id: str | None,
-    return_files: List[str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
-    _, target_path, target_artifact = _artifact_path_from_manifest(workspace, target_artifact_id)
+    target_path, target_artifact = _primary_artifact_from_manifest(workspace)
     workspace_path = Path(workspace["workspace_path"])
     result = run_generic_command(
         kind="evaluate",
@@ -212,7 +277,7 @@ def run_evaluate_task(
         workspace_path=str(workspace_path),
         env={},
         timeout_seconds=timeout_seconds,
-        return_files=_unique_paths([*(return_files or [])]),
+        return_files=_stage_default_files("evaluate"),
         log_file="logs/evaluate.log",
     )
 
@@ -232,6 +297,12 @@ def run_evaluate_task(
     ]
     manifest = {
         "metadata": metadata.model_dump(),
+        "workflow": {
+            "compile_required_first": True,
+            "compile_once_per_turn": True,
+            "new_inputs_require_new_turn": True,
+            "turns_are_immutable": True,
+        },
         "status": "ok" if result["ok"] else "error",
         "input_artifact_id": target_artifact["artifact_id"],
         "input_path": target_artifact["path"],
@@ -247,11 +318,9 @@ def run_profile_task(
     *,
     metadata,
     timeout_seconds: int,
-    target_artifact_id: str | None,
-    return_files: List[str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
-    _, target_path, target_artifact = _artifact_path_from_manifest(workspace, target_artifact_id)
+    target_path, target_artifact = _primary_artifact_from_manifest(workspace)
     workspace_path = Path(workspace["workspace_path"])
     report_prefix = Path(workspace["profiles_path"]) / f"{target_path.stem}-ncu"
     command = [
@@ -270,7 +339,7 @@ def run_profile_task(
         workspace_path=str(workspace_path),
         env={},
         timeout_seconds=timeout_seconds,
-        return_files=_unique_paths([report_file, *(return_files or [])]),
+        return_files=_stage_default_files("profile", [report_file]),
         log_file="logs/profile.log",
     )
 
@@ -296,6 +365,12 @@ def run_profile_task(
     ]
     manifest = {
         "metadata": metadata.model_dump(),
+        "workflow": {
+            "compile_required_first": True,
+            "compile_once_per_turn": True,
+            "new_inputs_require_new_turn": True,
+            "turns_are_immutable": True,
+        },
         "status": "ok" if result["ok"] else "error",
         "input_artifact_id": target_artifact["artifact_id"],
         "input_path": target_artifact["path"],

@@ -19,11 +19,7 @@ class Metadata(BaseModel):
 
 class RequestBase(BaseModel):
     metadata: Metadata = Field(..., description="Required agent metadata")
-    timeout_seconds: int = Field(default=300, ge=1, le=86400)
-    return_files: List[str] = Field(
-        default_factory=list,
-        description="Additional turn-root-relative files to load and return in the response",
-    )
+    timeout_seconds: int = Field(default=180, ge=1, le=900)
 
 
 class CompileRequest(RequestBase):
@@ -38,17 +34,11 @@ class CompileRequest(RequestBase):
 
 
 class EvaluateRequest(RequestBase):
-    target_artifact_id: Optional[str] = Field(
-        default=None,
-        description="Optional artifact id override. Defaults to compile:primary_binary",
-    )
+    pass
 
 
 class ProfileRequest(RequestBase):
-    target_artifact_id: Optional[str] = Field(
-        default=None,
-        description="Optional artifact id override. Defaults to compile:primary_binary",
-    )
+    pass
 
 
 class ExecuteRequest(RequestBase):
@@ -84,6 +74,7 @@ class CommandResponse(BaseModel):
     ok: bool
     kind: str
     command: List[str]
+    turn_root: str
     workspace_path: str
     returncode: int
     duration_seconds: float

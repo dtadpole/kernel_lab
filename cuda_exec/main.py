@@ -30,6 +30,7 @@ def _to_response(metadata, result: dict) -> CommandResponse:
         ok=result["ok"],
         kind=result["kind"],
         command=result["command"],
+        turn_root=result["turn_root"],
         workspace_path=result["workspace_path"],
         returncode=result["returncode"],
         duration_seconds=result["duration_seconds"],
@@ -46,7 +47,6 @@ def compile_endpoint(request: CompileRequest) -> CommandResponse:
         timeout_seconds=request.timeout_seconds,
         original_files=request.original_files,
         generated_files=request.generated_files,
-        return_files=request.return_files,
     )
     return _to_response(request.metadata, result)
 
@@ -56,8 +56,6 @@ def evaluate_endpoint(request: EvaluateRequest) -> CommandResponse:
     result = run_evaluate_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        target_artifact_id=request.target_artifact_id,
-        return_files=request.return_files,
     )
     return _to_response(request.metadata, result)
 
@@ -67,8 +65,6 @@ def profile_endpoint(request: ProfileRequest) -> CommandResponse:
     result = run_profile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        target_artifact_id=request.target_artifact_id,
-        return_files=request.return_files,
     )
     return _to_response(request.metadata, result)
 
@@ -82,7 +78,11 @@ def execute_endpoint(request: ExecuteRequest) -> CommandResponse:
         workspace_path=workspace["workspace_path"],
         env=request.env,
         timeout_seconds=request.timeout_seconds,
-        return_files=request.return_files,
+        return_files=[
+            "logs/execute.log",
+            "logs/execute.stdout",
+            "logs/execute.stderr",
+        ],
         log_file="logs/execute.log",
     )
     return _to_response(request.metadata, result)

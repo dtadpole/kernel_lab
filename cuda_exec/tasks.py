@@ -6,15 +6,11 @@ from typing import List
 
 from fastapi import HTTPException
 
-from cuda_exec.runner import (
-    CUDA_TOOLKIT_BIN,
-    resolve_workspace_bundle,
-    run_cuda_command,
-    run_generic_command,
-)
+from cuda_exec.runner import resolve_workspace_bundle, run_generic_command
 
-NVCC = str(CUDA_TOOLKIT_BIN / "nvcc")
-NCU = str(CUDA_TOOLKIT_BIN / "ncu")
+SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
+COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
+PROFILE_SCRIPT = SCRIPTS_DIR / "profile.sh"
 
 
 def _absolute_input_path(path_value: str) -> Path:
@@ -121,16 +117,15 @@ def run_compile_task(
 
     binary_output = outputs_path / source.stem
     command = [
-        NVCC,
-        "-arch=native",
-        "-std=c++17",
-        "-O3",
-        "-lineinfo",
+        "/usr/bin/env",
+        "bash",
+        str(COMPILE_SCRIPT),
+        "--source",
         str(source),
-        "-o",
+        "--output",
         str(binary_output),
     ]
-    result = run_cuda_command(
+    result = run_generic_command(
         kind="compile",
         command=command,
         workspace_path=str(workspace_path),
@@ -143,7 +138,7 @@ def run_compile_task(
                 *(return_files or []),
             ]
         ),
-        log_file="logs/compile_nvcc.log",
+        log_file="logs/compile.log",
     )
     return result
 
@@ -187,23 +182,21 @@ def run_profile_task(
     workspace_path = Path(workspace["workspace_path"])
     report_prefix = Path(workspace["profiles_path"]) / f"{target.stem}-ncu"
     command = [
-        NCU,
-        "--set",
-        "default",
-        "--target-processes",
-        "all",
-        "--force-overwrite",
-        "--export",
-        str(report_prefix),
+        "/usr/bin/env",
+        "bash",
+        str(PROFILE_SCRIPT),
+        "--target",
         str(target),
+        "--export-prefix",
+        str(report_prefix),
     ]
     report_file = f"profiles/{target.stem}-ncu.ncu-rep"
-    return run_cuda_command(
+    return run_generic_command(
         kind="profile",
         command=command,
         workspace_path=str(workspace_path),
         env={},
         timeout_seconds=timeout_seconds,
         return_files=_unique_paths([report_file, *(return_files or [])]),
-        log_file="logs/profile_ncu.log",
+        log_file="logs/profile.log",
     )

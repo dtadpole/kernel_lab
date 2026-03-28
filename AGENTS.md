@@ -81,6 +81,9 @@ Current execution cwd is:
 - `execute` is the only command-style API that currently accepts a caller-provided command and environment variables.
 - `profile` is currently hardened to NCU.
 - `compile` stages original/generated files into the metadata-derived workspace and compiles exactly one `.cu` file with a fixed `nvcc` convention.
+- `compile` is implemented through the Bash script `/home/centos/kernel_lab/cuda_exec/scripts/compile.sh`.
+- `profile` is implemented through the Bash script `/home/centos/kernel_lab/cuda_exec/scripts/profile.sh`.
+- `evaluate` remains Python-driven.
 
 ### 5. `cuda_exec` response structure is fixed
 

@@ -98,7 +98,7 @@ Convention-driven. No free-form command and no per-request environment variables
   "original_files": ["/abs/path/baseline_kernel.cu"],
   "generated_files": ["/abs/path/candidate_kernel.cu"],
   "artifacts": ["outputs/candidate_kernel"],
-  "return_files": ["logs/compile_nvcc.log"]
+  "return_files": ["logs/compile.log"]
 }
 ```
 
@@ -106,7 +106,9 @@ Current compile convention:
 - stage `original_files` into `workspace/original/`
 - stage `generated_files` into `workspace/generated/`
 - choose exactly one `.cu` file, preferring `generated_files` over `original_files`
-- compile it with a hardened `nvcc` invocation:
+- invoke the hardened Bash script:
+  - `/home/centos/kernel_lab/cuda_exec/scripts/compile.sh`
+- the Bash script then calls:
 
 ```text
 /usr/local/cuda/bin/nvcc -arch=native -std=c++17 -O3 -lineinfo <absolute_source> -o <turn_root>/outputs/<stem>
@@ -133,6 +135,7 @@ Convention-driven. No free-form command and no per-request environment variables
 Current evaluate convention:
 - if `target_files` is empty, use the single executable artifact found in `outputs/`
 - execute exactly one target artifact
+- evaluate remains Python-driven
 
 ### `ProfileRequest`
 Convention-driven. Hardened to NCU in the current version.
@@ -154,7 +157,9 @@ Convention-driven. Hardened to NCU in the current version.
 
 Current profile convention:
 - if `target_files` is empty, use the single executable artifact found in `outputs/`
-- use a hardened NCU command:
+- invoke the hardened Bash script:
+  - `/home/centos/kernel_lab/cuda_exec/scripts/profile.sh`
+- the Bash script then calls:
 
 ```text
 /usr/local/cuda/bin/ncu --set default --target-processes all --force-overwrite --export <turn_root>/profiles/<stem>-ncu <absolute_target>
@@ -220,11 +225,11 @@ Runs a caller-specified CUDA Toolkit command.
 
 ## CLI scripts
 
-Under `cuda_exec/scripts/` there are three hardened command-line helpers:
+Under `cuda_exec/scripts/` there are now:
 
-- `compile.py`
+- `compile.sh`
 - `evaluate.py`
-- `profile.py`
+- `profile.sh`
 
 These scripts follow the same metadata-derived workspace convention as the API.
 They do **not** accept an explicit working directory.
@@ -234,16 +239,9 @@ They do **not** accept an explicit working directory.
 ```bash
 cd /home/centos/kernel_lab
 source cuda_exec/.venv/bin/activate
-python cuda_exec/scripts/compile.py \
-  --run-tag blackwell_agent_a \
-  --version v1 \
-  --direction-id 3 \
-  --direction-slug warp_specialized_async_pipeline \
-  --turn 12 \
-  --original-file /abs/path/baseline_kernel.cu \
-  --generated-file /abs/path/candidate_kernel.cu \
-  --artifact outputs/candidate_kernel \
-  --return-file logs/compile_nvcc.log
+bash cuda_exec/scripts/compile.sh \
+  --source /abs/path/candidate_kernel.cu \
+  --output /home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/outputs/candidate_kernel
 ```
 
 ### Evaluate example
@@ -261,13 +259,9 @@ python cuda_exec/scripts/evaluate.py \
 ### Profile example
 
 ```bash
-python cuda_exec/scripts/profile.py \
-  --run-tag blackwell_agent_a \
-  --version v1 \
-  --direction-id 3 \
-  --direction-slug warp_specialized_async_pipeline \
-  --turn 12 \
-  --target-file outputs/candidate_kernel
+bash cuda_exec/scripts/profile.sh \
+  --target /home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/outputs/candidate_kernel \
+  --export-prefix /home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/profiles/candidate_kernel-ncu
 ```
 
 ## Deployment / local run

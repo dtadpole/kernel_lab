@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Profiling / reports
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.sqlite

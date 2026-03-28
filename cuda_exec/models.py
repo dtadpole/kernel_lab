@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,18 @@ class Metadata(BaseModel):
         description="Readable slug for a research direction",
     )
     turn: int = Field(..., ge=0, description="Turn index within the direction")
+
+
+class RuntimeConfig(BaseModel):
+    config_id: str = Field(..., min_length=1, description="Stable identifier for a runtime config")
+    num_layers: Optional[int] = Field(default=None, ge=1)
+    embedding_size: Optional[int] = Field(default=None, ge=1)
+    num_heads: Optional[int] = Field(default=None, ge=1)
+    causal: Optional[bool] = Field(default=None)
+    extra: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra config-specific runtime fields",
+    )
 
 
 class RequestBase(BaseModel):
@@ -34,11 +46,19 @@ class CompileRequest(RequestBase):
 
 
 class EvaluateRequest(RequestBase):
-    pass
+    configs: List[RuntimeConfig] = Field(
+        ...,
+        min_length=1,
+        description="Runtime configs to evaluate against the compiled artifact",
+    )
 
 
 class ProfileRequest(RequestBase):
-    pass
+    configs: List[RuntimeConfig] = Field(
+        ...,
+        min_length=1,
+        description="Runtime configs to profile against the compiled artifact",
+    )
 
 
 class ExecuteRequest(RequestBase):
@@ -69,10 +89,22 @@ class ResponseFile(BaseModel):
     error: Optional[str] = None
 
 
+class ConfigResult(BaseModel):
+    config: RuntimeConfig
+    ok: bool
+    command: List[str]
+    returncode: int
+    duration_seconds: float
+    output: CommandOutput
+    artifacts: List[ArtifactRef] = Field(default_factory=list)
+    files: List[ResponseFile] = Field(default_factory=list)
+
+
 class CommandResponse(BaseModel):
     metadata: Metadata = Field(..., description="Required echoed metadata from the request")
     ok: bool
     kind: str
+    attempt: int
     command: List[str]
     turn_root: str
     workspace_path: str
@@ -81,6 +113,7 @@ class CommandResponse(BaseModel):
     artifacts: List[ArtifactRef] = Field(default_factory=list)
     output: CommandOutput
     files: List[ResponseFile] = Field(default_factory=list)
+    config_results: List[ConfigResult] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

@@ -31,6 +31,7 @@ High-level rules:
 - compile first
 - compile once per turn
 - evaluate/profile depend on compile state from the same turn
+- evaluate/profile are config-level, not code-level
 - new files require a new turn
 - old turns are immutable
 

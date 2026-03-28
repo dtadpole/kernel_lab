@@ -7,14 +7,19 @@ from cuda_exec.models import (
     CommandOutput,
     CommandResponse,
     CompileRequest,
+    ConfigResult,
     EvaluateRequest,
     ExecuteRequest,
     HealthResponse,
     ProfileRequest,
     ResponseFile,
 )
-from cuda_exec.runner import resolve_workspace_bundle, run_cuda_command
-from cuda_exec.tasks import run_compile_task, run_evaluate_task, run_profile_task
+from cuda_exec.tasks import (
+    run_compile_task,
+    run_evaluate_task,
+    run_execute_task,
+    run_profile_task,
+)
 
 app = FastAPI(title="cuda_exec", version="0.1.0")
 
@@ -29,6 +34,7 @@ def _to_response(metadata, result: dict) -> CommandResponse:
         metadata=metadata,
         ok=result["ok"],
         kind=result["kind"],
+        attempt=result["attempt"],
         command=result["command"],
         turn_root=result["turn_root"],
         workspace_path=result["workspace_path"],
@@ -37,6 +43,7 @@ def _to_response(metadata, result: dict) -> CommandResponse:
         artifacts=[ArtifactRef(**item) for item in result.get("artifacts", [])],
         output=CommandOutput(**result["output"]),
         files=[ResponseFile(**item) for item in result["files"]],
+        config_results=[ConfigResult(**item) for item in result.get("config_results", [])],
     )
 
 
@@ -56,6 +63,7 @@ def evaluate_endpoint(request: EvaluateRequest) -> CommandResponse:
     result = run_evaluate_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
+        configs=request.configs,
     )
     return _to_response(request.metadata, result)
 
@@ -65,24 +73,17 @@ def profile_endpoint(request: ProfileRequest) -> CommandResponse:
     result = run_profile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
+        configs=request.configs,
     )
     return _to_response(request.metadata, result)
 
 
 @app.post("/execute", response_model=CommandResponse)
 def execute_endpoint(request: ExecuteRequest) -> CommandResponse:
-    workspace = resolve_workspace_bundle(**request.metadata.model_dump())
-    result = run_cuda_command(
-        kind="execute",
-        command=request.command,
-        workspace_path=workspace["workspace_path"],
-        env=request.env,
+    result = run_execute_task(
+        metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        return_files=[
-            "logs/execute.log",
-            "logs/execute.stdout",
-            "logs/execute.stderr",
-        ],
-        log_file="logs/execute.log",
+        command=request.command,
+        env=request.env,
     )
     return _to_response(request.metadata, result)

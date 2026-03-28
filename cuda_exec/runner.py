@@ -59,11 +59,9 @@ def resolve_workspace_bundle(
     bundle = {
         "root_path": str(turn_root),
         "workspace_path": str(turn_root / "workspace"),
-        "outputs_path": str(turn_root / "outputs"),
+        "artifacts_path": str(turn_root / "artifacts"),
         "logs_path": str(turn_root / "logs"),
-        "profiles_path": str(turn_root / "profiles"),
         "state_path": str(turn_root / "state"),
-        "tmp_path": str(turn_root / "tmp"),
     }
     for path in bundle.values():
         Path(path).mkdir(parents=True, exist_ok=True)

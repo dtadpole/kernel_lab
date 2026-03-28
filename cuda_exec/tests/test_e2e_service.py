@@ -13,6 +13,7 @@ from urllib import error, request
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CUDA_EXEC_DIR = REPO_ROOT / "cuda_exec"
 VENV_PYTHON = CUDA_EXEC_DIR / ".venv" / "bin" / "python"
+PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
@@ -20,6 +21,20 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _prune_old_runs() -> None:
+    subprocess.run(
+        [str(VENV_PYTHON), str(PRUNE_SCRIPT)],
+        cwd=str(REPO_ROOT),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def setUpModule() -> None:
+    _prune_old_runs()
 
 
 class ServiceProcess:

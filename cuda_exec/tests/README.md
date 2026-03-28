@@ -29,6 +29,7 @@ Retention direction for inspection-friendly runs:
 - instead, use a separate cleanup/retention process, for example pruning runs older than 7 days
 - helper script: `cuda_exec/scripts/prune_temp_runs.py`
 - default behavior: delete preserved run directories older than 7 days
+- integration test runs should invoke this helper before starting the temporary uvicorn service
 - `--dry-run` shows what would be deleted without removing anything
 - directories are kept if their name contains `keep` or if they contain a marker file such as `KEEP`
 

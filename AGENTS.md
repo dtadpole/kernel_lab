@@ -87,6 +87,8 @@ Current execution cwd is:
 - `evaluate` remains Python-driven.
 - `compile` writes shared turn state to `state/compile.json`.
 - `evaluate` and `profile` default to consuming `compile:primary_binary` from `state/compile.json` unless an explicit artifact id override is provided.
+- after a successful `compile`, callers should not need to resend `original_files`, `generated_files`, or output binary paths for normal `evaluate` / `profile` calls in the same metadata scope.
+- each stage still writes its own outputs (`logs/*`, `profiles/*`, `state/*`) and returns its own structured response.
 
 ### 5. `cuda_exec` response structure is fixed
 

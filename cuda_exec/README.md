@@ -92,6 +92,79 @@ The interface is now intentionally asymmetric:
 
 This is meant to reduce redundant parameter passing for agent callers.
 
+## Stage interaction model
+
+The intended stage interaction is:
+
+1. `compile(metadata, original_files, generated_files)`
+2. `evaluate(metadata)`
+3. `profile(metadata)`
+4. `execute(metadata, command, env)` for special/tooling cases only
+
+### What gets shared
+
+`compile` writes shared state to:
+
+- `state/compile.json`
+
+That file records the primary reusable artifact for the turn, currently:
+
+- `compile:primary_binary`
+
+### What does **not** need to be resent
+
+After a successful `compile`, callers do **not** need to resend:
+
+- `original_files`
+- `generated_files`
+- output binary paths
+
+for normal `evaluate` or `profile` calls in the same metadata scope.
+
+Instead:
+
+- `evaluate` defaults to reading `compile:primary_binary` from `state/compile.json`
+- `profile` defaults to reading `compile:primary_binary` from `state/compile.json`
+
+### When an override is needed
+
+If the caller does want a non-default target, it can pass:
+
+- `target_artifact_id`
+
+on `EvaluateRequest` or `ProfileRequest`.
+
+### What each stage writes
+
+#### Compile writes
+- `outputs/<stem>`
+- `logs/compile.log`
+- `state/compile.json`
+
+#### Evaluate writes
+- `logs/evaluate.log`
+- `state/evaluate.json`
+
+#### Profile writes
+- `profiles/<stem>-ncu.ncu-rep`
+- `logs/profile.log`
+- `state/profile.json`
+
+### What each stage returns
+
+Each command-style response returns:
+
+- `metadata`
+- `artifacts[]`
+- `output.stdout`
+- `output.stderr`
+- `files[]`
+
+So the system supports both:
+
+- **shared state across stages** via `state/*.json`
+- **independent stage output** via response payloads and persisted artifacts
+
 ## Request model (current hardened direction)
 
 ### `CompileRequest`

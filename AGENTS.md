@@ -117,6 +117,8 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - do not put unit tests there
 - tests should start a real uvicorn service in a subprocess and call HTTP interfaces with realistic payloads
 - tests should isolate runtime side effects via a temporary `CUDA_EXEC_ROOT`
+- preferred isolation direction: provision the uvicorn Python environment from `cuda_exec/requirements.txt` using `uv`, with the environment itself created under a temporary folder for the test run
+- current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed environment is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 
 ## Owner

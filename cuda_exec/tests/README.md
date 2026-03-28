@@ -20,6 +20,7 @@ Current fixture direction:
 - cover a mix of 1D / 2D / 3D input-shape metadata in those configs
 - include multiple 1D sizes, plus at least one 2D case and one 3D case
 - keep config slugs semantically meaningful for vector-add fixtures: use size/shape/rank terms, not unrelated concepts like causal/noncausal
+- for vector-add fixtures, keep the config body pertinent too: shape/rank/input_size metadata is enough; avoid unrelated transformer-style fields like `num_layers`, `num_heads`, or `embedding_size`
 
 Runtime side effects should be isolated during tests:
 

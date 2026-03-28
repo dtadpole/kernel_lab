@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 from fastapi import HTTPException
 
-from cuda_exec.models import RuntimeConfig
+from cuda_exec.models import ConfigSpec
 from cuda_exec.runner import (
     capture_turn_file,
     resolve_workspace_bundle,
@@ -123,18 +123,18 @@ def _slugify(value: str) -> str:
     return cleaned or "default"
 
 
-def _config_suffix(config: RuntimeConfig) -> str:
-    return f"config_{_slugify(config.config_id)}"
+def _config_suffix(config_slug: str) -> str:
+    return f"config_{_slugify(config_slug)}"
 
 
-def _config_state_rel(stage: str, attempt: int, config: RuntimeConfig) -> str:
-    return f"state/configs/{stage}.{_attempt_tag(attempt)}.{_config_suffix(config)}.json"
+def _config_state_rel(stage: str, attempt: int, config_slug: str) -> str:
+    return f"state/configs/{stage}.{_attempt_tag(attempt)}.{_config_suffix(config_slug)}.json"
 
 
-def _stage_log_rel(stage: str, attempt: int, config: RuntimeConfig | None = None) -> str:
+def _stage_log_rel(stage: str, attempt: int, config_slug: str | None = None) -> str:
     base = f"logs/{stage}.{_attempt_tag(attempt)}"
-    if config is not None:
-        base += f".{_config_suffix(config)}"
+    if config_slug is not None:
+        base += f".{_config_suffix(config_slug)}"
     return base + ".log"
 
 
@@ -142,8 +142,8 @@ def _compile_artifact_rel(attempt: int, stem: str) -> str:
     return f"artifacts/compile.{_attempt_tag(attempt)}.{_slugify(stem)}.bin"
 
 
-def _config_artifact_rel(stage: str, attempt: int, config: RuntimeConfig, suffix: str) -> str:
-    return f"artifacts/{stage}.{_attempt_tag(attempt)}.{_config_suffix(config)}.{suffix}"
+def _config_artifact_rel(stage: str, attempt: int, config_slug: str, suffix: str) -> str:
+    return f"artifacts/{stage}.{_attempt_tag(attempt)}.{_config_suffix(config_slug)}.{suffix}"
 
 
 def _existing_attempts(workspace: dict, stage: str) -> List[int]:
@@ -255,38 +255,44 @@ def _dedupe_artifacts(artifacts: List[dict]) -> List[dict]:
     return out
 
 
-def _summarize_config_outputs(config_results: List[dict]) -> dict:
+def _summarize_config_outputs(config_results: Dict[str, dict]) -> dict:
     stdout_parts: List[str] = []
     stderr_parts: List[str] = []
-    for item in config_results:
-        config_id = item["config"]["config_id"]
-        stdout_parts.append(f"=== config {config_id} stdout ===\n{item['output']['stdout']}")
-        stderr_parts.append(f"=== config {config_id} stderr ===\n{item['output']['stderr']}")
+    for config_slug, item in config_results.items():
+        stdout_parts.append(f"=== config {config_slug} stdout ===\n{item['output']['stdout']}")
+        stderr_parts.append(f"=== config {config_slug} stderr ===\n{item['output']['stderr']}")
     return {
         "stdout": "\n\n".join(stdout_parts),
         "stderr": "\n\n".join(stderr_parts),
     }
 
 
-def _config_payload(config: RuntimeConfig) -> dict:
-    return config.model_dump()
+def _config_payload(config_slug: str, config: ConfigSpec) -> dict:
+    return {"slug": config_slug, **config.model_dump()}
 
 
-def _write_config_record(workspace: dict, stage: str, attempt: int, config: RuntimeConfig) -> str:
-    rel_path = _config_state_rel(stage, attempt, config)
+def _write_config_record(workspace: dict, stage: str, attempt: int, config_slug: str, config: ConfigSpec) -> str:
+    rel_path = _config_state_rel(stage, attempt, config_slug)
     abs_path = Path(workspace["root_path"]) / rel_path
-    _write_manifest(abs_path, {"config": _config_payload(config)})
+    _write_manifest(abs_path, {"config": _config_payload(config_slug, config)})
     return rel_path
 
 
-def _config_env(workspace: dict, stage: str, attempt: int, config: RuntimeConfig, config_rel: str) -> Dict[str, str]:
+def _config_env(
+    workspace: dict,
+    stage: str,
+    attempt: int,
+    config_slug: str,
+    config: ConfigSpec,
+    config_rel: str,
+) -> Dict[str, str]:
     config_abs = str((Path(workspace["root_path"]) / config_rel).resolve())
     env: Dict[str, str] = {
         "CUDA_EXEC_STAGE": stage,
         "CUDA_EXEC_ATTEMPT": _attempt_tag(attempt),
-        "CUDA_EXEC_CONFIG_ID": config.config_id,
+        "CUDA_EXEC_CONFIG_ID": config_slug,
         "CUDA_EXEC_CONFIG_PATH": config_abs,
-        "CUDA_EXEC_CONFIG_JSON": json.dumps(_config_payload(config), sort_keys=True),
+        "CUDA_EXEC_CONFIG_JSON": json.dumps(_config_payload(config_slug, config), sort_keys=True),
     }
     if config.num_layers is not None:
         env["CUDA_EXEC_NUM_LAYERS"] = str(config.num_layers)
@@ -304,12 +310,13 @@ def _config_env(workspace: dict, stage: str, attempt: int, config: RuntimeConfig
 
 def _config_result_payload(
     *,
-    config: RuntimeConfig,
+    config_slug: str,
+    config: ConfigSpec,
     run_result: dict,
     artifacts: List[dict] | None = None,
 ) -> dict:
     return {
-        "config": _config_payload(config),
+        "config": _config_payload(config_slug, config),
         "ok": run_result["ok"],
         "command": run_result["command"],
         "returncode": run_result["returncode"],
@@ -329,7 +336,7 @@ def _finalize_stage_result(
     command: List[str],
     stage_artifacts: List[dict],
     stage_files: List[dict],
-    config_results: List[dict] | None = None,
+    config_results: Dict[str, dict] | None = None,
     duration_seconds: float,
     returncode: int,
     ok: bool,
@@ -348,7 +355,7 @@ def _finalize_stage_result(
         "artifacts": _dedupe_artifacts(stage_artifacts),
         "output": output,
         "files": _dedupe_files(stage_files),
-        "config_results": list(config_results or []),
+        "configs": dict(config_results or {}),
     }
 
 
@@ -484,7 +491,7 @@ def run_evaluate_task(
     *,
     metadata,
     timeout_seconds: int,
-    configs: List[RuntimeConfig],
+    configs: Dict[str, ConfigSpec],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
@@ -492,13 +499,13 @@ def run_evaluate_task(
     attempt = _next_attempt(workspace, "evaluate")
     started = time.perf_counter()
 
-    config_results: List[dict] = []
+    config_results: Dict[str, dict] = {}
     stage_files: List[dict] = []
     stage_artifacts: List[dict] = []
 
-    for config in configs:
-        config_rel = _write_config_record(workspace, "evaluate", attempt, config)
-        env = _config_env(workspace, "evaluate", attempt, config, config_rel)
+    for config_slug, config in configs.items():
+        config_rel = _write_config_record(workspace, "evaluate", attempt, config_slug, config)
+        env = _config_env(workspace, "evaluate", attempt, config_slug, config, config_rel)
         run_result = run_generic_command(
             kind="evaluate",
             command=[str(target_path)],
@@ -506,32 +513,31 @@ def run_evaluate_task(
             env=env,
             timeout_seconds=timeout_seconds,
             return_files=[config_rel],
-            log_file=_stage_log_rel("evaluate", attempt, config),
+            log_file=_stage_log_rel("evaluate", attempt, config_slug),
         )
-        payload = _config_result_payload(config=config, run_result=run_result)
-        config_results.append(payload)
+        payload = _config_result_payload(config_slug=config_slug, config=config, run_result=run_result)
+        config_results[config_slug] = payload
         stage_files.extend(payload["files"])
 
     manifest = _workflow_payload(
         metadata,
         stage="evaluate",
         attempt=attempt,
-        status="ok" if all(item["ok"] for item in config_results) else "error",
+        status="ok" if all(item["ok"] for item in config_results.values()) else "error",
     )
     manifest.update(
         {
             "input_artifact_id": target_artifact["artifact_id"],
             "input_path": target_artifact["path"],
-            "configs": [_config_payload(config) for config in configs],
-            "config_results": [
-                {
-                    "config_id": item["config"]["config_id"],
+            "configs": {config_slug: _config_payload(config_slug, config) for config_slug, config in configs.items()},
+            "config_results": {
+                config_slug: {
                     "ok": item["ok"],
                     "returncode": item["returncode"],
                     "duration_seconds": item["duration_seconds"],
                 }
-                for item in config_results
-            ],
+                for config_slug, item in config_results.items()
+            },
             "artifacts": [
                 _build_artifact(
                     artifact_id="evaluate:state",
@@ -548,8 +554,8 @@ def run_evaluate_task(
     stage_artifacts.extend(manifest["artifacts"])
 
     output = _summarize_config_outputs(config_results)
-    overall_ok = all(item["ok"] for item in config_results)
-    overall_returncode = next((item["returncode"] for item in config_results if item["returncode"] != 0), 0)
+    overall_ok = all(item["ok"] for item in config_results.values())
+    overall_returncode = next((item["returncode"] for item in config_results.values() if item["returncode"] != 0), 0)
     return _finalize_stage_result(
         metadata=metadata,
         workspace=workspace,
@@ -570,7 +576,7 @@ def run_profile_task(
     *,
     metadata,
     timeout_seconds: int,
-    configs: List[RuntimeConfig],
+    configs: Dict[str, ConfigSpec],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
@@ -578,14 +584,14 @@ def run_profile_task(
     attempt = _next_attempt(workspace, "profile")
     started = time.perf_counter()
 
-    config_results: List[dict] = []
+    config_results: Dict[str, dict] = {}
     stage_files: List[dict] = []
     stage_artifacts: List[dict] = []
 
-    for config in configs:
-        config_rel = _write_config_record(workspace, "profile", attempt, config)
-        env = _config_env(workspace, "profile", attempt, config, config_rel)
-        report_base_rel = _config_artifact_rel("profile", attempt, config, "ncu")
+    for config_slug, config in configs.items():
+        config_rel = _write_config_record(workspace, "profile", attempt, config_slug, config)
+        env = _config_env(workspace, "profile", attempt, config_slug, config, config_rel)
+        report_base_rel = _config_artifact_rel("profile", attempt, config_slug, "ncu")
         report_file_rel = report_base_rel + ".ncu-rep"
         report_prefix = Path(workspace["root_path"]) / report_base_rel
         command = [
@@ -604,18 +610,23 @@ def run_profile_task(
             env=env,
             timeout_seconds=timeout_seconds,
             return_files=[config_rel],
-            log_file=_stage_log_rel("profile", attempt, config),
+            log_file=_stage_log_rel("profile", attempt, config_slug),
         )
         config_artifacts = [
             _build_artifact(
-                artifact_id=f"profile:report:{config.config_id}",
+                artifact_id=f"profile:report:{config_slug}",
                 kind="profile_report",
                 path=report_file_rel,
-                description=f"NCU report for config {config.config_id}",
+                description=f"NCU report for config {config_slug}",
             )
         ]
-        payload = _config_result_payload(config=config, run_result=run_result, artifacts=config_artifacts)
-        config_results.append(payload)
+        payload = _config_result_payload(
+            config_slug=config_slug,
+            config=config,
+            run_result=run_result,
+            artifacts=config_artifacts,
+        )
+        config_results[config_slug] = payload
         stage_files.extend(payload["files"])
         stage_artifacts.extend(config_artifacts)
 
@@ -623,24 +634,23 @@ def run_profile_task(
         metadata,
         stage="profile",
         attempt=attempt,
-        status="ok" if all(item["ok"] for item in config_results) else "error",
+        status="ok" if all(item["ok"] for item in config_results.values()) else "error",
     )
     manifest.update(
         {
             "input_artifact_id": target_artifact["artifact_id"],
             "input_path": target_artifact["path"],
             "profiler": "ncu",
-            "configs": [_config_payload(config) for config in configs],
-            "config_results": [
-                {
-                    "config_id": item["config"]["config_id"],
+            "configs": {config_slug: _config_payload(config_slug, config) for config_slug, config in configs.items()},
+            "config_results": {
+                config_slug: {
                     "ok": item["ok"],
                     "returncode": item["returncode"],
                     "duration_seconds": item["duration_seconds"],
                     "artifacts": item["artifacts"],
                 }
-                for item in config_results
-            ],
+                for config_slug, item in config_results.items()
+            },
             "artifacts": [
                 _build_artifact(
                     artifact_id="profile:state",
@@ -658,8 +668,8 @@ def run_profile_task(
     stage_artifacts = manifest["artifacts"]
 
     output = _summarize_config_outputs(config_results)
-    overall_ok = all(item["ok"] for item in config_results)
-    overall_returncode = next((item["returncode"] for item in config_results if item["returncode"] != 0), 0)
+    overall_ok = all(item["ok"] for item in config_results.values())
+    overall_returncode = next((item["returncode"] for item in config_results.values() if item["returncode"] != 0), 0)
     return _finalize_stage_result(
         metadata=metadata,
         workspace=workspace,

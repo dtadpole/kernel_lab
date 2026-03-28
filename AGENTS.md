@@ -80,13 +80,15 @@ All public request/response file names should use relative paths.
 - `compile` is code-level
 - `evaluate` / `profile` are runtime-config-level
 - one compile may fan out into many configs
-- runtime configs are passed via `configs[]`
+- runtime configs are passed as `configs: Dict[config_slug, ConfigSpec]`
+- the same config slug is the stable identity on both request and response
 
 #### Public response boundary
 
 Default public responses should stay small and only expose stage-relevant artifacts/logs.
 Internal workflow state is kept for compile/evaluate/profile bookkeeping but is not part of the default public response.
 Public request/response file names use relative paths, and public returned files are shaped as relative-path keyed dictionaries.
+For evaluate/profile specifically, public responses mirror request shape and use `configs: Dict[config_slug, ...]` instead of result lists.
 
 #### Execute boundary
 

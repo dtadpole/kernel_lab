@@ -195,12 +195,13 @@ FA4-style example:
 
 ## 6. Runtime config convention
 
-`evaluate` and `profile` accept `configs[]`.
-Each config includes at least:
+`evaluate` and `profile` accept slug-keyed config maps:
 
-- `config_id`
+- `configs: Dict[config_slug, ConfigSpec]`
 
-Optional standard fields:
+The config slug is the stable identity for a config across both request and response.
+
+Optional standard config fields:
 
 - `num_layers`
 - `embedding_size`
@@ -213,29 +214,27 @@ Conceptual example:
 ```json
 {
   "metadata": { "...": "..." },
-  "configs": [
-    {
-      "config_id": "fa4_causal_l12_e4096_h32",
+  "configs": {
+    "fa4-causal-l12-e4096-h32": {
       "num_layers": 12,
       "embedding_size": 4096,
       "num_heads": 32,
       "causal": true
     },
-    {
-      "config_id": "fa4_noncausal_l12_e4096_h32",
+    "fa4-noncausal-l12-e4096-h32": {
       "num_layers": 12,
       "embedding_size": 4096,
       "num_heads": 32,
       "causal": false
     }
-  ]
+  }
 }
 ```
 
 For each config, the service writes a config record under `state/configs/` and exports runtime
 information through environment variables such as:
 
-- `CUDA_EXEC_CONFIG_ID`
+- `CUDA_EXEC_CONFIG_ID` (set to the config slug)
 - `CUDA_EXEC_CONFIG_PATH`
 - `CUDA_EXEC_CONFIG_JSON`
 - `CUDA_EXEC_NUM_LAYERS`
@@ -388,11 +387,10 @@ Return only:
 - `metadata`
 - `ok`
 - `attempt`
-- `results[]`
+- `configs: Dict[config_slug, evaluate_config_output]`
 
-Each evaluate result contains:
+Each evaluate config output contains:
 
-- `config_id`
 - `ok`
 - `logs: Dict[relative_path, file_payload]`
 
@@ -403,11 +401,10 @@ Return only:
 - `metadata`
 - `ok`
 - `attempt`
-- `results[]`
+- `configs: Dict[config_slug, profile_config_output]`
 
-Each profile result contains:
+Each profile config output contains:
 
-- `config_id`
 - `ok`
 - `artifacts: Dict[relative_path, file_payload]`
 - `logs: Dict[relative_path, file_payload]`

@@ -15,13 +15,13 @@ from fastapi import FastAPI
 from cuda_exec.models import (
     CompileRequest,
     CompileResponse,
-    ConfigStageResult,
+    EvaluateConfigOutput,
     EvaluateRequest,
     EvaluateResponse,
     ExecuteRequest,
     ExecuteResponse,
     HealthResponse,
-    ProfileConfigResult,
+    ProfileConfigOutput,
     ProfileRequest,
     ProfileResponse,
 )
@@ -53,16 +53,16 @@ def _slugify(value: str) -> str:
     return cleaned or "default"
 
 
-def _config_suffix(config_id: str) -> str:
-    return f"config_{_slugify(config_id)}"
+def _config_suffix(config_slug: str) -> str:
+    return f"config_{_slugify(config_slug)}"
 
 
-def _stage_log_paths(stage: str, attempt: int, config_id: str | None = None) -> list[str]:
+def _stage_log_paths(stage: str, attempt: int, config_slug: str | None = None) -> list[str]:
     """Return public log relative paths for a stage attempt."""
 
     base = f"logs/{stage}.{_attempt_tag(attempt)}"
-    if config_id is not None:
-        base += f".{_config_suffix(config_id)}"
+    if config_slug is not None:
+        base += f".{_config_suffix(config_slug)}"
     return [f"{base}.log", f"{base}.stdout", f"{base}.stderr"]
 
 
@@ -73,11 +73,11 @@ def _compile_binary_path(result: dict) -> str:
     raise ValueError("compile result missing primary binary artifact")
 
 
-def _profile_report_path(config_result: dict) -> str:
-    for artifact in config_result.get("artifacts", []):
+def _profile_report_path(config_output: dict) -> str:
+    for artifact in config_output.get("artifacts", []):
         if artifact.get("kind") == "profile_report":
             return artifact["path"]
-    raise ValueError(f"profile result missing report artifact for config {config_result['config']['config_id']}")
+    raise ValueError("profile config output missing report artifact")
 
 
 def _capture_public_files(workspace_path: str, rel_paths: list[str]) -> dict[str, dict]:
@@ -123,7 +123,7 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
-    """Evaluate one compiled artifact against one or more runtime configs."""
+    """Evaluate one compiled artifact against slug-keyed runtime configs."""
 
     result = run_evaluate_task(
         metadata=request.metadata,
@@ -131,28 +131,27 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
         configs=request.configs,
     )
     attempt = result["attempt"]
-    items = [
-        ConfigStageResult(
-            config_id=item["config"]["config_id"],
+    items = {
+        config_slug: EvaluateConfigOutput(
             ok=item["ok"],
             logs=_capture_public_files(
                 result["workspace_path"],
-                _stage_log_paths("evaluate", attempt, item["config"]["config_id"]),
+                _stage_log_paths("evaluate", attempt, config_slug),
             ),
         )
-        for item in result.get("config_results", [])
-    ]
+        for config_slug, item in result.get("configs", {}).items()
+    }
     return EvaluateResponse(
         metadata=request.metadata,
         ok=result["ok"],
         attempt=attempt,
-        results=items,
+        configs=items,
     )
 
 
 @app.post("/profile", response_model=ProfileResponse)
 def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
-    """Profile one compiled artifact against one or more runtime configs."""
+    """Profile one compiled artifact against slug-keyed runtime configs."""
 
     result = run_profile_task(
         metadata=request.metadata,
@@ -160,23 +159,22 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         configs=request.configs,
     )
     attempt = result["attempt"]
-    items = [
-        ProfileConfigResult(
-            config_id=item["config"]["config_id"],
+    items = {
+        config_slug: ProfileConfigOutput(
             ok=item["ok"],
             artifacts=_capture_public_files(result["workspace_path"], [_profile_report_path(item)]),
             logs=_capture_public_files(
                 result["workspace_path"],
-                _stage_log_paths("profile", attempt, item["config"]["config_id"]),
+                _stage_log_paths("profile", attempt, config_slug),
             ),
         )
-        for item in result.get("config_results", [])
-    ]
+        for config_slug, item in result.get("configs", {}).items()
+    }
     return ProfileResponse(
         metadata=request.metadata,
         ok=result["ok"],
         attempt=attempt,
-        results=items,
+        configs=items,
     )
 
 

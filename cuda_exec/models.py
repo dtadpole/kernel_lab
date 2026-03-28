@@ -7,6 +7,7 @@ Documentation placement rule:
 
 Important public conventions captured in this file:
 - Compile inputs are inline file maps: Dict[relative_path, content].
+- Evaluate/profile configs are slug-keyed maps: Dict[config_slug, ConfigSpec].
 - Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
 - `artifacts` means kept results.
@@ -16,7 +17,7 @@ Important public conventions captured in this file:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -39,14 +40,14 @@ class Metadata(BaseModel):
     turn: int = Field(..., ge=0, description="Turn index within the direction")
 
 
-class RuntimeConfig(BaseModel):
-    """Runtime-only config for evaluate/profile fan-out.
+class ConfigSpec(BaseModel):
+    """Runtime config body keyed by a stable config slug.
 
-    Compile is code-level. Evaluate/profile are config-level. A single compiled
-    artifact may therefore be reused across many RuntimeConfig values.
+    Evaluate/profile requests and responses both use the config slug as the
+    outer dict key. This keeps request/response mentally aligned:
+        config_slug -> config spec / config output
     """
 
-    config_id: str = Field(..., min_length=1, description="Stable identifier for a runtime config")
     num_layers: Optional[int] = Field(default=None, ge=1)
     embedding_size: Optional[int] = Field(default=None, ge=1)
     num_heads: Optional[int] = Field(default=None, ge=1)
@@ -95,22 +96,35 @@ class CompileRequest(RequestBase):
 
 
 class EvaluateRequest(RequestBase):
-    """Evaluate request over one or more runtime configs."""
+    """Evaluate request over one or more runtime configs.
 
-    configs: List[RuntimeConfig] = Field(
+    `configs` is a slug-keyed map:
+        config_slug -> ConfigSpec
+
+    Example:
+        {
+          "fa4-causal-l12-e4096-h32": {"num_layers": 12, "embedding_size": 4096, "num_heads": 32, "causal": true}
+        }
+    """
+
+    configs: Dict[str, ConfigSpec] = Field(
         ...,
         min_length=1,
-        description="Runtime configs to evaluate against the compiled artifact",
+        description="Slug-keyed runtime configs to evaluate against the compiled artifact",
     )
 
 
 class ProfileRequest(RequestBase):
-    """Profile request over one or more runtime configs."""
+    """Profile request over one or more runtime configs.
 
-    configs: List[RuntimeConfig] = Field(
+    `configs` is a slug-keyed map:
+        config_slug -> ConfigSpec
+    """
+
+    configs: Dict[str, ConfigSpec] = Field(
         ...,
         min_length=1,
-        description="Runtime configs to profile against the compiled artifact",
+        description="Slug-keyed runtime configs to profile against the compiled artifact",
     )
 
 
@@ -122,7 +136,7 @@ class ExecuteRequest(RequestBase):
     does not expose execute-specific state in the default public response.
     """
 
-    command: List[str] = Field(..., min_length=1, description="Executable plus arguments")
+    command: list[str] = Field(..., min_length=1, description="Executable plus arguments")
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
 
 
@@ -191,24 +205,6 @@ class CompileResponse(ResponseBase):
 
     - `artifacts` is a dict of `relative_path -> FilePayload`
     - `logs` is a dict of `relative_path -> FilePayload`
-
-    Example:
-        {
-          "artifacts": {
-            "artifacts/compile.attempt_001.candidate.bin": {
-              "content": "<base64>",
-              "encoding": "base64",
-              "truncated": false
-            }
-          },
-          "logs": {
-            "logs/compile.attempt_001.log": {
-              "content": "toolkit_command: ...",
-              "encoding": "utf8",
-              "truncated": false
-            }
-          }
-        }
     """
 
     artifacts: Dict[str, FilePayload] = Field(
@@ -221,67 +217,50 @@ class CompileResponse(ResponseBase):
     )
 
 
-class ConfigStageResult(BaseModel):
-    """Per-config public result for evaluate-like stages.
+class EvaluateConfigOutput(BaseModel):
+    """Public evaluate output for one config slug.
 
-    `logs` is a dict of `relative_path -> FilePayload`.
-
-    Example:
-        {
-          "config_id": "fa4_causal_l12_e4096_h32",
-          "ok": true,
-          "logs": {
-            "logs/evaluate.attempt_001.config_fa4_causal_l12_e4096_h32.stdout": {
-              "content": "latency_ms=...",
-              "encoding": "utf8",
-              "truncated": false
-            }
-          }
-        }
+    Evaluate responses mirror request shape:
+        config_slug -> EvaluateConfigOutput
     """
 
-    config_id: str
     ok: bool
     logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
-        description="Relative-path keyed per-config log/stdout/stderr files",
+        description="Relative-path keyed per-config evaluate log/stdout/stderr files",
     )
 
 
 class EvaluateResponse(ResponseBase):
-    """Minimal evaluate response with one result per runtime config."""
-
-    results: List[ConfigStageResult] = Field(default_factory=list)
-
-
-class ProfileConfigResult(BaseModel):
-    """Per-config public result for profile.
-
-    Profile returns both logs and kept profiling artifacts such as .ncu-rep.
-    Both `artifacts` and `logs` are dicts of `relative_path -> FilePayload`.
+    """Minimal evaluate response keyed by config slug.
 
     Example:
         {
-          "config_id": "fa4_causal_l12_e4096_h32",
-          "ok": true,
-          "artifacts": {
-            "artifacts/profile.attempt_001.config_fa4_causal_l12_e4096_h32.ncu-rep": {
-              "content": "<base64>",
-              "encoding": "base64",
-              "truncated": false
-            }
-          },
-          "logs": {
-            "logs/profile.attempt_001.config_fa4_causal_l12_e4096_h32.log": {
-              "content": "ncu command: ...",
-              "encoding": "utf8",
-              "truncated": false
+          "configs": {
+            "fa4-causal-l12-e4096-h32": {
+              "ok": true,
+              "logs": {
+                "logs/evaluate.attempt_001.config_fa4-causal-l12-e4096-h32.stdout": {
+                  "content": "latency_ms=...",
+                  "encoding": "utf8",
+                  "truncated": false
+                }
+              }
             }
           }
         }
     """
 
-    config_id: str
+    configs: Dict[str, EvaluateConfigOutput] = Field(default_factory=dict)
+
+
+class ProfileConfigOutput(BaseModel):
+    """Public profile output for one config slug.
+
+    Profile responses mirror request shape:
+        config_slug -> ProfileConfigOutput
+    """
+
     ok: bool
     artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
@@ -294,9 +273,9 @@ class ProfileConfigResult(BaseModel):
 
 
 class ProfileResponse(ResponseBase):
-    """Minimal profile response with one result per runtime config."""
+    """Minimal profile response keyed by config slug."""
 
-    results: List[ProfileConfigResult] = Field(default_factory=list)
+    configs: Dict[str, ProfileConfigOutput] = Field(default_factory=dict)
 
 
 class ExecuteResponse(ResponseBase):
@@ -306,17 +285,6 @@ class ExecuteResponse(ResponseBase):
     Any higher-level meaning of command outputs is left to the caller.
 
     `logs` is a dict of `relative_path -> FilePayload`.
-
-    Example:
-        {
-          "logs": {
-            "logs/execute.attempt_001.stderr": {
-              "content": "warning: ...",
-              "encoding": "utf8",
-              "truncated": false
-            }
-          }
-        }
     """
 
     logs: Dict[str, FilePayload] = Field(

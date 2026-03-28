@@ -17,6 +17,7 @@ Runtime side effects should be isolated during tests:
 - clean up the subprocess on teardown
 - remove the temporary runtime directory after the run
 - preferably also provision the uvicorn Python environment from `cuda_exec/requirements.txt` using `uv` inside a temporary folder, rather than relying forever on a persistent repo-local environment
+- practical note: after `uv venv <temp-dir>/venv`, install dependencies with `uv pip install --python <temp-dir>/venv/bin/python -r cuda_exec/requirements.txt` so the temporary environment is targeted explicitly
 
 They are intentionally allowed to observe expected failures from the underlying
 CUDA toolchain or sample kernels. The purpose is to keep interface coverage and

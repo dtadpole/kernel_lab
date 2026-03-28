@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -66,56 +66,50 @@ class ExecuteRequest(RequestBase):
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
 
 
-class ArtifactRef(BaseModel):
-    artifact_id: str
-    kind: str
-    path: str
-    description: Optional[str] = None
-
-
-class CommandOutput(BaseModel):
-    stdout: str
-    stderr: str
-
-
-class ResponseFile(BaseModel):
-    path: str
-    name: str
-    exists: bool
-    size_bytes: Optional[int] = None
-    encoding: Optional[Literal["utf8", "base64"]] = None
-    truncated: bool = False
-    content: Optional[str] = None
-    error: Optional[str] = None
-
-
-class ConfigResult(BaseModel):
-    config: RuntimeConfig
-    ok: bool
-    command: List[str]
-    returncode: int
-    duration_seconds: float
-    output: CommandOutput
-    artifacts: List[ArtifactRef] = Field(default_factory=list)
-    files: List[ResponseFile] = Field(default_factory=list)
-
-
-class CommandResponse(BaseModel):
-    metadata: Metadata = Field(..., description="Required echoed metadata from the request")
-    ok: bool
-    kind: str
-    attempt: int
-    command: List[str]
-    turn_root: str
-    workspace_path: str
-    returncode: int
-    duration_seconds: float
-    artifacts: List[ArtifactRef] = Field(default_factory=list)
-    output: CommandOutput
-    files: List[ResponseFile] = Field(default_factory=list)
-    config_results: List[ConfigResult] = Field(default_factory=list)
-
-
 class HealthResponse(BaseModel):
     ok: bool
     service: str
+
+
+class StageResponseBase(BaseModel):
+    metadata: Metadata = Field(..., description="Required echoed metadata from the request")
+    ok: bool
+    attempt: int
+
+
+class CompileResponse(StageResponseBase):
+    binary_path: str
+    log_path: str
+    stdout_path: str
+    stderr_path: str
+    state_path: str
+
+
+class ConfigStageResult(BaseModel):
+    config_id: str
+    ok: bool
+    log_path: str
+    stdout_path: str
+    stderr_path: str
+    config_state_path: str
+
+
+class EvaluateResponse(StageResponseBase):
+    state_path: str
+    results: List[ConfigStageResult] = Field(default_factory=list)
+
+
+class ProfileConfigResult(ConfigStageResult):
+    report_path: str
+
+
+class ProfileResponse(StageResponseBase):
+    state_path: str
+    results: List[ProfileConfigResult] = Field(default_factory=list)
+
+
+class ExecuteResponse(StageResponseBase):
+    log_path: str
+    stdout_path: str
+    stderr_path: str
+    state_path: str

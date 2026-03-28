@@ -290,7 +290,90 @@ Scratch/intermediate files can remain in `workspace/`.
 
 ---
 
-## 8. CWD convention
+## 8. Response convention
+
+Public API responses should stay stage-specific and minimal.
+The response is a **summary**, not a mirror of the full runtime directory.
+
+### Compile response
+
+Return only:
+
+- `metadata`
+- `ok`
+- `attempt`
+- `binary_path`
+- `log_path`
+- `stdout_path`
+- `stderr_path`
+- `state_path`
+
+### Evaluate response
+
+Return only:
+
+- `metadata`
+- `ok`
+- `attempt`
+- `state_path`
+- `results[]`
+
+Each evaluate result contains:
+
+- `config_id`
+- `ok`
+- `log_path`
+- `stdout_path`
+- `stderr_path`
+- `config_state_path`
+
+### Profile response
+
+Return only:
+
+- `metadata`
+- `ok`
+- `attempt`
+- `state_path`
+- `results[]`
+
+Each profile result contains:
+
+- `config_id`
+- `ok`
+- `report_path`
+- `log_path`
+- `stdout_path`
+- `stderr_path`
+- `config_state_path`
+
+### Execute response
+
+Return only:
+
+- `metadata`
+- `ok`
+- `attempt`
+- `log_path`
+- `stdout_path`
+- `stderr_path`
+- `state_path`
+
+### What should not be exposed in the default public response
+
+Do not expose generic heavy response fields by default, such as:
+
+- full `files[]`
+- full `artifacts[]`
+- nested `config_results[]` with inline stdout/stderr
+- large inline file contents
+
+The detailed runtime information already exists on disk under `workspace/`, `artifacts/`, `logs/`, and `state/`.
+The public response should only point to the important paths.
+
+---
+
+## 9. CWD convention
 
 The service guarantees that the **initial cwd** for launched processes is:
 
@@ -306,7 +389,7 @@ path behavior.
 
 ---
 
-## 9. Caller-facing simplicity rules
+## 10. Caller-facing simplicity rules
 
 To keep agent behavior simple:
 
@@ -318,7 +401,7 @@ To keep agent behavior simple:
 
 ---
 
-## 10. Documentation split
+## 11. Documentation split
 
 - `DESIGN.md` = detailed source of truth
 - `README.md` = short entrypoint

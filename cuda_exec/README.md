@@ -14,6 +14,7 @@ FastAPI-based remote CUDA execution service.
 
 - compile is code-level and runs once per turn
 - evaluate/profile are config-level and may run many configs per compile
+- public responses are stage-specific summaries, not generic nested blobs
 - the runtime mental model is:
   - `workspace = inputs + scratch`
   - `artifacts = kept results`

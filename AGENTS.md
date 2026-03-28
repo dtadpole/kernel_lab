@@ -35,7 +35,59 @@ High-level rules:
 - new files require a new turn
 - old turns are immutable
 
-### 4. `cuda_exec` documentation split
+### 4. Settled `cuda_exec` interface conventions
+
+These are stable project-level decisions and should remain in repo docs, not only in assistant memory.
+
+#### Runtime mental model
+
+- `workspace = inputs + scratch`
+- `artifacts = kept results`
+- `logs = process output`
+- `state = workflow record`
+
+#### Turn-root layout
+
+`cuda_exec` uses the 4-directory runtime layout:
+
+```text
+turn_<turn>/
+  workspace/
+  artifacts/
+  logs/
+  state/
+```
+
+#### Compile inputs
+
+`compile` takes inline file maps, not file lists:
+
+- `original_files: Dict[relative_path, content]`
+- `generated_files: Dict[relative_path, content]`
+
+All public request/response file names should use relative paths.
+
+#### Stage model
+
+- `compile` is code-level
+- `evaluate` / `profile` are runtime-config-level
+- one compile may fan out into many configs
+- runtime configs are passed via `configs[]`
+
+#### Public response boundary
+
+Default public responses should stay small and only expose stage-relevant artifacts/logs.
+Internal workflow state is kept for compile/evaluate/profile bookkeeping but is not part of the default public response.
+
+#### Execute boundary
+
+`execute` is logs-only from the public API perspective:
+
+- keep `logs/execute.attempt_###.*`
+- do not expose execute state in the public response
+- let the caller decide what execute outputs matter
+
+### 5. `cuda_exec` documentation split
 
 - `cuda_exec/DESIGN.md` is the source of truth for detailed design
 - `cuda_exec/README.md` stays short

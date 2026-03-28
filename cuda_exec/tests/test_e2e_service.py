@@ -25,7 +25,12 @@ class ServiceProcess:
     def __init__(self) -> None:
         self.port = _find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
-        self._temp_dir = tempfile.TemporaryDirectory(prefix="cuda_exec_integration_")
+        temp_parent = Path.home() / "temp"
+        temp_parent.mkdir(parents=True, exist_ok=True)
+        self._temp_dir = tempfile.TemporaryDirectory(
+            dir=str(temp_parent),
+            prefix=f"cuda-exec-integration-{os.getpid()}-",
+        )
         self.runtime_root = Path(self._temp_dir.name) / "runtime-root"
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.log_path = Path(self._temp_dir.name) / "uvicorn.log"

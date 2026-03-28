@@ -83,8 +83,9 @@ def _profile_report_path(config_result: dict) -> str:
 def _capture_public_files(workspace_path: str, rel_paths: list[str]) -> dict[str, dict]:
     """Materialize public response files as relative_path -> FilePayload.
 
-    This is where the service converts internal on-disk files into the compact
-    public API shape used by artifacts/logs.
+    The dict key stays the relative path.
+    The value is a FilePayload carrying content plus the minimal metadata needed
+    on the response side: encoding and truncation.
     """
 
     payload: dict[str, dict] = {}

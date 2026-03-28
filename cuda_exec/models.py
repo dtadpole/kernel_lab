@@ -75,6 +75,11 @@ class CompileRequest(RequestBase):
           "kernels/candidate.cu": "...source code..."
         }
 
+    Why request-side files stay this simple:
+    - compile inputs are expected to be normal text source files
+    - the caller already knows the intended relative path
+    - request-side inputs do not need response-only metadata like encoding or truncation
+
     The service writes these under workspace/inputs/... while preserving the
     provided relative paths.
     """
@@ -129,26 +134,33 @@ class HealthResponse(BaseModel):
 class FilePayload(BaseModel):
     """Public file payload returned in responses.
 
-    Public responses use:
+    Public responses use the shape:
         relative_path -> FilePayload
 
-    Why this exists:
-    - request-side compile inputs are simple text maps, so Dict[path, content] is enough
-    - response-side files may be either text or binary
-    - response-side files may also be truncated by service limits
+    The relative path itself is the outer dict key.
+    This object only describes the payload stored at that path.
 
-    So the response needs a tiny wrapper object around `content` to carry the
-    extra metadata that request-side inputs do not need.
+    Why a payload wrapper is needed on the response side:
+    - some returned files are text, but some are binary
+    - binary payloads need an explicit encoding marker (`base64`)
+    - large files may be truncated by service limits
+
+    Request-side compile inputs do not need this wrapper because they are
+    currently modeled as simple text source files, so Dict[path, content] is
+    enough there.
     """
 
-    content: str = Field(..., description="File payload content. Text uses utf8; binary uses base64")
+    content: str = Field(
+        ...,
+        description="Returned file content for this relative path. Text uses utf8; binary uses base64.",
+    )
     encoding: Literal["utf8", "base64"] = Field(
         default="utf8",
-        description="Payload encoding for `content`",
+        description="Encoding used for `content` so callers can distinguish text from binary payloads.",
     )
     truncated: bool = Field(
         default=False,
-        description="Whether the returned content was truncated by service limits",
+        description="True when the service returned only a prefix of the file because of response size limits.",
     )
 
 
@@ -156,8 +168,8 @@ class ResponseBase(BaseModel):
     """Shared public response fields.
 
     This is the response-side counterpart to RequestBase.
-    Public responses stay intentionally small. They describe stage outcome and
-    return only stage-relevant artifacts/logs, not internal workflow state.
+    Public responses stay intentionally small: they report stage outcome and
+    expose only stage-relevant artifacts/logs, not internal workflow state.
     """
 
     metadata: Metadata = Field(..., description="Required echoed metadata from the request")

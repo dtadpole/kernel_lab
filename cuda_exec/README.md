@@ -71,6 +71,117 @@ Accordingly, command-style responses return:
 
 instead of a caller-specified `workdir`.
 
+Relative artifact paths such as:
+
+- `outputs/...`
+- `logs/...`
+- `profiles/...`
+- `tmp/...`
+
+are interpreted relative to the turn root, not relative to `workspace/`.
+
+## Request model (current hardened direction)
+
+### `CompileRequest`
+Convention-driven. No free-form command and no per-request environment variables.
+
+```json
+{
+  "metadata": {
+    "run_tag": "blackwell_agent_a",
+    "version": "v1",
+    "direction_id": 3,
+    "direction_slug": "warp_specialized_async_pipeline",
+    "turn": 12
+  },
+  "timeout_seconds": 300,
+  "original_files": ["/abs/path/baseline_kernel.cu"],
+  "generated_files": ["/abs/path/candidate_kernel.cu"],
+  "artifacts": ["outputs/candidate_kernel"],
+  "return_files": ["logs/compile_nvcc.log"]
+}
+```
+
+Current compile convention:
+- stage `original_files` into `workspace/original/`
+- stage `generated_files` into `workspace/generated/`
+- choose exactly one `.cu` file, preferring `generated_files` over `original_files`
+- compile it with a hardened `nvcc` invocation:
+
+```text
+/usr/local/cuda/bin/nvcc -arch=native -std=c++17 -O3 -lineinfo <absolute_source> -o <turn_root>/outputs/<stem>
+```
+
+### `EvaluateRequest`
+Convention-driven. No free-form command and no per-request environment variables.
+
+```json
+{
+  "metadata": {
+    "run_tag": "blackwell_agent_a",
+    "version": "v1",
+    "direction_id": 3,
+    "direction_slug": "warp_specialized_async_pipeline",
+    "turn": 12
+  },
+  "timeout_seconds": 300,
+  "target_files": ["outputs/candidate_kernel"],
+  "return_files": []
+}
+```
+
+Current evaluate convention:
+- if `target_files` is empty, use the single executable artifact found in `outputs/`
+- execute exactly one target artifact
+
+### `ProfileRequest`
+Convention-driven. Hardened to NCU in the current version.
+
+```json
+{
+  "metadata": {
+    "run_tag": "blackwell_agent_a",
+    "version": "v1",
+    "direction_id": 3,
+    "direction_slug": "warp_specialized_async_pipeline",
+    "turn": 12
+  },
+  "timeout_seconds": 1800,
+  "target_files": ["outputs/candidate_kernel"],
+  "return_files": []
+}
+```
+
+Current profile convention:
+- if `target_files` is empty, use the single executable artifact found in `outputs/`
+- use a hardened NCU command:
+
+```text
+/usr/local/cuda/bin/ncu --set default --target-processes all --force-overwrite --export <turn_root>/profiles/<stem>-ncu <absolute_target>
+```
+
+### `ExecuteRequest`
+General CUDA Toolkit execution interface. This is the only request type that currently accepts free-form command/environment input.
+
+```json
+{
+  "metadata": {
+    "run_tag": "blackwell_agent_a",
+    "version": "v1",
+    "direction_id": 3,
+    "direction_slug": "warp_specialized_async_pipeline",
+    "turn": 12
+  },
+  "timeout_seconds": 300,
+  "command": ["/usr/local/cuda/bin/ptxas", "--version"],
+  "env": {},
+  "return_files": []
+}
+```
+
+Current execute rule:
+- `command[0]` must point under `/usr/local/cuda/bin`
+
 ## Response contract (fixed structure)
 
 Command-style responses contain two structured sections:
@@ -96,138 +207,20 @@ Current file capture behavior:
 Simple health check.
 
 ### `POST /compile`
-Run a compile command in the metadata-derived workspace.
-
-Request shape:
-
-```json
-{
-  "metadata": {
-    "run_tag": "blackwell_agent_a",
-    "version": "v1",
-    "direction_id": 3,
-    "direction_slug": "warp_specialized_async_pipeline",
-    "turn": 12
-  },
-  "command": ["bash", "-lc", "make binary"],
-  "env": {},
-  "timeout_seconds": 300,
-  "artifacts": ["outputs/build/output.ptx"],
-  "return_files": ["logs/compile.log"]
-}
-```
+Runs the hardened compile flow described above.
 
 ### `POST /evaluate`
-Run an evaluation command in the metadata-derived workspace.
-
-Request shape:
-
-```json
-{
-  "metadata": {
-    "run_tag": "blackwell_agent_a",
-    "version": "v1",
-    "direction_id": 3,
-    "direction_slug": "warp_specialized_async_pipeline",
-    "turn": 12
-  },
-  "command": ["bash", "-lc", "python evaluator.py"],
-  "env": {},
-  "timeout_seconds": 300,
-  "expected_outputs": [],
-  "return_files": ["outputs/result.json"]
-}
-```
+Runs the hardened evaluate flow described above.
 
 ### `POST /profile`
-Run a profiler (`ncu` or `nsys`) against a target command in the metadata-derived workspace.
-
-Request shape:
-
-```json
-{
-  "metadata": {
-    "run_tag": "blackwell_agent_a",
-    "version": "v1",
-    "direction_id": 3,
-    "direction_slug": "warp_specialized_async_pipeline",
-    "turn": 12
-  },
-  "profiler": "ncu",
-  "target_command": ["./outputs/bin/vector_add_inline_ptx_profile"],
-  "profiler_args": ["--set", "default", "--target-processes", "all"],
-  "env": {},
-  "timeout_seconds": 1800,
-  "return_files": ["profiles/vector_add_inline_ptx-ncu.ncu-rep"]
-}
-```
+Runs the hardened profile flow described above (currently NCU only).
 
 ### `POST /execute`
-Run a CUDA Toolkit binary directly in the metadata-derived workspace.
-
-Current rule:
-- `binary_path` must point under `/usr/local/cuda/bin`
-- intended for direct execution of tools such as `ptxas`, `nvdisasm`, `cuobjdump`, `ncu`, etc.
-
-Request shape:
-
-```json
-{
-  "metadata": {
-    "run_tag": "blackwell_agent_a",
-    "version": "v1",
-    "direction_id": 3,
-    "direction_slug": "warp_specialized_async_pipeline",
-    "turn": 12
-  },
-  "binary_path": "/usr/local/cuda/bin/ptxas",
-  "args": ["--version"],
-  "env": {},
-  "timeout_seconds": 60,
-  "return_files": []
-}
-```
-
-### Response shape
-All command-style endpoints return the required `metadata` object back in the response:
-
-```json
-{
-  "metadata": {
-    "run_tag": "blackwell_agent_a",
-    "version": "v1",
-    "direction_id": 3,
-    "direction_slug": "warp_specialized_async_pipeline",
-    "turn": 12
-  },
-  "ok": true,
-  "kind": "compile",
-  "command": ["bash", "-lc", "echo hi"],
-  "workspace_path": "/home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/workspace",
-  "returncode": 0,
-  "duration_seconds": 0.123,
-  "output": {
-    "stdout": "...",
-    "stderr": "..."
-  },
-  "files": [
-    {
-      "path": "/home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/workspace/result.txt",
-      "name": "result.txt",
-      "exists": true,
-      "size_bytes": 42,
-      "encoding": "utf8",
-      "truncated": false,
-      "content": "hello\n",
-      "error": null
-    }
-  ]
-}
-```
+Runs a caller-specified CUDA Toolkit command.
 
 ## CLI scripts
 
-Under `cuda_exec/scripts/` there are three command-line helpers:
+Under `cuda_exec/scripts/` there are three hardened command-line helpers:
 
 - `compile.py`
 - `evaluate.py`
@@ -236,40 +229,21 @@ Under `cuda_exec/scripts/` there are three command-line helpers:
 These scripts follow the same metadata-derived workspace convention as the API.
 They do **not** accept an explicit working directory.
 
-### Compile examples
-
-Show the exact `nvcc` command without executing it:
+### Compile example
 
 ```bash
 cd /home/centos/kernel_lab
 source cuda_exec/.venv/bin/activate
-python cuda_exec/scripts/compile.py nvcc \
+python cuda_exec/scripts/compile.py \
   --run-tag blackwell_agent_a \
   --version v1 \
   --direction-id 3 \
   --direction-slug warp_specialized_async_pipeline \
   --turn 12 \
-  --source kernel.cu \
-  --output outputs/kernel.ptx \
-  --mode ptx \
-  --arch native \
-  --dry-run-only
-```
-
-Show the exact `ptxas` command without executing it:
-
-```bash
-python cuda_exec/scripts/compile.py ptxas \
-  --run-tag blackwell_agent_a \
-  --version v1 \
-  --direction-id 3 \
-  --direction-slug warp_specialized_async_pipeline \
-  --turn 12 \
-  --input outputs/kernel.ptx \
-  --output outputs/kernel.cubin \
-  --arch sm_120 \
-  --verbose \
-  --dry-run-only
+  --original-file /abs/path/baseline_kernel.cu \
+  --generated-file /abs/path/candidate_kernel.cu \
+  --artifact outputs/candidate_kernel \
+  --return-file logs/compile_nvcc.log
 ```
 
 ### Evaluate example
@@ -281,41 +255,19 @@ python cuda_exec/scripts/evaluate.py \
   --direction-id 3 \
   --direction-slug warp_specialized_async_pipeline \
   --turn 12 \
-  -- bash -lc './outputs/bin/kernel_bench --bench'
+  --target-file outputs/candidate_kernel
 ```
 
-### Profile examples
-
-Show the exact `ncu` command without executing it:
+### Profile example
 
 ```bash
-python cuda_exec/scripts/profile.py ncu \
+python cuda_exec/scripts/profile.py \
   --run-tag blackwell_agent_a \
   --version v1 \
   --direction-id 3 \
   --direction-slug warp_specialized_async_pipeline \
   --turn 12 \
-  --set-name default \
-  --target-processes all \
-  --export profiles/vector_add_inline_ptx-ncu \
-  --dry-run-only \
-  -- ./outputs/bin/vector_add_inline_ptx_profile
-```
-
-Show the exact `nsys` command without executing it:
-
-```bash
-python cuda_exec/scripts/profile.py nsys \
-  --run-tag blackwell_agent_a \
-  --version v1 \
-  --direction-id 3 \
-  --direction-slug warp_specialized_async_pipeline \
-  --turn 12 \
-  --trace cuda,nvtx,osrt \
-  --output profiles/vector_add_inline_ptx-nsys \
-  --force-overwrite \
-  --dry-run-only \
-  -- ./outputs/bin/vector_add_inline_ptx_profile
+  --target-file outputs/candidate_kernel
 ```
 
 ## Deployment / local run

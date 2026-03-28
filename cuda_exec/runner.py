@@ -75,24 +75,28 @@ def _merge_env(extra_env: Dict[str, str]) -> Dict[str, str]:
     return env
 
 
-def _resolve_existing_directory(path_value: str) -> str:
+def _resolve_existing_directory(path_value: str) -> Path:
     path = Path(path_value).expanduser().resolve()
     if not path.exists():
         raise HTTPException(status_code=400, detail=f"workspace path does not exist: {path}")
     if not path.is_dir():
         raise HTTPException(status_code=400, detail=f"workspace path is not a directory: {path}")
-    return str(path)
+    return path
 
 
-def _resolve_return_file(path_value: str, workspace_path: str) -> Path:
+def _turn_root_from_workspace(workspace_path: Path) -> Path:
+    return workspace_path.parent
+
+
+def _resolve_turn_artifact_path(path_value: str, workspace_path: Path) -> Path:
     path = Path(path_value).expanduser()
     if not path.is_absolute():
-        path = Path(workspace_path) / path
+        path = _turn_root_from_workspace(workspace_path) / path
     return path.resolve()
 
 
-def _capture_file(path_value: str, workspace_path: str) -> dict:
-    path = _resolve_return_file(path_value, workspace_path)
+def _capture_file(path_value: str, workspace_path: Path) -> dict:
+    path = _resolve_turn_artifact_path(path_value, workspace_path)
     if not path.exists():
         return {
             "path": str(path),
@@ -140,7 +144,7 @@ def _capture_file(path_value: str, workspace_path: str) -> dict:
     }
 
 
-def _collect_files(paths: List[str], workspace_path: str) -> List[dict]:
+def _collect_files(paths: List[str], workspace_path: Path) -> List[dict]:
     deduped: List[str] = []
     seen: set[str] = set()
     for value in paths:
@@ -158,13 +162,14 @@ def _run_command(
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
+    log_file: Optional[str] = None,
 ) -> dict:
     resolved_workspace = _resolve_existing_directory(workspace_path)
     started = time.perf_counter()
     try:
         completed = subprocess.run(
             command,
-            cwd=resolved_workspace,
+            cwd=str(resolved_workspace),
             env=_merge_env(env),
             capture_output=True,
             text=True,
@@ -179,13 +184,27 @@ def _run_command(
             detail=f"{kind} timed out after {timeout_seconds}s",
         ) from exc
 
+    extra_files = list(return_files or [])
+    if log_file:
+        log_path = _resolve_turn_artifact_path(log_file, resolved_workspace)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_text = (
+            f"command: {' '.join(command)}\n"
+            f"returncode: {completed.returncode}\n"
+            f"--- stdout ---\n{completed.stdout}\n"
+            f"--- stderr ---\n{completed.stderr}\n"
+        )
+        log_path.write_text(log_text, encoding="utf-8")
+        relative_log = str(log_path.relative_to(_turn_root_from_workspace(resolved_workspace)))
+        extra_files.append(relative_log)
+
     duration = time.perf_counter() - started
-    files = _collect_files(return_files or [], resolved_workspace)
+    files = _collect_files(extra_files, resolved_workspace)
     return {
         "ok": completed.returncode == 0,
         "kind": kind,
         "command": command,
-        "workspace_path": resolved_workspace,
+        "workspace_path": str(resolved_workspace),
         "returncode": completed.returncode,
         "duration_seconds": duration,
         "output": {
@@ -204,6 +223,7 @@ def run_generic_command(
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
+    log_file: Optional[str] = None,
 ) -> dict:
     return _run_command(
         kind=kind,
@@ -212,66 +232,44 @@ def run_generic_command(
         env=env,
         timeout_seconds=timeout_seconds,
         return_files=return_files,
+        log_file=log_file,
     )
 
 
-def run_profile(
+def run_cuda_command(
     *,
-    profiler: str,
-    target_command: List[str],
-    profiler_args: List[str],
+    kind: str,
+    command: List[str],
     workspace_path: str,
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
+    log_file: Optional[str] = None,
 ) -> dict:
-    profiler_bin = CUDA_TOOLKIT_BIN / profiler
-    if profiler == "nsys":
-        profiler_bin = Path("/usr/local/bin/nsys")
-    if not profiler_bin.exists():
-        raise HTTPException(status_code=400, detail=f"Profiler not found: {profiler_bin}")
-
-    command = [str(profiler_bin), *profiler_args, *target_command]
-    return _run_command(
-        kind="profile",
-        command=command,
-        workspace_path=workspace_path,
-        env=env,
-        timeout_seconds=timeout_seconds,
-        return_files=return_files,
-    )
-
-
-def run_cuda_binary(
-    *,
-    binary_path: str,
-    args: List[str],
-    workspace_path: str,
-    env: Dict[str, str],
-    timeout_seconds: int,
-    return_files: Optional[List[str]] = None,
-) -> dict:
-    binary = Path(binary_path).expanduser().resolve()
+    if not command:
+        raise HTTPException(status_code=400, detail="command must not be empty")
+    executable = Path(command[0]).expanduser().resolve()
     toolkit_bin = CUDA_TOOLKIT_BIN.resolve()
-    if toolkit_bin not in binary.parents and binary != toolkit_bin:
+    if toolkit_bin not in executable.parents and executable != toolkit_bin:
         raise HTTPException(
             status_code=400,
             detail=(
-                "binary_path must point to a CUDA Toolkit binary under "
+                "command[0] must point to a CUDA Toolkit binary under "
                 f"{toolkit_bin}"
             ),
         )
-    if not binary.exists():
-        raise HTTPException(status_code=400, detail=f"binary does not exist: {binary}")
-    if not os.access(binary, os.X_OK):
-        raise HTTPException(status_code=400, detail=f"binary is not executable: {binary}")
+    if not executable.exists():
+        raise HTTPException(status_code=400, detail=f"binary does not exist: {executable}")
+    if not os.access(executable, os.X_OK):
+        raise HTTPException(status_code=400, detail=f"binary is not executable: {executable}")
 
-    command = [str(binary), *args]
+    normalized_command = [str(executable), *command[1:]]
     return _run_command(
-        kind="execute",
-        command=command,
+        kind=kind,
+        command=normalized_command,
         workspace_path=workspace_path,
         env=env,
         timeout_seconds=timeout_seconds,
         return_files=return_files,
+        log_file=log_file,
     )

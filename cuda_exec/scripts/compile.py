@@ -2,123 +2,46 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from _cli_common import (
-    add_metadata_args,
-    emit_result,
-    ensure_repo_root_on_path,
-    parse_env_assignments,
-    print_command_preview,
-    resolve_workspace_from_args,
-)
+from _cli_common import add_metadata_args, ensure_repo_root_on_path
 
 ensure_repo_root_on_path()
 
-from cuda_exec.runner import run_generic_command  # noqa: E402
-
-CUDA_BIN = Path("/usr/local/cuda/bin")
-NVCC = CUDA_BIN / "nvcc"
-PTXAS = CUDA_BIN / "ptxas"
-
-
-def build_nvcc_command(args: argparse.Namespace) -> list[str]:
-    command = [str(NVCC)]
-    if args.arch:
-        command.append(f"-arch={args.arch}")
-    if args.std:
-        command.append(f"-std={args.std}")
-    if args.opt:
-        command.append(f"-O{args.opt}")
-    if args.lineinfo:
-        command.append("-lineinfo")
-
-    mode_flags = {
-        "binary": [],
-        "object": ["-dc"],
-        "ptx": ["-ptx"],
-        "cubin": ["-cubin"],
-        "preprocess": ["-E"],
-    }
-    command.extend(mode_flags[args.mode])
-    command.extend(args.extra_arg)
-    command.append(args.source)
-    command.extend(["-o", args.output])
-    return command
-
-
-def build_ptxas_command(args: argparse.Namespace) -> list[str]:
-    command = [str(PTXAS), f"-arch={args.arch}"]
-    if args.verbose:
-        command.append("-v")
-    command.extend(args.extra_arg)
-    command.extend([args.input, "-o", args.output])
-    return command
-
-
-def add_common_execution_args(parser: argparse.ArgumentParser) -> None:
-    add_metadata_args(parser)
-    parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds")
-    parser.add_argument("--json", action="store_true", help="Emit result as JSON")
-    parser.add_argument(
-        "--dry-run-only",
-        action="store_true",
-        help="Only print the resolved toolkit command without executing it",
-    )
+from cuda_exec.models import Metadata  # noqa: E402
+from cuda_exec.tasks import run_compile_task  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compile helper for cuda_exec. Shows and optionally runs CUDA Toolkit compile commands.",
+        description="Hardened compile helper for cuda_exec. Stages original/generated source files and compiles one CUDA source with nvcc.",
     )
-    subparsers = parser.add_subparsers(dest="tool", required=True)
-
-    nvcc_parser = subparsers.add_parser("nvcc", help="Compile with nvcc")
-    nvcc_parser.add_argument("--source", required=True, help="Source file passed to nvcc")
-    nvcc_parser.add_argument("--output", required=True, help="Output path")
-    nvcc_parser.add_argument(
-        "--mode",
-        choices=["binary", "object", "ptx", "cubin", "preprocess"],
-        default="binary",
-        help="nvcc compilation mode",
-    )
-    nvcc_parser.add_argument("--arch", default="native", help="nvcc -arch value")
-    nvcc_parser.add_argument("--std", default="c++17", help="C++ standard")
-    nvcc_parser.add_argument("--opt", default="3", help="Optimization level without the leading O")
-    nvcc_parser.add_argument("--lineinfo", action="store_true", help="Add -lineinfo")
-    nvcc_parser.add_argument("--extra-arg", action="append", default=[], help="Extra argument passed to nvcc")
-    add_common_execution_args(nvcc_parser)
-
-    ptxas_parser = subparsers.add_parser("ptxas", help="Assemble PTX with ptxas")
-    ptxas_parser.add_argument("--input", required=True, help="PTX input file")
-    ptxas_parser.add_argument("--output", required=True, help="Output cubin path")
-    ptxas_parser.add_argument("--arch", default="sm_120", help="ptxas -arch value")
-    ptxas_parser.add_argument("--verbose", action="store_true", help="Add -v")
-    ptxas_parser.add_argument("--extra-arg", action="append", default=[], help="Extra argument passed to ptxas")
-    add_common_execution_args(ptxas_parser)
-
+    add_metadata_args(parser)
+    parser.add_argument("--original-file", action="append", default=[], help="Original source artifact")
+    parser.add_argument("--generated-file", action="append", default=[], help="Generated/candidate source artifact")
+    parser.add_argument("--artifact", action="append", default=[], help="Additional artifact to return")
+    parser.add_argument("--return-file", action="append", default=[], help="Additional file to return")
+    parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds")
+    parser.add_argument("--json", action="store_true", help="Emit result as JSON")
     args = parser.parse_args()
-    workspace_path = resolve_workspace_from_args(args)
-    env = parse_env_assignments(args.env)
 
-    if args.tool == "nvcc":
-        command = build_nvcc_command(args)
-    else:
-        command = build_ptxas_command(args)
-
-    print_command_preview(command, workspace_path)
-    if args.dry_run_only:
-        return 0
-
-    result = run_generic_command(
-        kind="compile",
-        command=command,
-        workspace_path=workspace_path,
-        env=env,
-        timeout_seconds=args.timeout,
+    metadata = Metadata(
+        run_tag=args.run_tag,
+        version=args.version,
+        direction_id=args.direction_id,
+        direction_slug=args.direction_slug,
+        turn=args.turn,
     )
-    emit_result(result, as_json=args.json)
+    result = run_compile_task(
+        metadata=metadata,
+        timeout_seconds=args.timeout,
+        original_files=args.original_file,
+        generated_files=args.generated_file,
+        artifacts=args.artifact,
+        return_files=args.return_file,
+    )
+    print(json.dumps(result, indent=2))
     return 0 if result["ok"] else result["returncode"]
 
 

@@ -15,6 +15,7 @@ kernel_lab/
     main.py
     models.py
     runner.py
+    tasks.py
     scripts/
     requirements.txt
     README.md
@@ -74,7 +75,14 @@ Current execution cwd is:
 .../turn_<turn>/workspace/
 ```
 
-### 4. `cuda_exec` response structure is fixed
+### 4. `cuda_exec` is convention-driven for compile/evaluate/profile
+
+- `compile`, `evaluate`, and `profile` are hardened flows and should not expose free-form command/env configuration in the API.
+- `execute` is the only command-style API that currently accepts a caller-provided command and environment variables.
+- `profile` is currently hardened to NCU.
+- `compile` stages original/generated files into the metadata-derived workspace and compiles exactly one `.cu` file with a fixed `nvcc` convention.
+
+### 5. `cuda_exec` response structure is fixed
 
 Command-style responses return:
 

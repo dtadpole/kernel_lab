@@ -19,42 +19,45 @@ class Metadata(BaseModel):
 
 class RequestBase(BaseModel):
     metadata: Metadata = Field(..., description="Required agent metadata")
+    timeout_seconds: int = Field(default=300, ge=1, le=86400)
     return_files: List[str] = Field(
         default_factory=list,
         description="Files to load and return in the response after command execution",
     )
 
 
-class CommandRequest(RequestBase):
-    command: List[str] = Field(..., min_length=1, description="Executable plus arguments")
-    env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
-    timeout_seconds: int = Field(default=300, ge=1, le=86400)
-
-
-class CompileRequest(CommandRequest):
-    artifacts: List[str] = Field(default_factory=list, description="Expected output files")
-
-
-class EvaluateRequest(CommandRequest):
-    expected_outputs: List[str] = Field(
+class CompileRequest(RequestBase):
+    original_files: List[str] = Field(
         default_factory=list,
-        description="Optional expected output markers or artifact names",
+        description="Original source artifacts for the direction",
+    )
+    generated_files: List[str] = Field(
+        default_factory=list,
+        description="Generated/candidate source artifacts for this turn",
+    )
+    artifacts: List[str] = Field(
+        default_factory=list,
+        description="Additional compile artifacts to return in the response",
+    )
+
+
+class EvaluateRequest(RequestBase):
+    target_files: List[str] = Field(
+        default_factory=list,
+        description="Target artifacts to evaluate; if omitted, use the convention default",
     )
 
 
 class ProfileRequest(RequestBase):
-    profiler: Literal["ncu", "nsys"] = Field(..., description="Profiler backend")
-    target_command: List[str] = Field(..., min_length=1, description="Command to profile")
-    profiler_args: List[str] = Field(default_factory=list, description="Extra profiler arguments")
-    env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
-    timeout_seconds: int = Field(default=1800, ge=1, le=86400)
+    target_files: List[str] = Field(
+        default_factory=list,
+        description="Target artifacts to profile with the hardened profiler flow",
+    )
 
 
 class ExecuteRequest(RequestBase):
-    binary_path: str = Field(..., description="Absolute path to a CUDA Toolkit binary")
-    args: List[str] = Field(default_factory=list, description="Arguments passed to the binary")
+    command: List[str] = Field(..., min_length=1, description="Executable plus arguments")
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
-    timeout_seconds: int = Field(default=300, ge=1, le=86400)
 
 
 class CommandOutput(BaseModel):

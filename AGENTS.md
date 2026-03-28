@@ -129,6 +129,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - integration test runs should invoke this helper before starting the temporary uvicorn service
 - current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed `.venv` is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
+- current integration config coverage should include roughly 4–6 configs spanning multiple 1D sizes plus representative 2D and 3D shape metadata
 
 ## Owner
 

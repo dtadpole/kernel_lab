@@ -11,6 +11,13 @@ These tests should exercise the public service interface by:
 - sending realistic request payloads
 - validating response shape and high-level behavior
 
+Current fixture direction:
+
+- use one original CuTeDSL-style vector-add source and one generated inline-PTX CUDA source
+- drive evaluate/profile with 4–6 slug-keyed configs
+- cover a mix of 1D / 2D / 3D input-shape metadata in those configs
+- include multiple 1D sizes, plus at least one 2D case and one 3D case
+
 Runtime side effects should be isolated during tests:
 
 - use a temporary runtime root via `CUDA_EXEC_ROOT`

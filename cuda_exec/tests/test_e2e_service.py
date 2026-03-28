@@ -15,6 +15,7 @@ CUDA_EXEC_DIR = REPO_ROOT / "cuda_exec"
 VENV_PYTHON = CUDA_EXEC_DIR / ".venv" / "bin" / "python"
 PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+CONFIG_FIXTURE = FIXTURES / "configs" / "vector_add_shapes.json"
 
 
 def _find_free_port() -> int:
@@ -157,86 +158,7 @@ class CudaExecE2ETest(unittest.TestCase):
         }
 
     def _config_map(self) -> dict:
-        return {
-            "vec1d-65536-causal": {
-                "num_layers": 12,
-                "embedding_size": 1024,
-                "num_heads": 8,
-                "causal": True,
-                "extra": {
-                    "family": "integration-vector-add",
-                    "rank": 1,
-                    "shape": [65536],
-                    "input_size": 65536,
-                    "shape_kind": "1d",
-                },
-            },
-            "vec1d-1048576-noncausal": {
-                "num_layers": 12,
-                "embedding_size": 2048,
-                "num_heads": 16,
-                "causal": False,
-                "extra": {
-                    "family": "integration-vector-add",
-                    "rank": 1,
-                    "shape": [1048576],
-                    "input_size": 1048576,
-                    "shape_kind": "1d",
-                },
-            },
-            "vec1d-4194304-causal": {
-                "num_layers": 16,
-                "embedding_size": 4096,
-                "num_heads": 32,
-                "causal": True,
-                "extra": {
-                    "family": "integration-vector-add",
-                    "rank": 1,
-                    "shape": [4194304],
-                    "input_size": 4194304,
-                    "shape_kind": "1d",
-                },
-            },
-            "mat2d-1024x1024-noncausal": {
-                "num_layers": 16,
-                "embedding_size": 4096,
-                "num_heads": 32,
-                "causal": False,
-                "extra": {
-                    "family": "integration-vector-add",
-                    "rank": 2,
-                    "shape": [1024, 1024],
-                    "input_size": 1048576,
-                    "shape_kind": "2d",
-                },
-            },
-            "mat2d-2048x512-causal": {
-                "num_layers": 20,
-                "embedding_size": 4096,
-                "num_heads": 32,
-                "causal": True,
-                "extra": {
-                    "family": "integration-vector-add",
-                    "rank": 2,
-                    "shape": [2048, 512],
-                    "input_size": 1048576,
-                    "shape_kind": "2d",
-                },
-            },
-            "tensor3d-64x64x64-noncausal": {
-                "num_layers": 24,
-                "embedding_size": 8192,
-                "num_heads": 64,
-                "causal": False,
-                "extra": {
-                    "family": "integration-vector-add",
-                    "rank": 3,
-                    "shape": [64, 64, 64],
-                    "input_size": 262144,
-                    "shape_kind": "3d",
-                },
-            },
-        }
+        return json.loads(CONFIG_FIXTURE.read_text(encoding="utf-8"))
 
     def test_healthz(self) -> None:
         status, body = self.service.get_json("/healthz")

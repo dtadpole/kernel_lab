@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -11,7 +12,61 @@ from fastapi import HTTPException
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
 CUDA_TOOLKIT_BIN = CUDA_TOOLKIT_ROOT / "bin"
+CODE_EXEC_ROOT = Path.home() / ".code_exec"
 MAX_CAPTURE_BYTES = 1024 * 1024
+SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_component(label: str, value: str) -> str:
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{label} must not be empty")
+    if value in {".", ".."} or "/" in value:
+        raise HTTPException(status_code=400, detail=f"{label} contains an invalid path component")
+    if not SAFE_COMPONENT_RE.fullmatch(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{label} must match {SAFE_COMPONENT_RE.pattern} "
+                f"and only contain safe path characters"
+            ),
+        )
+    return value
+
+
+def resolve_workspace_bundle(
+    *,
+    run_tag: str,
+    version: str,
+    direction_id: int,
+    direction_slug: str,
+    turn: int,
+) -> dict:
+    safe_run_tag = _validate_component("run_tag", run_tag)
+    safe_version = _validate_component("version", version)
+    safe_direction_slug = _validate_component("direction_slug", direction_slug)
+    if direction_id < 0:
+        raise HTTPException(status_code=400, detail="direction_id must be >= 0")
+    if turn < 0:
+        raise HTTPException(status_code=400, detail="turn must be >= 0")
+
+    turn_root = (
+        CODE_EXEC_ROOT
+        / safe_run_tag
+        / safe_version
+        / f"{direction_id}_{safe_direction_slug}"
+        / f"turn_{turn}"
+    )
+    bundle = {
+        "root_path": str(turn_root),
+        "workspace_path": str(turn_root / "workspace"),
+        "outputs_path": str(turn_root / "outputs"),
+        "logs_path": str(turn_root / "logs"),
+        "profiles_path": str(turn_root / "profiles"),
+        "tmp_path": str(turn_root / "tmp"),
+    }
+    for path in bundle.values():
+        Path(path).mkdir(parents=True, exist_ok=True)
+    return bundle
 
 
 def _merge_env(extra_env: Dict[str, str]) -> Dict[str, str]:
@@ -20,26 +75,24 @@ def _merge_env(extra_env: Dict[str, str]) -> Dict[str, str]:
     return env
 
 
-def _resolve_workdir(workdir: Optional[str]) -> str:
-    if workdir is None:
-        return str(Path.cwd())
-    path = Path(workdir).expanduser().resolve()
+def _resolve_existing_directory(path_value: str) -> str:
+    path = Path(path_value).expanduser().resolve()
     if not path.exists():
-        raise HTTPException(status_code=400, detail=f"workdir does not exist: {path}")
+        raise HTTPException(status_code=400, detail=f"workspace path does not exist: {path}")
     if not path.is_dir():
-        raise HTTPException(status_code=400, detail=f"workdir is not a directory: {path}")
+        raise HTTPException(status_code=400, detail=f"workspace path is not a directory: {path}")
     return str(path)
 
 
-def _resolve_return_file(path_value: str, workdir: str) -> Path:
+def _resolve_return_file(path_value: str, workspace_path: str) -> Path:
     path = Path(path_value).expanduser()
     if not path.is_absolute():
-        path = Path(workdir) / path
+        path = Path(workspace_path) / path
     return path.resolve()
 
 
-def _capture_file(path_value: str, workdir: str) -> dict:
-    path = _resolve_return_file(path_value, workdir)
+def _capture_file(path_value: str, workspace_path: str) -> dict:
+    path = _resolve_return_file(path_value, workspace_path)
     if not path.exists():
         return {
             "path": str(path),
@@ -87,30 +140,31 @@ def _capture_file(path_value: str, workdir: str) -> dict:
     }
 
 
-def _collect_files(paths: List[str], workdir: str) -> List[dict]:
+def _collect_files(paths: List[str], workspace_path: str) -> List[dict]:
     deduped: List[str] = []
     seen: set[str] = set()
     for value in paths:
         if value not in seen:
             deduped.append(value)
             seen.add(value)
-    return [_capture_file(value, workdir) for value in deduped]
+    return [_capture_file(value, workspace_path) for value in deduped]
 
 
 def _run_command(
     *,
     kind: str,
     command: List[str],
-    workdir: str,
+    workspace_path: str,
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
 ) -> dict:
+    resolved_workspace = _resolve_existing_directory(workspace_path)
     started = time.perf_counter()
     try:
         completed = subprocess.run(
             command,
-            cwd=workdir,
+            cwd=resolved_workspace,
             env=_merge_env(env),
             capture_output=True,
             text=True,
@@ -126,12 +180,12 @@ def _run_command(
         ) from exc
 
     duration = time.perf_counter() - started
-    files = _collect_files(return_files or [], workdir)
+    files = _collect_files(return_files or [], resolved_workspace)
     return {
         "ok": completed.returncode == 0,
         "kind": kind,
         "command": command,
-        "workdir": workdir,
+        "workspace_path": resolved_workspace,
         "returncode": completed.returncode,
         "duration_seconds": duration,
         "output": {
@@ -146,7 +200,7 @@ def run_generic_command(
     *,
     kind: str,
     command: List[str],
-    workdir: str,
+    workspace_path: str,
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
@@ -154,7 +208,7 @@ def run_generic_command(
     return _run_command(
         kind=kind,
         command=command,
-        workdir=_resolve_workdir(workdir),
+        workspace_path=workspace_path,
         env=env,
         timeout_seconds=timeout_seconds,
         return_files=return_files,
@@ -166,7 +220,7 @@ def run_profile(
     profiler: str,
     target_command: List[str],
     profiler_args: List[str],
-    workdir: str,
+    workspace_path: str,
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
@@ -181,7 +235,7 @@ def run_profile(
     return _run_command(
         kind="profile",
         command=command,
-        workdir=_resolve_workdir(workdir),
+        workspace_path=workspace_path,
         env=env,
         timeout_seconds=timeout_seconds,
         return_files=return_files,
@@ -192,7 +246,7 @@ def run_cuda_binary(
     *,
     binary_path: str,
     args: List[str],
-    workdir: Optional[str],
+    workspace_path: str,
     env: Dict[str, str],
     timeout_seconds: int,
     return_files: Optional[List[str]] = None,
@@ -212,12 +266,11 @@ def run_cuda_binary(
     if not os.access(binary, os.X_OK):
         raise HTTPException(status_code=400, detail=f"binary is not executable: {binary}")
 
-    resolved_workdir = _resolve_workdir(workdir)
     command = [str(binary), *args]
     return _run_command(
         kind="execute",
         command=command,
-        workdir=resolved_workdir,
+        workspace_path=workspace_path,
         env=env,
         timeout_seconds=timeout_seconds,
         return_files=return_files,

@@ -4,7 +4,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from _cli_common import default_workdir, emit_result, ensure_repo_root_on_path, parse_env_assignments, print_command_preview
+from _cli_common import (
+    add_metadata_args,
+    emit_result,
+    ensure_repo_root_on_path,
+    parse_env_assignments,
+    print_command_preview,
+    resolve_workspace_from_args,
+)
 
 ensure_repo_root_on_path()
 
@@ -16,7 +23,7 @@ NSYS = Path("/usr/local/bin/nsys")
 
 
 def add_common_execution_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--workdir", default=None, help="Working directory for profiling")
+    add_metadata_args(parser)
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--timeout", type=int, default=1800, help="Timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Emit result as JSON")
@@ -65,7 +72,7 @@ def normalize_target_command(command: list[str], parser: argparse.ArgumentParser
     if command and command[0] == "--":
         command = command[1:]
     if not command:
-        parser.error("Missing target command. Example: profile.py ncu --workdir /tmp -- ./a.out")
+        parser.error("Missing target command. Example: profile.py ncu --run-tag alpha --version v1 --direction-id 1 --direction-slug test --turn 0 -- ./a.out")
     return command
 
 
@@ -97,7 +104,7 @@ def main() -> int:
     nsys_parser.add_argument("target_command", nargs=argparse.REMAINDER, help="Target command, usually passed after --")
 
     args = parser.parse_args()
-    workdir = default_workdir(args.workdir)
+    workspace_path = resolve_workspace_from_args(args)
     env = parse_env_assignments(args.env)
     target_command = normalize_target_command(list(args.target_command), parser)
 
@@ -108,7 +115,7 @@ def main() -> int:
         profiler_args = build_nsys_args(args)
         preview_command = [str(NSYS), *profiler_args, *target_command]
 
-    print_command_preview(preview_command, workdir)
+    print_command_preview(preview_command, workspace_path)
     if args.dry_run_only:
         return 0
 
@@ -116,7 +123,7 @@ def main() -> int:
         profiler=args.profiler,
         target_command=target_command,
         profiler_args=profiler_args,
-        workdir=workdir,
+        workspace_path=workspace_path,
         env=env,
         timeout_seconds=args.timeout,
     )

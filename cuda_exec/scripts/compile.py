@@ -4,7 +4,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from _cli_common import default_workdir, emit_result, ensure_repo_root_on_path, parse_env_assignments, print_command_preview
+from _cli_common import (
+    add_metadata_args,
+    emit_result,
+    ensure_repo_root_on_path,
+    parse_env_assignments,
+    print_command_preview,
+    resolve_workspace_from_args,
+)
 
 ensure_repo_root_on_path()
 
@@ -50,7 +57,7 @@ def build_ptxas_command(args: argparse.Namespace) -> list[str]:
 
 
 def add_common_execution_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--workdir", default=None, help="Working directory for command execution")
+    add_metadata_args(parser)
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Emit result as JSON")
@@ -92,7 +99,7 @@ def main() -> int:
     add_common_execution_args(ptxas_parser)
 
     args = parser.parse_args()
-    workdir = default_workdir(args.workdir)
+    workspace_path = resolve_workspace_from_args(args)
     env = parse_env_assignments(args.env)
 
     if args.tool == "nvcc":
@@ -100,14 +107,14 @@ def main() -> int:
     else:
         command = build_ptxas_command(args)
 
-    print_command_preview(command, workdir)
+    print_command_preview(command, workspace_path)
     if args.dry_run_only:
         return 0
 
     result = run_generic_command(
         kind="compile",
         command=command,
-        workdir=workdir,
+        workspace_path=workspace_path,
         env=env,
         timeout_seconds=args.timeout,
     )

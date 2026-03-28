@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class Metadata(BaseModel):
+    run_tag: str = Field(..., min_length=1, description="Agent run namespace tag")
     version: str = Field(..., min_length=1, description="Agent/API version tag")
     direction_id: int = Field(..., ge=0, description="Stable integer id for a research direction")
     direction_slug: str = Field(
@@ -25,7 +26,6 @@ class RequestBase(BaseModel):
 
 
 class CommandRequest(RequestBase):
-    workdir: str = Field(..., description="Working directory for command execution")
     command: List[str] = Field(..., min_length=1, description="Executable plus arguments")
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
@@ -44,7 +44,6 @@ class EvaluateRequest(CommandRequest):
 
 class ProfileRequest(RequestBase):
     profiler: Literal["ncu", "nsys"] = Field(..., description="Profiler backend")
-    workdir: str = Field(..., description="Working directory for profiling")
     target_command: List[str] = Field(..., min_length=1, description="Command to profile")
     profiler_args: List[str] = Field(default_factory=list, description="Extra profiler arguments")
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
@@ -54,7 +53,6 @@ class ProfileRequest(RequestBase):
 class ExecuteRequest(RequestBase):
     binary_path: str = Field(..., description="Absolute path to a CUDA Toolkit binary")
     args: List[str] = Field(default_factory=list, description="Arguments passed to the binary")
-    workdir: Optional[str] = Field(default=None, description="Optional working directory")
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
 
@@ -80,7 +78,7 @@ class CommandResponse(BaseModel):
     ok: bool
     kind: str
     command: List[str]
-    workdir: str
+    workspace_path: str
     returncode: int
     duration_seconds: float
     output: CommandOutput

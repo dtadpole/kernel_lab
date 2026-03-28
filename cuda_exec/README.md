@@ -13,6 +13,7 @@ Python dependencies and its own `uv` environment independently from the rest of 
 All command-style request and response payloads must include a required `metadata` object.
 Within `metadata`, all of the following fields are required:
 
+- `run_tag`
 - `version`
 - `direction_id`
 - `direction_slug`
@@ -23,6 +24,7 @@ Recommended shape:
 ```json
 {
   "metadata": {
+    "run_tag": "blackwell_agent_a",
     "version": "v1",
     "direction_id": 3,
     "direction_slug": "warp_specialized_async_pipeline",
@@ -31,9 +33,47 @@ Recommended shape:
 }
 ```
 
+## Workspace convention (required)
+
+The API does **not** accept an explicit working directory.
+
+Instead, `cuda_exec` resolves a deterministic workspace from metadata using this convention:
+
+```text
+~/.code_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
+```
+
+On this machine, that means:
+
+```text
+/home/centos/.code_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
+```
+
+Within each turn directory, `cuda_exec` creates these fixed subdirectories:
+
+```text
+workspace/
+outputs/
+logs/
+profiles/
+tmp/
+```
+
+All command execution currently happens with cwd set to:
+
+```text
+.../turn_<turn>/workspace/
+```
+
+Accordingly, command-style responses return:
+
+- `workspace_path`
+
+instead of a caller-specified `workdir`.
+
 ## Response contract (fixed structure)
 
-Command-style responses now contain two structured sections:
+Command-style responses contain two structured sections:
 
 1. `output`
    - `stdout`
@@ -56,41 +96,41 @@ Current file capture behavior:
 Simple health check.
 
 ### `POST /compile`
-Run a compile command in a working directory.
+Run a compile command in the metadata-derived workspace.
 
 Request shape:
 
 ```json
 {
   "metadata": {
+    "run_tag": "blackwell_agent_a",
     "version": "v1",
     "direction_id": 3,
     "direction_slug": "warp_specialized_async_pipeline",
     "turn": 12
   },
-  "workdir": "/home/centos/kernel_lab",
-  "command": ["bash", "-lc", "make -C /home/centos/cuda_example binary"],
+  "command": ["bash", "-lc", "make binary"],
   "env": {},
   "timeout_seconds": 300,
-  "artifacts": ["build/output.ptx"],
-  "return_files": ["build/logs/compile.log"]
+  "artifacts": ["outputs/build/output.ptx"],
+  "return_files": ["logs/compile.log"]
 }
 ```
 
 ### `POST /evaluate`
-Run an evaluation command in a working directory.
+Run an evaluation command in the metadata-derived workspace.
 
 Request shape:
 
 ```json
 {
   "metadata": {
+    "run_tag": "blackwell_agent_a",
     "version": "v1",
     "direction_id": 3,
     "direction_slug": "warp_specialized_async_pipeline",
     "turn": 12
   },
-  "workdir": "/home/centos/kernel_lab",
   "command": ["bash", "-lc", "python evaluator.py"],
   "env": {},
   "timeout_seconds": 300,
@@ -100,30 +140,30 @@ Request shape:
 ```
 
 ### `POST /profile`
-Run a profiler (`ncu` or `nsys`) against a target command.
+Run a profiler (`ncu` or `nsys`) against a target command in the metadata-derived workspace.
 
 Request shape:
 
 ```json
 {
   "metadata": {
+    "run_tag": "blackwell_agent_a",
     "version": "v1",
     "direction_id": 3,
     "direction_slug": "warp_specialized_async_pipeline",
     "turn": 12
   },
   "profiler": "ncu",
-  "workdir": "/home/centos/cuda_example",
-  "target_command": ["./build/bin/vector_add_inline_ptx_profile"],
+  "target_command": ["./outputs/bin/vector_add_inline_ptx_profile"],
   "profiler_args": ["--set", "default", "--target-processes", "all"],
   "env": {},
   "timeout_seconds": 1800,
-  "return_files": ["/tmp/vector_add_inline_ptx-ncu.ncu-rep"]
+  "return_files": ["profiles/vector_add_inline_ptx-ncu.ncu-rep"]
 }
 ```
 
 ### `POST /execute`
-Run a CUDA Toolkit binary directly.
+Run a CUDA Toolkit binary directly in the metadata-derived workspace.
 
 Current rule:
 - `binary_path` must point under `/usr/local/cuda/bin`
@@ -134,6 +174,7 @@ Request shape:
 ```json
 {
   "metadata": {
+    "run_tag": "blackwell_agent_a",
     "version": "v1",
     "direction_id": 3,
     "direction_slug": "warp_specialized_async_pipeline",
@@ -141,7 +182,6 @@ Request shape:
   },
   "binary_path": "/usr/local/cuda/bin/ptxas",
   "args": ["--version"],
-  "workdir": "/home/centos/kernel_lab",
   "env": {},
   "timeout_seconds": 60,
   "return_files": []
@@ -154,6 +194,7 @@ All command-style endpoints return the required `metadata` object back in the re
 ```json
 {
   "metadata": {
+    "run_tag": "blackwell_agent_a",
     "version": "v1",
     "direction_id": 3,
     "direction_slug": "warp_specialized_async_pipeline",
@@ -162,7 +203,7 @@ All command-style endpoints return the required `metadata` object back in the re
   "ok": true,
   "kind": "compile",
   "command": ["bash", "-lc", "echo hi"],
-  "workdir": "/tmp",
+  "workspace_path": "/home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/workspace",
   "returncode": 0,
   "duration_seconds": 0.123,
   "output": {
@@ -171,7 +212,7 @@ All command-style endpoints return the required `metadata` object back in the re
   },
   "files": [
     {
-      "path": "/tmp/result.txt",
+      "path": "/home/centos/.code_exec/blackwell_agent_a/v1/3_warp_specialized_async_pipeline/turn_12/workspace/result.txt",
       "name": "result.txt",
       "exists": true,
       "size_bytes": 42,
@@ -186,13 +227,14 @@ All command-style endpoints return the required `metadata` object back in the re
 
 ## CLI scripts
 
-Under `cuda_exec/scripts/` there are now three command-line helpers:
+Under `cuda_exec/scripts/` there are three command-line helpers:
 
 - `compile.py`
 - `evaluate.py`
 - `profile.py`
 
-These scripts are meant to show the exact underlying CUDA Toolkit invocation and can also execute it.
+These scripts follow the same metadata-derived workspace convention as the API.
+They do **not** accept an explicit working directory.
 
 ### Compile examples
 
@@ -202,9 +244,13 @@ Show the exact `nvcc` command without executing it:
 cd /home/centos/kernel_lab
 source cuda_exec/.venv/bin/activate
 python cuda_exec/scripts/compile.py nvcc \
-  --workdir /home/centos/cuda_example \
-  --source vector_add_inline_ptx.cu \
-  --output /tmp/vector_add_inline_ptx.ptx \
+  --run-tag blackwell_agent_a \
+  --version v1 \
+  --direction-id 3 \
+  --direction-slug warp_specialized_async_pipeline \
+  --turn 12 \
+  --source kernel.cu \
+  --output outputs/kernel.ptx \
   --mode ptx \
   --arch native \
   --dry-run-only
@@ -214,9 +260,13 @@ Show the exact `ptxas` command without executing it:
 
 ```bash
 python cuda_exec/scripts/compile.py ptxas \
-  --workdir /home/centos/cuda_example \
-  --input build/intermediate/vector_add_inline_ptx.ptx \
-  --output /tmp/vector_add_inline_ptx.cubin \
+  --run-tag blackwell_agent_a \
+  --version v1 \
+  --direction-id 3 \
+  --direction-slug warp_specialized_async_pipeline \
+  --turn 12 \
+  --input outputs/kernel.ptx \
+  --output outputs/kernel.cubin \
   --arch sm_120 \
   --verbose \
   --dry-run-only
@@ -226,8 +276,12 @@ python cuda_exec/scripts/compile.py ptxas \
 
 ```bash
 python cuda_exec/scripts/evaluate.py \
-  --workdir /home/centos/cuda_example \
-  -- bash -lc './build/bin/vector_add_inline_ptx --bench --warmup 10 --iterations 20'
+  --run-tag blackwell_agent_a \
+  --version v1 \
+  --direction-id 3 \
+  --direction-slug warp_specialized_async_pipeline \
+  --turn 12 \
+  -- bash -lc './outputs/bin/kernel_bench --bench'
 ```
 
 ### Profile examples
@@ -236,24 +290,32 @@ Show the exact `ncu` command without executing it:
 
 ```bash
 python cuda_exec/scripts/profile.py ncu \
-  --workdir /home/centos/cuda_example \
+  --run-tag blackwell_agent_a \
+  --version v1 \
+  --direction-id 3 \
+  --direction-slug warp_specialized_async_pipeline \
+  --turn 12 \
   --set-name default \
   --target-processes all \
-  --export /tmp/vector_add_inline_ptx-ncu \
+  --export profiles/vector_add_inline_ptx-ncu \
   --dry-run-only \
-  -- ./build/bin/vector_add_inline_ptx_profile
+  -- ./outputs/bin/vector_add_inline_ptx_profile
 ```
 
 Show the exact `nsys` command without executing it:
 
 ```bash
 python cuda_exec/scripts/profile.py nsys \
-  --workdir /home/centos/cuda_example \
+  --run-tag blackwell_agent_a \
+  --version v1 \
+  --direction-id 3 \
+  --direction-slug warp_specialized_async_pipeline \
+  --turn 12 \
   --trace cuda,nvtx,osrt \
-  --output /tmp/vector_add_inline_ptx-nsys \
+  --output profiles/vector_add_inline_ptx-nsys \
   --force-overwrite \
   --dry-run-only \
-  -- ./build/bin/vector_add_inline_ptx_profile
+  -- ./outputs/bin/vector_add_inline_ptx_profile
 ```
 
 ## Deployment / local run

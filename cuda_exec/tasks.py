@@ -270,10 +270,20 @@ def _parse_structured_stdout(stdout: str) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _fallback_performance_summary(run_result: dict, *, source: str) -> dict:
+def _config_metadata(config: ConfigSpec) -> dict:
+    meta = {
+        "num_layers": config.num_layers,
+        "embedding_size": config.embedding_size,
+        "num_heads": config.num_heads,
+    }
+    meta.update(config.extra)
+    return {k: v for k, v in meta.items() if v is not None}
+
+
+def _fallback_performance_summary(run_result: dict, *, source: str, config: ConfigSpec) -> dict:
     duration_ms = run_result["duration_seconds"] * 1000.0
     return {
-        "metadata": {"source": source},
+        "metadata": {"source": source, **_config_metadata(config)},
         "latency_ms": {
             "min": duration_ms,
             "median": duration_ms,
@@ -284,27 +294,39 @@ def _fallback_performance_summary(run_result: dict, *, source: str) -> dict:
     }
 
 
-def _evaluate_correctness_summary(run_result: dict) -> dict:
+def _evaluate_correctness_summary(run_result: dict, *, config: ConfigSpec) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("correctness"), dict):
-        return payload["correctness"]
-    return {"metadata": {"source": "not_provided"}}
+        correctness = payload["correctness"]
+        correctness.setdefault("metadata", {})
+        correctness["metadata"] = {**_config_metadata(config), **correctness["metadata"]}
+        return correctness
+    return {"metadata": {"source": "not_provided", **_config_metadata(config)}}
 
 
-def _evaluate_performance_summary(run_result: dict) -> dict:
+def _evaluate_performance_summary(run_result: dict, *, config: ConfigSpec) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("performance"), dict):
-        return payload["performance"]
-    return _fallback_performance_summary(run_result, source="process_duration_fallback")
+        performance = payload["performance"]
+        performance.setdefault("metadata", {})
+        performance["metadata"] = {**_config_metadata(config), **performance["metadata"]}
+        return performance
+    return _fallback_performance_summary(run_result, source="process_duration_fallback", config=config)
 
 
-def _profile_summary(run_result: dict) -> dict:
+def _profile_summary(run_result: dict, *, config: ConfigSpec) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("summary"), dict):
-        return payload["summary"]
+        summary = payload["summary"]
+        summary.setdefault("metadata", {})
+        summary["metadata"] = {**_config_metadata(config), **summary["metadata"]}
+        return summary
     if payload and isinstance(payload.get("performance"), dict):
-        return payload["performance"]
-    return _fallback_performance_summary(run_result, source="process_duration_fallback")
+        summary = payload["performance"]
+        summary.setdefault("metadata", {})
+        summary["metadata"] = {**_config_metadata(config), **summary["metadata"]}
+        return summary
+    return _fallback_performance_summary(run_result, source="process_duration_fallback", config=config)
 
 
 def _summarize_config_outputs(config_results: Dict[str, dict]) -> dict:
@@ -581,8 +603,8 @@ def run_evaluate_task(
             config_slug=config_slug,
             config=config,
             run_result=run_result,
-            correctness=_evaluate_correctness_summary(run_result),
-            performance=_evaluate_performance_summary(run_result),
+            correctness=_evaluate_correctness_summary(run_result, config=config),
+            performance=_evaluate_performance_summary(run_result, config=config),
         )
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
@@ -695,7 +717,7 @@ def run_profile_task(
             config=config,
             run_result=run_result,
             artifacts=config_artifacts,
-            summary=_profile_summary(run_result),
+            summary=_profile_summary(run_result, config=config),
         )
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])

@@ -1,126 +1,127 @@
-# cuda_exec V0 Design
+# cuda_exec Design
 
-This document defines the **early-version convention** for `cuda_exec`.
+This file is the **single source of truth** for `cuda_exec` conventions.
 
-The main goal is to keep the agent-facing API as small and predictable as possible.
-The service is intentionally **convention-driven**. If a behavior can be fixed by
-convention, it should not be pushed onto the agent as an extra input field.
+`README.md` should stay short. Detailed behavior, workflow rules, naming rules, and
+runtime layout all live here.
 
-## Design goals
-
-1. Keep agent inputs minimal.
-2. Make workflow ordering explicit and enforceable.
-3. Make turns immutable.
-4. Persist all runtime outputs locally on the machine.
-5. Keep the local directory layout stable and easy to inspect.
+The design goal is to keep the agent-facing API and the agent mental model as small
+as possible.
 
 ---
 
-## 1. Workflow convention
+## 1. Core mental model
 
-`cuda_exec` uses a fixed workflow:
+Use only these four concepts when thinking about runtime files:
 
-1. `compile`
-2. `evaluate` (optional)
-3. `profile` (optional)
-4. `execute` for special/tooling cases only
+1. **workspace = inputs + scratch**
+2. **artifacts = kept results**
+3. **logs = process output**
+4. **state = workflow record**
 
-### Workflow rules
+That is the intended mental model for agents and for the UI.
 
-- `compile` must happen **first** within a turn.
-- `compile` may run **only once** within a turn.
-- `evaluate` and `profile` are only valid **after** `compile` has already run in the same turn.
-- If `evaluate` or `profile` is called before `compile`, the service must return a workflow error telling the caller to run `compile` first.
-- If a caller wants to retry with different inputs, it must start a **new turn**.
-- Old turns are **immutable**. A turn is not edited in place.
-- In V0, new uploaded files after `compile` always imply a **new turn**.
+### What each means
 
-### Why this is the convention
+#### `workspace`
 
-This keeps the API simple for agents:
+`workspace` is the execution working area.
+It is **not** "input only".
 
-- the agent does not choose a target artifact
-- the agent does not choose return-file sets
-- the agent only chooses the workflow step to run
+It contains:
 
----
+- staged input files
+- scratch/intermediate files created during execution
+- the current cwd for launched processes
 
-## 2. Agent-facing request model
+Simple rule:
 
-### `POST /compile`
+- if a file is only needed to make this run work, it can stay in `workspace`
 
-Required:
+#### `artifacts`
 
-- `metadata`
-- `original_files`
-- `generated_files`
+`artifacts` means **kept results**.
+These are files worth preserving, showing in the UI, or reusing later.
 
-Optional:
+Examples:
 
-- `timeout_seconds`
+- compiled binaries
+- `.ptx` / `.cubin` outputs worth keeping
+- profiler reports
+- any explicit result file the service wants to retain
 
-### `POST /evaluate`
+Simple rule:
 
-Required:
+- if a file should be kept after the run and treated as a result, it belongs in `artifacts`
 
-- `metadata`
+#### `logs`
 
-Optional:
+`logs` means **process output**.
 
-- `timeout_seconds`
+This includes:
 
-### `POST /profile`
+- combined log files
+- stdout captures
+- stderr captures
 
-Required:
+#### `state`
 
-- `metadata`
+`state` means **workflow record**.
 
-Optional:
+This includes:
 
-- `timeout_seconds`
-
-### `POST /execute`
-
-Required:
-
-- `metadata`
-- `command`
-
-Optional:
-
-- `env`
-- `timeout_seconds`
-
-### Intentionally omitted in V0
-
-The following are intentionally **not** agent inputs in V0:
-
-- `target_artifact_id`
-- `return_files`
-
-These are fixed by convention instead of being chosen by the caller.
+- metadata for the turn
+- workflow rules/invariants
+- stage status
+- selected inputs
+- config lists
+- per-config results
+- references to kept outputs
 
 ---
 
-## 3. Compile artifact convention
+## 2. Current on-disk layout vs conceptual layout
 
-In V0, `compile` exposes exactly **one public compile artifact**:
+The **conceptual** layout should be thought of as:
 
-- `compile:primary_binary`
+```text
+turn_<turn>/
+  workspace/
+  artifacts/
+  logs/
+  state/
+```
 
-That is the executable produced by the hardened compile flow for the turn.
+That is the recommended mental model.
 
-`evaluate` and `profile` both consume this artifact by convention.
-The agent does not specify which artifact to use.
+### Current implementation note
 
-Other files such as logs, state manifests, and profile reports exist, but they are treated as
-**convention-defined stage outputs**, not agent-selectable compile inputs.
+The current code still materializes kept results in multiple directories:
+
+- `outputs/`
+- `profiles/`
+
+and may also create:
+
+- `tmp/`
+
+For agent reasoning and UI explanation, treat:
+
+- `outputs/` + `profiles/` as the **artifact bucket**
+- `tmp/` as an implementation detail, not a core concept
+
+So even before the code is simplified further, the agent mental model should remain:
+
+- `workspace`
+- `artifacts`
+- `logs`
+- `state`
 
 ---
 
-## 4. Turn and directory convention
+## 3. Turn root convention
 
-The runtime root is:
+The turn root is:
 
 ```text
 ~/.cuda_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
@@ -132,44 +133,204 @@ On this machine:
 /home/centos/.cuda_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
 ```
 
-Inside each turn root, `cuda_exec` creates a fixed layout:
+`turn_root` means the whole per-turn directory.
 
-```text
-turn_<turn>/
-  workspace/
-    original/
-    generated/
-  outputs/
-  logs/
-  profiles/
-  state/
-  tmp/
-```
-
-### Meaning of each directory
-
-- `workspace/`: execution cwd and staged source files
-- `workspace/original/`: copied original inputs
-- `workspace/generated/`: copied generated inputs
-- `outputs/`: primary runtime outputs from compile
-- `logs/`: local persisted logs for each stage
-- `profiles/`: profiler outputs
-- `state/`: machine-readable workflow state manifests
-- `tmp/`: scratch files
-
-### Important naming note
-
-- `turn_root` means the whole per-turn directory.
-- `workspace` means only the execution working directory under that turn.
-
-`workspace` should **not** be used as the name for the whole turn root.
+`workspace` means only the working directory under that turn root.
 
 ---
 
-## 5. Local logging convention
+## 4. Workflow convention
 
-For every stage that runs locally on the machine, `cuda_exec` must persist runtime output under
-that turn root.
+The workflow is fixed:
+
+1. `compile`
+2. `evaluate` (optional)
+3. `profile` (optional)
+4. `execute` for special/tooling cases only
+
+### Workflow rules
+
+- `compile` must happen first within a turn
+- `compile` may run only once within a turn
+- `evaluate` and `profile` require compile state from the same turn
+- if `evaluate` or `profile` is called before `compile`, the service returns a workflow error
+- if new files are uploaded after `compile`, the caller must start a new turn
+- old turns are immutable
+
+The point is to keep the caller simple:
+
+- the agent chooses the workflow step
+- the service owns the workflow convention
+
+---
+
+## 5. Compile vs runtime config
+
+This is an important design rule.
+
+### Compile is code-level
+
+`compile` is about building the code artifact for the turn.
+
+In the intended design:
+
+- compile runs once per turn
+- compile does **not** vary across model/runtime configs
+- the compiled code should be generic enough to support all supported configs for that turn
+
+### Evaluate / profile are config-level
+
+`evaluate` and `profile` run the compiled artifact against one or more **runtime configs**.
+
+This means:
+
+- a single compile may be followed by many evaluate runs
+- a single compile may be followed by many profile runs
+- these runs differ by config, not by source code
+
+Examples of config fields:
+
+- transformer layer count
+- embedding size
+- number of heads
+- whether causal masking is enabled
+
+For FA4-style usage, one compiled artifact may be evaluated/profiled against 8 configs,
+for example:
+
+- 4 causal configs
+- 4 non-causal configs
+
+That is normal and should be represented explicitly in the design.
+
+---
+
+## 6. Config convention
+
+`config` is a first-class runtime concept for `evaluate` and `profile`.
+
+### Design intent
+
+- code stays the same
+- config changes
+- `evaluate` and `profile` consume configs
+- config does not imply recompilation unless the source code itself changes
+
+### Recommended request shape
+
+`compile` should continue to take code inputs only.
+
+`evaluate` and `profile` should accept a list of runtime configs, conceptually:
+
+```json
+{
+  "metadata": { "...": "..." },
+  "configs": [
+    {
+      "config_id": "fa4_causal_l12_e4096_h32",
+      "num_layers": 12,
+      "embedding_size": 4096,
+      "num_heads": 32,
+      "causal": true
+    },
+    {
+      "config_id": "fa4_noncausal_l12_e4096_h32",
+      "num_layers": 12,
+      "embedding_size": 4096,
+      "num_heads": 32,
+      "causal": false
+    }
+  ]
+}
+```
+
+The important rule is not the exact schema shape. The important rule is:
+
+- compile is code-level
+- evaluate/profile are config-level
+
+### Why this helps
+
+This keeps recompilation logic simple:
+
+- one code artifact
+- many runtime configs
+- many evaluate/profile results
+
+That matches the FA4-style use case and avoids unnecessary compile churn.
+
+---
+
+## 7. Attempt convention
+
+Repeated stage calls should not overwrite one another.
+
+The recommended naming convention is:
+
+- `compile.attempt_001.*`
+- `evaluate.attempt_001.*`
+- `evaluate.attempt_002.*`
+- `profile.attempt_001.*`
+- `execute.attempt_001.*`
+
+Even though compile only runs once per turn, using `attempt_001` there too keeps naming uniform.
+
+### Why attempts exist
+
+- avoid overwriting local files
+- keep history for repeated `evaluate`, `profile`, and `execute`
+- make UI ordering simpler
+- keep file naming uniform across stages
+
+### Timestamp guidance
+
+Timestamps are still useful, but they should usually live in `state` rather than being the primary filename key.
+
+Recommended pattern:
+
+- filenames use `attempt_###`
+- state records `started_at` / `finished_at`
+
+---
+
+## 8. Config results and file layout
+
+A stage attempt may contain multiple configs.
+
+The simple conceptual model is:
+
+- one stage attempt
+- many config results under that attempt
+
+### Recommended state behavior
+
+`state/<stage>.attempt_###.json` should record:
+
+- metadata
+- attempt number
+- timestamps
+- config list
+- per-config result summaries
+- references to kept outputs
+
+### Recommended artifact behavior
+
+If a config produces a kept result, its filename should carry both stage attempt and config identity.
+
+Examples:
+
+```text
+artifacts/profile.attempt_001.config_fa4_causal_l12_e4096_h32.ncu-rep
+artifacts/profile.attempt_001.config_fa4_noncausal_l12_e4096_h32.ncu-rep
+```
+
+If a config produces only transient data, that data can remain in `workspace`.
+
+---
+
+## 9. Local process output convention
+
+For every stage that launches a local process, the service persists process output under `logs`.
 
 This applies to:
 
@@ -178,249 +339,65 @@ This applies to:
 - `profile`
 - `execute`
 
-Each stage writes:
-
-- a combined log file
-- a stdout file
-- a stderr file
-
-### Stage log files
-
-#### Compile
+Recommended files per stage attempt:
 
 ```text
-logs/compile.log
-logs/compile.stdout
-logs/compile.stderr
+logs/<stage>.attempt_###.log
+logs/<stage>.attempt_###.stdout
+logs/<stage>.attempt_###.stderr
 ```
 
-#### Evaluate
+These files exist even if stdout/stderr are also returned in the HTTP response.
 
-```text
-logs/evaluate.log
-logs/evaluate.stdout
-logs/evaluate.stderr
-```
+### `execute` specifically
 
-#### Profile
+`execute` is the most generic stage, so its contract should stay simple:
 
-```text
-logs/profile.log
-logs/profile.stdout
-logs/profile.stderr
-```
-
-#### Execute
-
-```text
-logs/execute.log
-logs/execute.stdout
-logs/execute.stderr
-```
-
-This logging convention exists even if stdout/stderr are also returned in the HTTP response.
-The local copies are the source of truth for later inspection.
+- process output always goes to `logs`
+- meaningful kept result files should be written explicitly to `artifacts`
+- scratch/intermediate files can remain in `workspace`
 
 ---
 
-## 6. State-file convention
+## 10. CWD convention
 
-Each workflow stage writes a state file under `state/`.
+When the service launches a process, the **initial cwd** is the current turn's `workspace`.
 
-### Compile
+That is the service guarantee.
 
-```text
-state/compile.json
-```
+More precisely:
 
-Contains at least:
+- the service resolves the current turn root from metadata
+- it sets `cwd = <turn_root>/workspace/` when launching the process
 
-- request metadata
-- workflow invariants
-- compile status
-- selected source
-- primary artifact convention
+The service does **not** guarantee that the invoked program will remain inside that directory if the program itself:
 
-### Evaluate
+- changes cwd internally
+- writes to absolute paths
+- spawns child processes with different path behavior
 
-```text
-state/evaluate.json
-```
+So the correct guarantee is:
 
-Contains at least:
-
-- request metadata
-- workflow invariants
-- evaluate status
-- compile input used
-
-### Profile
-
-```text
-state/profile.json
-```
-
-Contains at least:
-
-- request metadata
-- workflow invariants
-- profile status
-- compile input used
-- profiler identity (`ncu` in V0)
+- initial cwd is the current turn's `workspace`
 
 ---
 
-## 7. Response convention
+## 11. Caller-facing simplicity rules
 
-All command-style responses return:
+To keep agent behavior simple:
 
-- `metadata`
-- `ok`
-- `kind`
-- `command`
-- `turn_root`
-- `workspace_path`
-- `returncode`
-- `duration_seconds`
-- `output.stdout`
-- `output.stderr`
-- `artifacts[]`
-- `files[]`
-
-### Why `artifacts[]` still exists in V0
-
-`artifacts[]` is still useful as an output description, even though the agent does not choose
-artifact ids as input parameters.
-
-In V0, the important part is:
-
-- the agent does **not** pass artifact-selection fields
-- the service may still describe its outputs using a simple artifact convention
+- do not ask the agent to choose artifact ids in V0
+- do not ask the agent to choose returned file sets in V0
+- let the agent provide code at compile time
+- let the agent provide runtime configs at evaluate/profile time
+- let the service own file placement, logging, and workflow rules
 
 ---
 
-## 8. Fixed returned files by stage
+## 12. Document structure
 
-Returned files are fixed by convention in V0.
-The caller does not choose them.
+To reduce duplication:
 
-### Compile returns by convention
-
-- `outputs/<stem>`
-- `logs/compile.log`
-- `logs/compile.stdout`
-- `logs/compile.stderr`
-- `state/compile.json`
-
-### Evaluate returns by convention
-
-- `logs/evaluate.log`
-- `logs/evaluate.stdout`
-- `logs/evaluate.stderr`
-- `state/evaluate.json`
-
-### Profile returns by convention
-
-- `profiles/<stem>-ncu.ncu-rep`
-- `logs/profile.log`
-- `logs/profile.stdout`
-- `logs/profile.stderr`
-- `state/profile.json`
-
-### Execute returns by convention
-
-- `logs/execute.log`
-- `logs/execute.stdout`
-- `logs/execute.stderr`
-
----
-
-## 9. UI / control-plane display convention
-
-The UI should present the workflow and returned outputs explicitly.
-
-### Workflow banner
-
-The UI should make these rules visible:
-
-- compile first
-- compile once per turn
-- new files require a new turn
-- old turns are immutable
-
-### Per-stage output display
-
-For each stage, the UI should show:
-
-- stage status
-- return code
-- stdout
-- stderr
-- returned files
-- important stage outputs
-
-### Stage-specific highlights
-
-#### Compile
-Show:
-
-- primary binary path
-- compile log paths
-- compile state path
-
-#### Evaluate
-Show:
-
-- input binary used
-- evaluate log paths
-- evaluate state path
-
-#### Profile
-Show:
-
-- input binary used
-- profiler report path
-- profile log paths
-- profile state path
-
-#### Execute
-Show:
-
-- command actually run
-- execute log paths
-
----
-
-## 10. Runtime output layout example
-
-Example turn root:
-
-```text
-/home/centos/.cuda_exec/agent_a/v1/7_convention/turn_3/
-  workspace/
-    original/
-      baseline.cu
-    generated/
-      candidate.cu
-  outputs/
-    candidate
-  logs/
-    compile.log
-    compile.stdout
-    compile.stderr
-    evaluate.log
-    evaluate.stdout
-    evaluate.stderr
-    profile.log
-    profile.stdout
-    profile.stderr
-  profiles/
-    candidate-ncu.ncu-rep
-  state/
-    compile.json
-    evaluate.json
-    profile.json
-  tmp/
-```
-
-This is the reference layout that the control plane and docs should describe.
+- `DESIGN.md` is the detailed design source of truth
+- `README.md` should be short and point here
+- `AGENTS.md` should contain only repo-level instructions and high-level conventions

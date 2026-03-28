@@ -255,6 +255,58 @@ def _dedupe_artifacts(artifacts: List[dict]) -> List[dict]:
     return out
 
 
+def _status_from_run_result(run_result: dict) -> str:
+    return "ok" if run_result["ok"] else "error"
+
+
+def _parse_structured_stdout(stdout: str) -> dict | None:
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _fallback_performance_summary(run_result: dict, *, source: str) -> dict:
+    duration_ms = run_result["duration_seconds"] * 1000.0
+    return {
+        "metadata": {"source": source},
+        "latency_ms": {
+            "min": duration_ms,
+            "median": duration_ms,
+            "max": duration_ms,
+            "mean": duration_ms,
+        },
+        "runs": 1,
+    }
+
+
+def _evaluate_correctness_summary(run_result: dict) -> dict:
+    payload = _parse_structured_stdout(run_result["output"]["stdout"])
+    if payload and isinstance(payload.get("correctness"), dict):
+        return payload["correctness"]
+    return {"metadata": {"source": "not_provided"}}
+
+
+def _evaluate_performance_summary(run_result: dict) -> dict:
+    payload = _parse_structured_stdout(run_result["output"]["stdout"])
+    if payload and isinstance(payload.get("performance"), dict):
+        return payload["performance"]
+    return _fallback_performance_summary(run_result, source="process_duration_fallback")
+
+
+def _profile_summary(run_result: dict) -> dict:
+    payload = _parse_structured_stdout(run_result["output"]["stdout"])
+    if payload and isinstance(payload.get("summary"), dict):
+        return payload["summary"]
+    if payload and isinstance(payload.get("performance"), dict):
+        return payload["performance"]
+    return _fallback_performance_summary(run_result, source="process_duration_fallback")
+
+
 def _summarize_config_outputs(config_results: Dict[str, dict]) -> dict:
     stdout_parts: List[str] = []
     stderr_parts: List[str] = []
@@ -314,10 +366,13 @@ def _config_result_payload(
     config: ConfigSpec,
     run_result: dict,
     artifacts: List[dict] | None = None,
+    correctness: dict | None = None,
+    performance: dict | None = None,
+    summary: dict | None = None,
 ) -> dict:
-    return {
+    payload = {
         "config": _config_payload(config_slug, config),
-        "ok": run_result["ok"],
+        "status": _status_from_run_result(run_result),
         "command": run_result["command"],
         "returncode": run_result["returncode"],
         "duration_seconds": run_result["duration_seconds"],
@@ -325,6 +380,13 @@ def _config_result_payload(
         "artifacts": list(artifacts or []),
         "files": list(run_result["files"]),
     }
+    if correctness is not None:
+        payload["correctness"] = correctness
+    if performance is not None:
+        payload["performance"] = performance
+    if summary is not None:
+        payload["summary"] = summary
+    return payload
 
 
 def _finalize_stage_result(
@@ -339,12 +401,12 @@ def _finalize_stage_result(
     config_results: Dict[str, dict] | None = None,
     duration_seconds: float,
     returncode: int,
-    ok: bool,
+    all_ok: bool,
     output: dict,
 ) -> dict:
     return {
         "metadata": metadata.model_dump(),
-        "ok": ok,
+        "all_ok": all_ok,
         "kind": kind,
         "attempt": attempt,
         "command": command,
@@ -458,7 +520,7 @@ def run_compile_task(
             stage_files=run_result["files"],
             duration_seconds=time.perf_counter() - started,
             returncode=run_result["returncode"],
-            ok=run_result["ok"],
+            all_ok=run_result["ok"],
             output=run_result["output"],
         )
     except HTTPException as exc:
@@ -515,7 +577,13 @@ def run_evaluate_task(
             return_files=[config_rel],
             log_file=_stage_log_rel("evaluate", attempt, config_slug),
         )
-        payload = _config_result_payload(config_slug=config_slug, config=config, run_result=run_result)
+        payload = _config_result_payload(
+            config_slug=config_slug,
+            config=config,
+            run_result=run_result,
+            correctness=_evaluate_correctness_summary(run_result),
+            performance=_evaluate_performance_summary(run_result),
+        )
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
 
@@ -523,7 +591,7 @@ def run_evaluate_task(
         metadata,
         stage="evaluate",
         attempt=attempt,
-        status="ok" if all(item["ok"] for item in config_results.values()) else "error",
+        status="ok" if all(item["status"] == "ok" for item in config_results.values()) else "error",
     )
     manifest.update(
         {
@@ -532,9 +600,11 @@ def run_evaluate_task(
             "configs": {config_slug: _config_payload(config_slug, config) for config_slug, config in configs.items()},
             "config_results": {
                 config_slug: {
-                    "ok": item["ok"],
+                    "status": item["status"],
                     "returncode": item["returncode"],
                     "duration_seconds": item["duration_seconds"],
+                    "correctness": item.get("correctness", {}),
+                    "performance": item.get("performance", {}),
                 }
                 for config_slug, item in config_results.items()
             },
@@ -554,7 +624,7 @@ def run_evaluate_task(
     stage_artifacts.extend(manifest["artifacts"])
 
     output = _summarize_config_outputs(config_results)
-    overall_ok = all(item["ok"] for item in config_results.values())
+    overall_ok = all(item["status"] == "ok" for item in config_results.values())
     overall_returncode = next((item["returncode"] for item in config_results.values() if item["returncode"] != 0), 0)
     return _finalize_stage_result(
         metadata=metadata,
@@ -567,7 +637,7 @@ def run_evaluate_task(
         config_results=config_results,
         duration_seconds=time.perf_counter() - started,
         returncode=overall_returncode,
-        ok=overall_ok,
+        all_ok=overall_ok,
         output=output,
     )
 
@@ -625,6 +695,7 @@ def run_profile_task(
             config=config,
             run_result=run_result,
             artifacts=config_artifacts,
+            summary=_profile_summary(run_result),
         )
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
@@ -634,7 +705,7 @@ def run_profile_task(
         metadata,
         stage="profile",
         attempt=attempt,
-        status="ok" if all(item["ok"] for item in config_results.values()) else "error",
+        status="ok" if all(item["status"] == "ok" for item in config_results.values()) else "error",
     )
     manifest.update(
         {
@@ -644,9 +715,10 @@ def run_profile_task(
             "configs": {config_slug: _config_payload(config_slug, config) for config_slug, config in configs.items()},
             "config_results": {
                 config_slug: {
-                    "ok": item["ok"],
+                    "status": item["status"],
                     "returncode": item["returncode"],
                     "duration_seconds": item["duration_seconds"],
+                    "summary": item.get("summary", {}),
                     "artifacts": item["artifacts"],
                 }
                 for config_slug, item in config_results.items()
@@ -668,7 +740,7 @@ def run_profile_task(
     stage_artifacts = manifest["artifacts"]
 
     output = _summarize_config_outputs(config_results)
-    overall_ok = all(item["ok"] for item in config_results.values())
+    overall_ok = all(item["status"] == "ok" for item in config_results.values())
     overall_returncode = next((item["returncode"] for item in config_results.values() if item["returncode"] != 0), 0)
     return _finalize_stage_result(
         metadata=metadata,
@@ -681,7 +753,7 @@ def run_profile_task(
         config_results=config_results,
         duration_seconds=time.perf_counter() - started,
         returncode=overall_returncode,
-        ok=overall_ok,
+        all_ok=overall_ok,
         output=output,
     )
 
@@ -717,6 +789,6 @@ def run_execute_task(
         stage_files=list(run_result["files"]),
         duration_seconds=time.perf_counter() - started,
         returncode=run_result["returncode"],
-        ok=run_result["ok"],
+        all_ok=run_result["ok"],
         output=run_result["output"],
     )

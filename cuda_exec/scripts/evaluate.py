@@ -44,7 +44,7 @@ def main() -> int:
         configs={args.config_slug: config},
     )
     print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else result["returncode"]
+    return 0 if result["all_ok"] else result["returncode"]
 
 
 if __name__ == "__main__":

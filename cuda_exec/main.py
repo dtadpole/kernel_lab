@@ -114,7 +114,7 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
     attempt = result["attempt"]
     return CompileResponse(
         metadata=request.metadata,
-        ok=result["ok"],
+        all_ok=result["all_ok"],
         attempt=attempt,
         artifacts=_capture_public_files(result["workspace_path"], [_compile_binary_path(result)]),
         logs=_capture_public_files(result["workspace_path"], _stage_log_paths("compile", attempt)),
@@ -133,7 +133,9 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
     attempt = result["attempt"]
     items = {
         config_slug: EvaluateConfigOutput(
-            ok=item["ok"],
+            status=item["status"],
+            correctness=item.get("correctness", {}),
+            performance=item.get("performance", {}),
             logs=_capture_public_files(
                 result["workspace_path"],
                 _stage_log_paths("evaluate", attempt, config_slug),
@@ -143,7 +145,7 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
     }
     return EvaluateResponse(
         metadata=request.metadata,
-        ok=result["ok"],
+        all_ok=result["all_ok"],
         attempt=attempt,
         configs=items,
     )
@@ -161,7 +163,8 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
     attempt = result["attempt"]
     items = {
         config_slug: ProfileConfigOutput(
-            ok=item["ok"],
+            status=item["status"],
+            summary=item.get("summary", {}),
             artifacts=_capture_public_files(result["workspace_path"], [_profile_report_path(item)]),
             logs=_capture_public_files(
                 result["workspace_path"],
@@ -172,7 +175,7 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
     }
     return ProfileResponse(
         metadata=request.metadata,
-        ok=result["ok"],
+        all_ok=result["all_ok"],
         attempt=attempt,
         configs=items,
     )
@@ -191,7 +194,7 @@ def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
     attempt = result["attempt"]
     return ExecuteResponse(
         metadata=request.metadata,
-        ok=result["ok"],
+        all_ok=result["all_ok"],
         attempt=attempt,
         logs=_capture_public_files(result["workspace_path"], _stage_log_paths("execute", attempt)),
     )

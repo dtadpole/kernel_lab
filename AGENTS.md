@@ -89,6 +89,10 @@ Default public responses should stay small and only expose stage-relevant artifa
 Internal workflow state is kept for compile/evaluate/profile bookkeeping but is not part of the default public response.
 Public request/response file names use relative paths, and public returned files are shaped as relative-path keyed dictionaries.
 For evaluate/profile specifically, public responses mirror request shape and use `configs: Dict[config_slug, ...]` instead of result lists.
+Top-level public responses use `all_ok` for aggregate success. Per-config outputs use `status` plus structured summaries instead of raw log-only results.
+
+- evaluate config output: `status` + `correctness` + `performance` + `logs`
+- profile config output: `status` + `summary` + `artifacts` + `logs`
 
 #### Execute boundary
 

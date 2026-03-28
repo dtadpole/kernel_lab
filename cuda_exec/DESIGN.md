@@ -375,7 +375,7 @@ and profiler reports.
 Return only:
 
 - `metadata`
-- `ok`
+- `all_ok`
 - `attempt`
 - `artifacts: Dict[relative_path, file_payload]`
 - `logs: Dict[relative_path, file_payload]`
@@ -385,36 +385,58 @@ Return only:
 Return only:
 
 - `metadata`
-- `ok`
+- `all_ok`
 - `attempt`
 - `configs: Dict[config_slug, evaluate_config_output]`
 
 Each evaluate config output contains:
 
-- `ok`
+- `status`
+- `correctness`
+- `performance`
 - `logs: Dict[relative_path, file_payload]`
+
+`correctness` should carry structured quality information such as:
+
+- pass/fail
+- max / mean absolute error
+- absolute variance
+- max / mean relative error
+- relative variance
+
+`performance` should carry structured timing information such as:
+
+- min / median / max / mean latency
+- run count
 
 ### Profile response
 
 Return only:
 
 - `metadata`
-- `ok`
+- `all_ok`
 - `attempt`
 - `configs: Dict[config_slug, profile_config_output]`
 
 Each profile config output contains:
 
-- `ok`
+- `status`
+- `summary`
 - `artifacts: Dict[relative_path, file_payload]`
 - `logs: Dict[relative_path, file_payload]`
+
+`summary` should carry structured profile-level information such as:
+
+- min / median / max / mean latency
+- run count
+- additional metadata when available
 
 ### Execute response
 
 Return only:
 
 - `metadata`
-- `ok`
+- `all_ok`
 - `attempt`
 - `logs: Dict[relative_path, file_payload]`
 

@@ -17,7 +17,10 @@ FastAPI-based remote CUDA execution service.
 - compile inputs use `Dict[relative_path, content]`
 - evaluate/profile configs use `Dict[config_slug, ConfigSpec]`
 - public responses return stage-relevant `artifacts` and `logs` as relative-path keyed dictionaries
+- top-level public responses use `all_ok`
 - evaluate/profile responses mirror request shape with `configs: Dict[config_slug, ...]`
+- evaluate config outputs carry `status`, `correctness`, `performance`, and `logs`
+- profile config outputs carry `status`, `summary`, `artifacts`, and `logs`
 - internal state is kept for compile/evaluate/profile bookkeeping, but not exposed in default public responses
 - the runtime mental model is:
   - `workspace = inputs + scratch`

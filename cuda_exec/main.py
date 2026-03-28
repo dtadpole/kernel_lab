@@ -7,6 +7,7 @@ from cuda_exec.models import (
     CompileRequest,
     EvaluateRequest,
     ExecuteRequest,
+    HealthResponse,
     ProfileRequest,
 )
 from cuda_exec.runner import run_cuda_binary, run_generic_command, run_profile
@@ -14,40 +15,43 @@ from cuda_exec.runner import run_cuda_binary, run_generic_command, run_profile
 app = FastAPI(title="cuda_exec", version="0.1.0")
 
 
-@app.get("/healthz")
-def healthz() -> dict:
-    return {"ok": True, "service": "cuda_exec"}
+@app.get("/healthz", response_model=HealthResponse)
+def healthz() -> HealthResponse:
+    return HealthResponse(ok=True, service="cuda_exec")
 
 
 @app.post("/compile", response_model=CommandResponse)
 def compile_endpoint(request: CompileRequest) -> CommandResponse:
     return CommandResponse(
+        metadata=request.metadata,
         **run_generic_command(
             kind="compile",
             command=request.command,
             workdir=request.workdir,
             env=request.env,
             timeout_seconds=request.timeout_seconds,
-        )
+        ),
     )
 
 
 @app.post("/evaluate", response_model=CommandResponse)
 def evaluate_endpoint(request: EvaluateRequest) -> CommandResponse:
     return CommandResponse(
+        metadata=request.metadata,
         **run_generic_command(
             kind="evaluate",
             command=request.command,
             workdir=request.workdir,
             env=request.env,
             timeout_seconds=request.timeout_seconds,
-        )
+        ),
     )
 
 
 @app.post("/profile", response_model=CommandResponse)
 def profile_endpoint(request: ProfileRequest) -> CommandResponse:
     return CommandResponse(
+        metadata=request.metadata,
         **run_profile(
             profiler=request.profiler,
             target_command=request.target_command,
@@ -55,18 +59,19 @@ def profile_endpoint(request: ProfileRequest) -> CommandResponse:
             workdir=request.workdir,
             env=request.env,
             timeout_seconds=request.timeout_seconds,
-        )
+        ),
     )
 
 
 @app.post("/execute", response_model=CommandResponse)
 def execute_endpoint(request: ExecuteRequest) -> CommandResponse:
     return CommandResponse(
+        metadata=request.metadata,
         **run_cuda_binary(
             binary_path=request.binary_path,
             args=request.args,
             workdir=request.workdir,
             env=request.env,
             timeout_seconds=request.timeout_seconds,
-        )
+        ),
     )

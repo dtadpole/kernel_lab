@@ -1,3 +1,11 @@
+"""FastAPI entrypoints for cuda_exec.
+
+Keep this module thin.
+- models.py documents the public request/response contract.
+- runner.py documents runtime-layout semantics.
+- DESIGN.md holds the full design rationale.
+"""
+
 from __future__ import annotations
 
 import re
@@ -31,6 +39,8 @@ SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 @app.get("/healthz", response_model=HealthResponse)
 def healthz() -> HealthResponse:
+    """Lightweight service health check."""
+
     return HealthResponse(ok=True, service="cuda_exec")
 
 
@@ -48,6 +58,8 @@ def _config_suffix(config_id: str) -> str:
 
 
 def _stage_log_paths(stage: str, attempt: int, config_id: str | None = None) -> list[str]:
+    """Return public log relative paths for a stage attempt."""
+
     base = f"logs/{stage}.{_attempt_tag(attempt)}"
     if config_id is not None:
         base += f".{_config_suffix(config_id)}"
@@ -69,6 +81,12 @@ def _profile_report_path(config_result: dict) -> str:
 
 
 def _capture_public_files(workspace_path: str, rel_paths: list[str]) -> dict[str, dict]:
+    """Materialize public response files as relative_path -> ReturnedFile payload.
+
+    This is where the service converts internal on-disk files into the compact
+    public API shape used by artifacts/logs.
+    """
+
     payload: dict[str, dict] = {}
     for rel_path in rel_paths:
         item = capture_turn_file(rel_path, workspace_path)
@@ -84,6 +102,8 @@ def _capture_public_files(workspace_path: str, rel_paths: list[str]) -> dict[str
 
 @app.post("/compile", response_model=CompileResponse)
 def compile_endpoint(request: CompileRequest) -> CompileResponse:
+    """Compile inline code inputs into kept compile artifacts plus logs."""
+
     result = run_compile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
@@ -102,6 +122,8 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
+    """Evaluate one compiled artifact against one or more runtime configs."""
+
     result = run_evaluate_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
@@ -129,6 +151,8 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
 
 @app.post("/profile", response_model=ProfileResponse)
 def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
+    """Profile one compiled artifact against one or more runtime configs."""
+
     result = run_profile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
@@ -157,6 +181,8 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
 
 @app.post("/execute", response_model=ExecuteResponse)
 def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
+    """Run a generic CUDA-tool command and return logs only."""
+
     result = run_execute_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,

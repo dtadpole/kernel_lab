@@ -1,3 +1,23 @@
+"""Runtime helpers for cuda_exec.
+
+This module owns runtime-layout semantics.
+
+Mental model:
+- workspace = inputs + scratch
+- artifacts = kept results
+- logs = process output
+- state = workflow record
+
+Only four top-level directories are created per turn root:
+- workspace/
+- artifacts/
+- logs/
+- state/
+
+Public API code should document request/response contracts in models.py.
+Detailed design rationale belongs in DESIGN.md.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -41,6 +61,13 @@ def resolve_workspace_bundle(
     direction_slug: str,
     turn: int,
 ) -> dict:
+    """Resolve and create the per-turn runtime bundle.
+
+    The returned bundle is the concrete on-disk implementation of the four-dir
+    runtime model. `workspace_path` is also the initial cwd for launched
+    processes.
+    """
+
     safe_run_tag = _validate_component("run_tag", run_tag)
     safe_version = _validate_component("version", version)
     safe_direction_slug = _validate_component("direction_slug", direction_slug)
@@ -95,6 +122,13 @@ def resolve_turn_artifact_path(path_value: str, workspace_path: Path) -> Path:
 
 
 def capture_turn_file(path_value: str, workspace_path: str) -> dict:
+    """Read a turn-relative file for public response use.
+
+    The caller provides a relative path within the turn root. The returned dict
+    includes content plus minimal encoding/truncation metadata so the same
+    helper can serve both text logs and binary artifacts.
+    """
+
     workspace = _resolve_existing_directory(workspace_path)
     path = resolve_turn_artifact_path(path_value, workspace)
     if not path.exists():

@@ -19,6 +19,7 @@ Current fixture direction:
 - drive evaluate/profile with 4–6 slug-keyed configs
 - cover a mix of 1D / 2D / 3D input-shape metadata in those configs
 - include multiple 1D sizes, plus at least one 2D case and one 3D case
+- keep config slugs semantically meaningful for vector-add fixtures: use size/shape/rank terms, not unrelated concepts like causal/noncausal
 
 Runtime side effects should be isolated during tests:
 

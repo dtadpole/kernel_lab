@@ -1,9 +1,8 @@
 {
-  "vec1d-65536-causal": {
+  "vec1d-n65536": {
     "num_layers": 12,
     "embedding_size": 1024,
     "num_heads": 8,
-    "causal": true,
     "extra": {
       "family": "integration-vector-add",
       "rank": 1,
@@ -12,11 +11,10 @@
       "shape_kind": "1d"
     }
   },
-  "vec1d-1048576-noncausal": {
+  "vec1d-n1048576": {
     "num_layers": 12,
     "embedding_size": 2048,
     "num_heads": 16,
-    "causal": false,
     "extra": {
       "family": "integration-vector-add",
       "rank": 1,
@@ -25,11 +23,10 @@
       "shape_kind": "1d"
     }
   },
-  "vec1d-4194304-causal": {
+  "vec1d-n4194304": {
     "num_layers": 16,
     "embedding_size": 4096,
     "num_heads": 32,
-    "causal": true,
     "extra": {
       "family": "integration-vector-add",
       "rank": 1,
@@ -38,11 +35,10 @@
       "shape_kind": "1d"
     }
   },
-  "mat2d-1024x1024-noncausal": {
+  "tensor2d-1024x1024": {
     "num_layers": 16,
     "embedding_size": 4096,
     "num_heads": 32,
-    "causal": false,
     "extra": {
       "family": "integration-vector-add",
       "rank": 2,
@@ -51,11 +47,10 @@
       "shape_kind": "2d"
     }
   },
-  "mat2d-2048x512-causal": {
+  "tensor2d-2048x512": {
     "num_layers": 20,
     "embedding_size": 4096,
     "num_heads": 32,
-    "causal": true,
     "extra": {
       "family": "integration-vector-add",
       "rank": 2,
@@ -64,11 +59,10 @@
       "shape_kind": "2d"
     }
   },
-  "tensor3d-64x64x64-noncausal": {
+  "tensor3d-64x64x64": {
     "num_layers": 24,
     "embedding_size": 8192,
     "num_heads": 64,
-    "causal": false,
     "extra": {
       "family": "integration-vector-add",
       "rank": 3,

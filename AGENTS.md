@@ -131,6 +131,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 - current integration config coverage should include roughly 4–6 configs spanning multiple 1D sizes plus representative 2D and 3D shape metadata
 - prefer storing integration config sets in fixture files under `cuda_exec/tests/fixtures/` instead of embedding them directly in the main test module
+- fixture config slugs should make semantic sense for the sample workload; for vector-add fixtures, prefer size/shape/rank-based slugs rather than unrelated causal/noncausal labels
 
 ## Owner
 

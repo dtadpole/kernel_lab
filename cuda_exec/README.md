@@ -33,3 +33,10 @@ FastAPI-based remote CUDA execution service.
 See:
 
 - `/home/centos/kernel_lab/cuda_exec/DESIGN.md`
+
+That file now contains the authoritative request/response JSON examples for:
+
+- compile
+- evaluate
+- profile
+- execute

@@ -481,7 +481,263 @@ To keep agent behavior simple:
 
 ---
 
-## 12. Documentation split
+## 12. JSON examples
+
+### Compile request
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "timeout_seconds": 180,
+  "original_files": {
+    "reference/baseline.cu": "extern \"C\" __global__ void baseline() {}"
+  },
+  "generated_files": {
+    "kernels/candidate.cu": "extern \"C\" __global__ void candidate() {}"
+  }
+}
+```
+
+### Compile response
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "all_ok": true,
+  "attempt": 1,
+  "artifacts": {
+    "artifacts/compile.attempt_001.candidate.bin": {
+      "content": "<base64>",
+      "encoding": "base64",
+      "truncated": false
+    }
+  },
+  "logs": {
+    "logs/compile.attempt_001.log": {
+      "content": "command: ...",
+      "encoding": "utf8",
+      "truncated": false
+    },
+    "logs/compile.attempt_001.stdout": {
+      "content": "...",
+      "encoding": "utf8",
+      "truncated": false
+    },
+    "logs/compile.attempt_001.stderr": {
+      "content": "...",
+      "encoding": "utf8",
+      "truncated": false
+    }
+  }
+}
+```
+
+### Evaluate request
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "timeout_seconds": 180,
+  "configs": {
+    "fa4-causal-l12-e4096-h32": {
+      "num_layers": 12,
+      "embedding_size": 4096,
+      "num_heads": 32,
+      "causal": true,
+      "extra": {}
+    },
+    "fa4-noncausal-l12-e4096-h32": {
+      "num_layers": 12,
+      "embedding_size": 4096,
+      "num_heads": 32,
+      "causal": false,
+      "extra": {}
+    }
+  }
+}
+```
+
+### Evaluate response
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "all_ok": true,
+  "attempt": 1,
+  "configs": {
+    "fa4-causal-l12-e4096-h32": {
+      "status": "ok",
+      "correctness": {
+        "metadata": {},
+        "passed": true,
+        "max_abs_error": 1.2e-6,
+        "mean_abs_error": 3.1e-8,
+        "abs_variance": 2.5e-14,
+        "max_rel_error": 2.4e-5,
+        "mean_rel_error": 8.7e-7,
+        "rel_variance": 1.3e-11
+      },
+      "performance": {
+        "metadata": {},
+        "latency_ms": {
+          "min": 0.82,
+          "median": 0.89,
+          "max": 0.97,
+          "mean": 0.89
+        },
+        "runs": 100
+      },
+      "logs": {
+        "logs/evaluate.attempt_001.config_fa4-causal-l12-e4096-h32.stdout": {
+          "content": "...",
+          "encoding": "utf8",
+          "truncated": false
+        }
+      }
+    }
+  }
+}
+```
+
+### Profile request
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "timeout_seconds": 180,
+  "configs": {
+    "fa4-causal-l12-e4096-h32": {
+      "num_layers": 12,
+      "embedding_size": 4096,
+      "num_heads": 32,
+      "causal": true,
+      "extra": {}
+    }
+  }
+}
+```
+
+### Profile response
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "all_ok": true,
+  "attempt": 1,
+  "configs": {
+    "fa4-causal-l12-e4096-h32": {
+      "status": "ok",
+      "summary": {
+        "metadata": {},
+        "latency_ms": {
+          "min": 0.80,
+          "median": 0.87,
+          "max": 0.95,
+          "mean": 0.87
+        },
+        "runs": 100
+      },
+      "artifacts": {
+        "artifacts/profile.attempt_001.config_fa4-causal-l12-e4096-h32.ncu-rep": {
+          "content": "<base64>",
+          "encoding": "base64",
+          "truncated": false
+        }
+      },
+      "logs": {
+        "logs/profile.attempt_001.config_fa4-causal-l12-e4096-h32.log": {
+          "content": "...",
+          "encoding": "utf8",
+          "truncated": false
+        }
+      }
+    }
+  }
+}
+```
+
+### Execute request
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "timeout_seconds": 180,
+  "command": ["/usr/local/cuda/bin/nvcc", "--version"],
+  "env": {}
+}
+```
+
+### Execute response
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "fa4",
+    "turn": 3
+  },
+  "all_ok": true,
+  "attempt": 1,
+  "logs": {
+    "logs/execute.attempt_001.stdout": {
+      "content": "Cuda compilation tools, release ...",
+      "encoding": "utf8",
+      "truncated": false
+    },
+    "logs/execute.attempt_001.stderr": {
+      "content": "",
+      "encoding": "utf8",
+      "truncated": false
+    }
+  }
+}
+```
+
+## 13. Documentation split
 
 - `DESIGN.md` = detailed source of truth
 - `README.md` = short entrypoint

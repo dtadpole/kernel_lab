@@ -137,6 +137,15 @@ class FilePayload(BaseModel):
     Public responses use the shape:
         relative_path -> FilePayload
 
+    Example:
+        {
+          "logs/compile.attempt_001.log": {
+            "content": "toolkit_command: ...",
+            "encoding": "utf8",
+            "truncated": false
+          }
+        }
+
     The relative path itself is the outer dict key.
     This object only describes the payload stored at that path.
 
@@ -180,8 +189,26 @@ class ResponseBase(BaseModel):
 class CompileResponse(ResponseBase):
     """Minimal compile response.
 
-    - `artifacts` contains kept compile outputs, typically the compiled binary.
-    - `logs` contains compile.log/stdout/stderr keyed by relative path.
+    - `artifacts` is a dict of `relative_path -> FilePayload`
+    - `logs` is a dict of `relative_path -> FilePayload`
+
+    Example:
+        {
+          "artifacts": {
+            "artifacts/compile.attempt_001.candidate.bin": {
+              "content": "<base64>",
+              "encoding": "base64",
+              "truncated": false
+            }
+          },
+          "logs": {
+            "logs/compile.attempt_001.log": {
+              "content": "toolkit_command: ...",
+              "encoding": "utf8",
+              "truncated": false
+            }
+          }
+        }
     """
 
     artifacts: Dict[str, FilePayload] = Field(
@@ -195,7 +222,23 @@ class CompileResponse(ResponseBase):
 
 
 class ConfigStageResult(BaseModel):
-    """Per-config public result for evaluate-like stages."""
+    """Per-config public result for evaluate-like stages.
+
+    `logs` is a dict of `relative_path -> FilePayload`.
+
+    Example:
+        {
+          "config_id": "fa4_causal_l12_e4096_h32",
+          "ok": true,
+          "logs": {
+            "logs/evaluate.attempt_001.config_fa4_causal_l12_e4096_h32.stdout": {
+              "content": "latency_ms=...",
+              "encoding": "utf8",
+              "truncated": false
+            }
+          }
+        }
+    """
 
     config_id: str
     ok: bool
@@ -215,6 +258,27 @@ class ProfileConfigResult(BaseModel):
     """Per-config public result for profile.
 
     Profile returns both logs and kept profiling artifacts such as .ncu-rep.
+    Both `artifacts` and `logs` are dicts of `relative_path -> FilePayload`.
+
+    Example:
+        {
+          "config_id": "fa4_causal_l12_e4096_h32",
+          "ok": true,
+          "artifacts": {
+            "artifacts/profile.attempt_001.config_fa4_causal_l12_e4096_h32.ncu-rep": {
+              "content": "<base64>",
+              "encoding": "base64",
+              "truncated": false
+            }
+          },
+          "logs": {
+            "logs/profile.attempt_001.config_fa4_causal_l12_e4096_h32.log": {
+              "content": "ncu command: ...",
+              "encoding": "utf8",
+              "truncated": false
+            }
+          }
+        }
     """
 
     config_id: str
@@ -240,6 +304,19 @@ class ExecuteResponse(ResponseBase):
 
     Execute is logs-only in the public API by design.
     Any higher-level meaning of command outputs is left to the caller.
+
+    `logs` is a dict of `relative_path -> FilePayload`.
+
+    Example:
+        {
+          "logs": {
+            "logs/execute.attempt_001.stderr": {
+              "content": "warning: ...",
+              "encoding": "utf8",
+              "truncated": false
+            }
+          }
+        }
     """
 
     logs: Dict[str, FilePayload] = Field(

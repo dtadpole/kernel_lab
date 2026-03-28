@@ -124,6 +124,8 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - when using a temp-folder uv-managed environment, prefer naming it `<temp-run-dir>/.venv`
 - preserve run environments and intermediate outputs by default for later inspection; do not rely on immediate deletion after each run
 - cleanup should happen via a separate retention process (for example pruning runs older than 7 days)
+- the standard helper is `cuda_exec/scripts/prune_temp_runs.py`
+- its default behavior is to delete preserved run directories older than 7 days; support `--dry-run`; and skip directories marked for keep
 - current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed `.venv` is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 

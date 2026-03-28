@@ -485,6 +485,10 @@ Retention policy direction:
 - do **not** immediately delete the run environment or intermediate outputs after a successful run
 - preserve request/response logs, service logs, runtime root contents, and temporary `.venv` for later inspection
 - handle cleanup through a separate retention process, for example deleting runs older than 7 days
+- the helper script is `cuda_exec/scripts/prune_temp_runs.py`
+- its default behavior deletes preserved run directories older than 7 days
+- `--dry-run` is supported
+- keep rules: skip directories whose name contains `keep`, or that contain keep-marker files such as `KEEP`
 
 This keeps recent integration trajectories available without committing them into Git.
 

@@ -27,6 +27,10 @@ Retention direction for inspection-friendly runs:
 - preserve the run directory, `.venv`, request/response payloads, service logs, and runtime-root contents after the run
 - do not depend on immediate deletion of intermediate outputs
 - instead, use a separate cleanup/retention process, for example pruning runs older than 7 days
+- helper script: `cuda_exec/scripts/prune_temp_runs.py`
+- default behavior: delete preserved run directories older than 7 days
+- `--dry-run` shows what would be deleted without removing anything
+- directories are kept if their name contains `keep` or if they contain a marker file such as `KEEP`
 
 They are intentionally allowed to observe expected failures from the underlying
 CUDA toolchain or sample kernels. The purpose is to keep interface coverage and

@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from cuda_exec.models import (
     CompileRequest,
     CompileResponse,
+    ConfigStageResult,
     EvaluateRequest,
     EvaluateResponse,
     ExecuteRequest,
@@ -15,8 +16,8 @@ from cuda_exec.models import (
     ProfileConfigResult,
     ProfileRequest,
     ProfileResponse,
-    ConfigStageResult,
 )
+from cuda_exec.runner import capture_turn_file
 from cuda_exec.tasks import (
     run_compile_task,
     run_evaluate_task,
@@ -46,11 +47,11 @@ def _config_suffix(config_id: str) -> str:
     return f"config_{_slugify(config_id)}"
 
 
-def _stage_log_base(stage: str, attempt: int, config_id: str | None = None) -> str:
+def _stage_log_paths(stage: str, attempt: int, config_id: str | None = None) -> list[str]:
     base = f"logs/{stage}.{_attempt_tag(attempt)}"
     if config_id is not None:
         base += f".{_config_suffix(config_id)}"
-    return base
+    return [f"{base}.log", f"{base}.stdout", f"{base}.stderr"]
 
 
 def _compile_binary_path(result: dict) -> str:
@@ -67,6 +68,20 @@ def _profile_report_path(config_result: dict) -> str:
     raise ValueError(f"profile result missing report artifact for config {config_result['config']['config_id']}")
 
 
+def _capture_public_files(workspace_path: str, rel_paths: list[str]) -> dict[str, dict]:
+    payload: dict[str, dict] = {}
+    for rel_path in rel_paths:
+        item = capture_turn_file(rel_path, workspace_path)
+        if not item.get("exists") or item.get("error"):
+            continue
+        payload[rel_path] = {
+            "content": item.get("content") or "",
+            "encoding": item.get("encoding") or "utf8",
+            "truncated": bool(item.get("truncated", False)),
+        }
+    return payload
+
+
 @app.post("/compile", response_model=CompileResponse)
 def compile_endpoint(request: CompileRequest) -> CompileResponse:
     result = run_compile_task(
@@ -76,15 +91,12 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
         generated_files=request.generated_files,
     )
     attempt = result["attempt"]
-    log_base = _stage_log_base("compile", attempt)
     return CompileResponse(
         metadata=request.metadata,
         ok=result["ok"],
         attempt=attempt,
-        binary_path=_compile_binary_path(result),
-        log_path=f"{log_base}.log",
-        stdout_path=f"{log_base}.stdout",
-        stderr_path=f"{log_base}.stderr",
+        artifacts=_capture_public_files(result["workspace_path"], [_compile_binary_path(result)]),
+        logs=_capture_public_files(result["workspace_path"], _stage_log_paths("compile", attempt)),
     )
 
 
@@ -100,9 +112,10 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
         ConfigStageResult(
             config_id=item["config"]["config_id"],
             ok=item["ok"],
-            log_path=f"{_stage_log_base('evaluate', attempt, item['config']['config_id'])}.log",
-            stdout_path=f"{_stage_log_base('evaluate', attempt, item['config']['config_id'])}.stdout",
-            stderr_path=f"{_stage_log_base('evaluate', attempt, item['config']['config_id'])}.stderr",
+            logs=_capture_public_files(
+                result["workspace_path"],
+                _stage_log_paths("evaluate", attempt, item["config"]["config_id"]),
+            ),
         )
         for item in result.get("config_results", [])
     ]
@@ -126,10 +139,11 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         ProfileConfigResult(
             config_id=item["config"]["config_id"],
             ok=item["ok"],
-            report_path=_profile_report_path(item),
-            log_path=f"{_stage_log_base('profile', attempt, item['config']['config_id'])}.log",
-            stdout_path=f"{_stage_log_base('profile', attempt, item['config']['config_id'])}.stdout",
-            stderr_path=f"{_stage_log_base('profile', attempt, item['config']['config_id'])}.stderr",
+            artifacts=_capture_public_files(result["workspace_path"], [_profile_report_path(item)]),
+            logs=_capture_public_files(
+                result["workspace_path"],
+                _stage_log_paths("profile", attempt, item["config"]["config_id"]),
+            ),
         )
         for item in result.get("config_results", [])
     ]
@@ -150,12 +164,9 @@ def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
         env=request.env,
     )
     attempt = result["attempt"]
-    log_base = _stage_log_base("execute", attempt)
     return ExecuteResponse(
         metadata=request.metadata,
         ok=result["ok"],
         attempt=attempt,
-        log_path=f"{log_base}.log",
-        stdout_path=f"{log_base}.stdout",
-        stderr_path=f"{log_base}.stderr",
+        logs=_capture_public_files(result["workspace_path"], _stage_log_paths("execute", attempt)),
     )

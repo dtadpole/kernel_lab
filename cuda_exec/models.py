@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -35,13 +35,13 @@ class RequestBase(BaseModel):
 
 
 class CompileRequest(RequestBase):
-    original_files: List[str] = Field(
-        default_factory=list,
-        description="Original source artifacts for the direction",
+    original_files: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of relative path to file content for original source inputs",
     )
-    generated_files: List[str] = Field(
-        default_factory=list,
-        description="Generated/candidate source artifacts for this turn",
+    generated_files: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of relative path to file content for generated source inputs",
     )
 
 
@@ -71,6 +71,12 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class ReturnedFile(BaseModel):
+    content: str
+    encoding: Literal["utf8", "base64"] = "utf8"
+    truncated: bool = False
+
+
 class StageResponseBase(BaseModel):
     metadata: Metadata = Field(..., description="Required echoed metadata from the request")
     ok: bool
@@ -78,26 +84,25 @@ class StageResponseBase(BaseModel):
 
 
 class CompileResponse(StageResponseBase):
-    binary_path: str
-    log_path: str
-    stdout_path: str
-    stderr_path: str
+    artifacts: Dict[str, ReturnedFile] = Field(default_factory=dict)
+    logs: Dict[str, ReturnedFile] = Field(default_factory=dict)
 
 
 class ConfigStageResult(BaseModel):
     config_id: str
     ok: bool
-    log_path: str
-    stdout_path: str
-    stderr_path: str
+    logs: Dict[str, ReturnedFile] = Field(default_factory=dict)
 
 
 class EvaluateResponse(StageResponseBase):
     results: List[ConfigStageResult] = Field(default_factory=list)
 
 
-class ProfileConfigResult(ConfigStageResult):
-    report_path: str
+class ProfileConfigResult(BaseModel):
+    config_id: str
+    ok: bool
+    artifacts: Dict[str, ReturnedFile] = Field(default_factory=dict)
+    logs: Dict[str, ReturnedFile] = Field(default_factory=dict)
 
 
 class ProfileResponse(StageResponseBase):
@@ -105,6 +110,4 @@ class ProfileResponse(StageResponseBase):
 
 
 class ExecuteResponse(StageResponseBase):
-    log_path: str
-    stdout_path: str
-    stderr_path: str
+    logs: Dict[str, ReturnedFile] = Field(default_factory=dict)

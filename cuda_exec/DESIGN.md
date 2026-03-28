@@ -117,7 +117,51 @@ Rules:
 
 ---
 
-## 4. Code-level compile vs config-level evaluate/profile
+## 4. Compile input convention
+
+`compile` now takes inline file maps instead of file lists.
+
+Both of these request fields are:
+
+- `Dict[relative_path, content]`
+
+Specifically:
+
+- `original_files: Dict[str, str]`
+- `generated_files: Dict[str, str]`
+
+Rules:
+
+- keys must be relative paths
+- keys may include folder names
+- keys must not be absolute paths
+- keys must not contain `.` or `..` path traversal segments
+- values are file contents
+
+Conceptual example:
+
+```json
+{
+  "metadata": { "...": "..." },
+  "generated_files": {
+    "kernels/candidate.cu": "extern \"C\" __global__ void ..."
+  },
+  "original_files": {
+    "reference/baseline.cu": "extern \"C\" __global__ void ..."
+  }
+}
+```
+
+The service writes these inputs under:
+
+```text
+workspace/inputs/original/<relative_path>
+workspace/inputs/generated/<relative_path>
+```
+
+---
+
+## 5. Code-level compile vs config-level evaluate/profile
 
 ### Compile is code-level
 
@@ -149,7 +193,7 @@ FA4-style example:
 
 ---
 
-## 5. Runtime config convention
+## 6. Runtime config convention
 
 `evaluate` and `profile` accept `configs[]`.
 Each config includes at least:
@@ -201,7 +245,7 @@ information through environment variables such as:
 
 ---
 
-## 6. Attempt convention
+## 7. Attempt convention
 
 Stage outputs use uniform attempt naming.
 
@@ -231,7 +275,7 @@ Even though compile runs only once per turn, it still uses `attempt_001` for nam
 
 ---
 
-## 7. Stage outputs
+## 8. Stage outputs
 
 ### Compile
 
@@ -288,13 +332,44 @@ Scratch/intermediate files can remain in `workspace/`.
 
 ---
 
-## 8. Response convention
+## 9. Response convention
 
 Public API responses should stay stage-specific and minimal.
-The response is a **summary**, not a mirror of the full runtime directory.
 
 `state` is internal-first. It is kept for compile/evaluate/profile bookkeeping and inspection,
 but it should not be part of the default public response.
+
+### Relative-path rule
+
+For public request and response payloads:
+
+- use relative paths only
+- include folder names inside the relative path when needed
+- do not use absolute paths
+
+### File-return rule
+
+For public responses, files are returned as dictionaries keyed by relative path.
+
+Conceptually:
+
+```json
+{
+  "relative/path/to/file": {
+    "content": "...",
+    "encoding": "utf8",
+    "truncated": false
+  }
+}
+```
+
+A small refinement is kept for practicality:
+
+- text files use `encoding = "utf8"`
+- binary files use `encoding = "base64"`
+
+This keeps the external shape simple while still supporting binary artifacts such as compiled binaries
+and profiler reports.
 
 ### Compile response
 
@@ -303,10 +378,8 @@ Return only:
 - `metadata`
 - `ok`
 - `attempt`
-- `binary_path`
-- `log_path`
-- `stdout_path`
-- `stderr_path`
+- `artifacts: Dict[relative_path, file_payload]`
+- `logs: Dict[relative_path, file_payload]`
 
 ### Evaluate response
 
@@ -321,9 +394,7 @@ Each evaluate result contains:
 
 - `config_id`
 - `ok`
-- `log_path`
-- `stdout_path`
-- `stderr_path`
+- `logs: Dict[relative_path, file_payload]`
 
 ### Profile response
 
@@ -338,10 +409,8 @@ Each profile result contains:
 
 - `config_id`
 - `ok`
-- `report_path`
-- `log_path`
-- `stdout_path`
-- `stderr_path`
+- `artifacts: Dict[relative_path, file_payload]`
+- `logs: Dict[relative_path, file_payload]`
 
 ### Execute response
 
@@ -350,25 +419,22 @@ Return only:
 - `metadata`
 - `ok`
 - `attempt`
-- `log_path`
-- `stdout_path`
-- `stderr_path`
+- `logs: Dict[relative_path, file_payload]`
 
 ### What should not be exposed in the default public response
 
-Do not expose generic heavy response fields by default, such as:
+Do not expose generic heavy internal structures by default, such as:
 
-- full `files[]`
-- full `artifacts[]`
-- nested `config_results[]` with inline stdout/stderr
-- large inline file contents
+- internal `state` paths
+- full internal `artifacts[]` catalogs
+- generic `files[]`
+- internal nested runtime bookkeeping objects
 
-The detailed runtime information already exists on disk under `workspace/`, `artifacts/`, `logs/`, and `state/`.
-The public response should only point to the important paths.
+The public response should present only the stage-relevant artifacts and logs in a direct relative-path keyed form.
 
 ---
 
-## 9. CWD convention
+## 10. CWD convention
 
 The service guarantees that the **initial cwd** for launched processes is:
 
@@ -384,7 +450,7 @@ path behavior.
 
 ---
 
-## 10. Caller-facing simplicity rules
+## 11. Caller-facing simplicity rules
 
 To keep agent behavior simple:
 
@@ -396,7 +462,7 @@ To keep agent behavior simple:
 
 ---
 
-## 11. Documentation split
+## 12. Documentation split
 
 - `DESIGN.md` = detailed source of truth
 - `README.md` = short entrypoint

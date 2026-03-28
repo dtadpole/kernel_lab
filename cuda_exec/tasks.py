@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -30,24 +29,27 @@ WORKFLOW_RULES = {
 }
 
 
-def _absolute_input_path(path_value: str) -> Path:
-    path = Path(path_value).expanduser().resolve()
-    if not path.exists():
-        raise HTTPException(status_code=400, detail=f"input file does not exist: {path}")
-    if not path.is_file():
-        raise HTTPException(status_code=400, detail=f"input path is not a regular file: {path}")
+def _validate_relative_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if not path_value:
+        raise HTTPException(status_code=400, detail="relative path must not be empty")
+    if path.is_absolute():
+        raise HTTPException(status_code=400, detail=f"path must be relative: {path_value}")
+    if any(part in {"", ".", ".."} for part in path.parts):
+        raise HTTPException(status_code=400, detail=f"path contains invalid relative segments: {path_value}")
     return path
 
 
-def _copy_inputs(paths: List[str], destination_root: Path) -> List[Path]:
-    copied: List[Path] = []
+def _write_input_files(files: Dict[str, str], destination_root: Path) -> List[Path]:
+    written: List[Path] = []
     destination_root.mkdir(parents=True, exist_ok=True)
-    for item in paths:
-        source = _absolute_input_path(item)
-        destination = destination_root / source.name
-        shutil.copy2(source, destination)
-        copied.append(destination)
-    return copied
+    for rel_path, content in files.items():
+        relative = _validate_relative_path(rel_path)
+        destination = destination_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        written.append(destination)
+    return written
 
 
 def _pick_single_cuda_source(generated: List[Path], original: List[Path]) -> Path:
@@ -354,8 +356,8 @@ def run_compile_task(
     *,
     metadata,
     timeout_seconds: int,
-    original_files: List[str],
-    generated_files: List[str],
+    original_files: Dict[str, str],
+    generated_files: Dict[str, str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     workspace_path = Path(workspace["workspace_path"])
@@ -384,8 +386,8 @@ def run_compile_task(
 
     started = time.perf_counter()
     try:
-        copied_original = _copy_inputs(original_files, workspace_path / "inputs" / "original")
-        copied_generated = _copy_inputs(generated_files, workspace_path / "inputs" / "generated")
+        copied_original = _write_input_files(original_files, workspace_path / "inputs" / "original")
+        copied_generated = _write_input_files(generated_files, workspace_path / "inputs" / "generated")
         source = _pick_single_cuda_source(copied_generated, copied_original)
 
         binary_rel = _compile_artifact_rel(attempt, source.stem)

@@ -31,6 +31,25 @@ Recommended shape:
 }
 ```
 
+## Response contract (fixed structure)
+
+Command-style responses now contain two structured sections:
+
+1. `output`
+   - `stdout`
+   - `stderr`
+
+2. `files`
+   - structured returned files with path, name, encoding, and content
+
+If the caller wants files returned, it should specify them in `return_files`.
+For `compile`, `artifacts` are also collected and returned as files.
+
+Current file capture behavior:
+- text files are returned as UTF-8 when possible
+- binary files are returned as Base64
+- files larger than 1 MiB are truncated in the response and marked with `truncated: true`
+
 ## API surface (v0)
 
 ### `GET /healthz`
@@ -53,7 +72,8 @@ Request shape:
   "command": ["bash", "-lc", "make -C /home/centos/cuda_example binary"],
   "env": {},
   "timeout_seconds": 300,
-  "artifacts": []
+  "artifacts": ["build/output.ptx"],
+  "return_files": ["build/logs/compile.log"]
 }
 ```
 
@@ -74,7 +94,8 @@ Request shape:
   "command": ["bash", "-lc", "python evaluator.py"],
   "env": {},
   "timeout_seconds": 300,
-  "expected_outputs": []
+  "expected_outputs": [],
+  "return_files": ["outputs/result.json"]
 }
 ```
 
@@ -96,7 +117,8 @@ Request shape:
   "target_command": ["./build/bin/vector_add_inline_ptx_profile"],
   "profiler_args": ["--set", "default", "--target-processes", "all"],
   "env": {},
-  "timeout_seconds": 1800
+  "timeout_seconds": 1800,
+  "return_files": ["/tmp/vector_add_inline_ptx-ncu.ncu-rep"]
 }
 ```
 
@@ -121,7 +143,8 @@ Request shape:
   "args": ["--version"],
   "workdir": "/home/centos/kernel_lab",
   "env": {},
-  "timeout_seconds": 60
+  "timeout_seconds": 60,
+  "return_files": []
 }
 ```
 
@@ -142,8 +165,22 @@ All command-style endpoints return the required `metadata` object back in the re
   "workdir": "/tmp",
   "returncode": 0,
   "duration_seconds": 0.123,
-  "stdout": "...",
-  "stderr": "..."
+  "output": {
+    "stdout": "...",
+    "stderr": "..."
+  },
+  "files": [
+    {
+      "path": "/tmp/result.txt",
+      "name": "result.txt",
+      "exists": true,
+      "size_bytes": 42,
+      "encoding": "utf8",
+      "truncated": false,
+      "content": "hello\n",
+      "error": null
+    }
+  ]
 }
 ```
 

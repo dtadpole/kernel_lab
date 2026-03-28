@@ -18,6 +18,10 @@ class Metadata(BaseModel):
 
 class RequestBase(BaseModel):
     metadata: Metadata = Field(..., description="Required agent metadata")
+    return_files: List[str] = Field(
+        default_factory=list,
+        description="Files to load and return in the response after command execution",
+    )
 
 
 class CommandRequest(RequestBase):
@@ -55,6 +59,22 @@ class ExecuteRequest(RequestBase):
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
 
 
+class CommandOutput(BaseModel):
+    stdout: str
+    stderr: str
+
+
+class ResponseFile(BaseModel):
+    path: str
+    name: str
+    exists: bool
+    size_bytes: Optional[int] = None
+    encoding: Optional[Literal["utf8", "base64"]] = None
+    truncated: bool = False
+    content: Optional[str] = None
+    error: Optional[str] = None
+
+
 class CommandResponse(BaseModel):
     metadata: Metadata = Field(..., description="Required echoed metadata from the request")
     ok: bool
@@ -63,8 +83,8 @@ class CommandResponse(BaseModel):
     workdir: str
     returncode: int
     duration_seconds: float
-    stdout: str
-    stderr: str
+    output: CommandOutput
+    files: List[ResponseFile] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

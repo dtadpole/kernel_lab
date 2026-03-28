@@ -3,12 +3,14 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from cuda_exec.models import (
+    CommandOutput,
     CommandResponse,
     CompileRequest,
     EvaluateRequest,
     ExecuteRequest,
     HealthResponse,
     ProfileRequest,
+    ResponseFile,
 )
 from cuda_exec.runner import run_cuda_binary, run_generic_command, run_profile
 
@@ -22,56 +24,92 @@ def healthz() -> HealthResponse:
 
 @app.post("/compile", response_model=CommandResponse)
 def compile_endpoint(request: CompileRequest) -> CommandResponse:
+    result = run_generic_command(
+        kind="compile",
+        command=request.command,
+        workdir=request.workdir,
+        env=request.env,
+        timeout_seconds=request.timeout_seconds,
+        return_files=[*request.artifacts, *request.return_files],
+    )
     return CommandResponse(
         metadata=request.metadata,
-        **run_generic_command(
-            kind="compile",
-            command=request.command,
-            workdir=request.workdir,
-            env=request.env,
-            timeout_seconds=request.timeout_seconds,
-        ),
+        ok=result["ok"],
+        kind=result["kind"],
+        command=result["command"],
+        workdir=result["workdir"],
+        returncode=result["returncode"],
+        duration_seconds=result["duration_seconds"],
+        output=CommandOutput(**result["output"]),
+        files=[ResponseFile(**item) for item in result["files"]],
     )
 
 
 @app.post("/evaluate", response_model=CommandResponse)
 def evaluate_endpoint(request: EvaluateRequest) -> CommandResponse:
+    result = run_generic_command(
+        kind="evaluate",
+        command=request.command,
+        workdir=request.workdir,
+        env=request.env,
+        timeout_seconds=request.timeout_seconds,
+        return_files=request.return_files,
+    )
     return CommandResponse(
         metadata=request.metadata,
-        **run_generic_command(
-            kind="evaluate",
-            command=request.command,
-            workdir=request.workdir,
-            env=request.env,
-            timeout_seconds=request.timeout_seconds,
-        ),
+        ok=result["ok"],
+        kind=result["kind"],
+        command=result["command"],
+        workdir=result["workdir"],
+        returncode=result["returncode"],
+        duration_seconds=result["duration_seconds"],
+        output=CommandOutput(**result["output"]),
+        files=[ResponseFile(**item) for item in result["files"]],
     )
 
 
 @app.post("/profile", response_model=CommandResponse)
 def profile_endpoint(request: ProfileRequest) -> CommandResponse:
+    result = run_profile(
+        profiler=request.profiler,
+        target_command=request.target_command,
+        profiler_args=request.profiler_args,
+        workdir=request.workdir,
+        env=request.env,
+        timeout_seconds=request.timeout_seconds,
+        return_files=request.return_files,
+    )
     return CommandResponse(
         metadata=request.metadata,
-        **run_profile(
-            profiler=request.profiler,
-            target_command=request.target_command,
-            profiler_args=request.profiler_args,
-            workdir=request.workdir,
-            env=request.env,
-            timeout_seconds=request.timeout_seconds,
-        ),
+        ok=result["ok"],
+        kind=result["kind"],
+        command=result["command"],
+        workdir=result["workdir"],
+        returncode=result["returncode"],
+        duration_seconds=result["duration_seconds"],
+        output=CommandOutput(**result["output"]),
+        files=[ResponseFile(**item) for item in result["files"]],
     )
 
 
 @app.post("/execute", response_model=CommandResponse)
 def execute_endpoint(request: ExecuteRequest) -> CommandResponse:
+    result = run_cuda_binary(
+        binary_path=request.binary_path,
+        args=request.args,
+        workdir=request.workdir,
+        env=request.env,
+        timeout_seconds=request.timeout_seconds,
+        return_files=request.return_files,
+    )
     return CommandResponse(
         metadata=request.metadata,
-        **run_cuda_binary(
-            binary_path=request.binary_path,
-            args=request.args,
-            workdir=request.workdir,
-            env=request.env,
-            timeout_seconds=request.timeout_seconds,
-        ),
+        ok=result["ok"],
+        kind=result["kind"],
+        command=result["command"],
+        workdir=result["workdir"],
+        returncode=result["returncode"],
+        duration_seconds=result["duration_seconds"],
+        output=CommandOutput(**result["output"]),
+        files=[ResponseFile(**item) for item in result["files"]],
     )

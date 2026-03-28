@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 import time
@@ -10,6 +11,7 @@ from fastapi import HTTPException
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
 CUDA_TOOLKIT_BIN = CUDA_TOOLKIT_ROOT / "bin"
+MAX_CAPTURE_BYTES = 1024 * 1024
 
 
 def _merge_env(extra_env: Dict[str, str]) -> Dict[str, str]:
@@ -29,6 +31,72 @@ def _resolve_workdir(workdir: Optional[str]) -> str:
     return str(path)
 
 
+def _resolve_return_file(path_value: str, workdir: str) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = Path(workdir) / path
+    return path.resolve()
+
+
+def _capture_file(path_value: str, workdir: str) -> dict:
+    path = _resolve_return_file(path_value, workdir)
+    if not path.exists():
+        return {
+            "path": str(path),
+            "name": path.name,
+            "exists": False,
+            "size_bytes": None,
+            "encoding": None,
+            "truncated": False,
+            "content": None,
+            "error": None,
+        }
+
+    if not path.is_file():
+        return {
+            "path": str(path),
+            "name": path.name,
+            "exists": True,
+            "size_bytes": None,
+            "encoding": None,
+            "truncated": False,
+            "content": None,
+            "error": "path exists but is not a regular file",
+        }
+
+    raw = path.read_bytes()
+    truncated = len(raw) > MAX_CAPTURE_BYTES
+    raw_for_response = raw[:MAX_CAPTURE_BYTES]
+
+    try:
+        content = raw_for_response.decode("utf-8")
+        encoding = "utf8"
+    except UnicodeDecodeError:
+        content = base64.b64encode(raw_for_response).decode("ascii")
+        encoding = "base64"
+
+    return {
+        "path": str(path),
+        "name": path.name,
+        "exists": True,
+        "size_bytes": len(raw),
+        "encoding": encoding,
+        "truncated": truncated,
+        "content": content,
+        "error": None,
+    }
+
+
+def _collect_files(paths: List[str], workdir: str) -> List[dict]:
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for value in paths:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return [_capture_file(value, workdir) for value in deduped]
+
+
 def _run_command(
     *,
     kind: str,
@@ -36,6 +104,7 @@ def _run_command(
     workdir: str,
     env: Dict[str, str],
     timeout_seconds: int,
+    return_files: Optional[List[str]] = None,
 ) -> dict:
     started = time.perf_counter()
     try:
@@ -57,6 +126,7 @@ def _run_command(
         ) from exc
 
     duration = time.perf_counter() - started
+    files = _collect_files(return_files or [], workdir)
     return {
         "ok": completed.returncode == 0,
         "kind": kind,
@@ -64,8 +134,11 @@ def _run_command(
         "workdir": workdir,
         "returncode": completed.returncode,
         "duration_seconds": duration,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "output": {
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        },
+        "files": files,
     }
 
 
@@ -76,6 +149,7 @@ def run_generic_command(
     workdir: str,
     env: Dict[str, str],
     timeout_seconds: int,
+    return_files: Optional[List[str]] = None,
 ) -> dict:
     return _run_command(
         kind=kind,
@@ -83,6 +157,7 @@ def run_generic_command(
         workdir=_resolve_workdir(workdir),
         env=env,
         timeout_seconds=timeout_seconds,
+        return_files=return_files,
     )
 
 
@@ -94,6 +169,7 @@ def run_profile(
     workdir: str,
     env: Dict[str, str],
     timeout_seconds: int,
+    return_files: Optional[List[str]] = None,
 ) -> dict:
     profiler_bin = CUDA_TOOLKIT_BIN / profiler
     if profiler == "nsys":
@@ -108,6 +184,7 @@ def run_profile(
         workdir=_resolve_workdir(workdir),
         env=env,
         timeout_seconds=timeout_seconds,
+        return_files=return_files,
     )
 
 
@@ -118,6 +195,7 @@ def run_cuda_binary(
     workdir: Optional[str],
     env: Dict[str, str],
     timeout_seconds: int,
+    return_files: Optional[List[str]] = None,
 ) -> dict:
     binary = Path(binary_path).expanduser().resolve()
     toolkit_bin = CUDA_TOOLKIT_BIN.resolve()
@@ -134,11 +212,13 @@ def run_cuda_binary(
     if not os.access(binary, os.X_OK):
         raise HTTPException(status_code=400, detail=f"binary is not executable: {binary}")
 
+    resolved_workdir = _resolve_workdir(workdir)
     command = [str(binary), *args]
     return _run_command(
         kind="execute",
         command=command,
-        workdir=_resolve_workdir(workdir),
+        workdir=resolved_workdir,
         env=env,
         timeout_seconds=timeout_seconds,
+        return_files=return_files,
     )

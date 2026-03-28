@@ -48,7 +48,15 @@ These are stable project-level decisions and should remain in repo docs, not onl
 
 #### Turn-root layout
 
-`cuda_exec` uses the 4-directory runtime layout:
+`cuda_exec` resolves runtime locations by convention from request metadata. It does not accept a caller-specified working directory.
+
+Runtime root:
+
+```text
+~/.cuda_exec/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/
+```
+
+Within each turn:
 
 ```text
 turn_<turn>/
@@ -78,6 +86,7 @@ All public request/response file names should use relative paths.
 
 Default public responses should stay small and only expose stage-relevant artifacts/logs.
 Internal workflow state is kept for compile/evaluate/profile bookkeeping but is not part of the default public response.
+Public request/response file names use relative paths, and public returned files are shaped as relative-path keyed dictionaries.
 
 #### Execute boundary
 
@@ -92,6 +101,9 @@ Internal workflow state is kept for compile/evaluate/profile bookkeeping but is 
 - `cuda_exec/DESIGN.md` is the source of truth for detailed design
 - `cuda_exec/README.md` stays short
 - this `AGENTS.md` stays at repo-level only
+- `cuda_exec/models.py` documents the public request/response contract
+- `cuda_exec/runner.py` documents runtime-layout semantics
+- `cuda_exec/main.py` stays thin and keeps only lightweight endpoint/helper docstrings
 
 ## Owner
 

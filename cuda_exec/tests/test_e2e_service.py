@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, UTC
 from pathlib import Path
 from urllib import error, request
 
@@ -27,9 +28,10 @@ class ServiceProcess:
         self.base_url = f"http://127.0.0.1:{self.port}"
         temp_parent = Path.home() / "temp"
         temp_parent.mkdir(parents=True, exist_ok=True)
+        timestamp_prefix = datetime.now(UTC).strftime("%Y-%m-%d-%H-%M")
         self._temp_dir = tempfile.TemporaryDirectory(
             dir=str(temp_parent),
-            prefix=f"cuda-exec-integration-{os.getpid()}-",
+            prefix=f"{timestamp_prefix}-cuda-exec-integration-{os.getpid()}-",
         )
         self.runtime_root = Path(self._temp_dir.name) / "runtime-root"
         self.runtime_root.mkdir(parents=True, exist_ok=True)

@@ -476,7 +476,8 @@ For integration tests or manual validation runs, the runtime root may be redirec
 Preferred layout for preserved runs:
 
 - place run roots under `~/temp/`
-- use a kebab-case slug plus PID in the run directory name
+- prefix the run directory name with `YYYY-MM-DD-HH-MM-`
+- then use a kebab-case slug plus PID in the run directory name
 - when a temporary uv-managed environment is created there, prefer `<run-dir>/.venv`
 
 Retention policy direction:

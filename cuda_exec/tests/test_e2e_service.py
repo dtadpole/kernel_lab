@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import socket
 import subprocess
 import tempfile
@@ -24,12 +25,17 @@ class ServiceProcess:
     def __init__(self) -> None:
         self.port = _find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
-        self._log_file = tempfile.NamedTemporaryFile(prefix="cuda_exec_test_", suffix=".log", delete=False)
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="cuda_exec_integration_")
+        self.runtime_root = Path(self._temp_dir.name) / "runtime-root"
+        self.runtime_root.mkdir(parents=True, exist_ok=True)
+        self.log_path = Path(self._temp_dir.name) / "uvicorn.log"
+        self._log_file = self.log_path.open("w", encoding="utf-8")
         self.process: subprocess.Popen | None = None
 
     def start(self) -> None:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["CUDA_EXEC_ROOT"] = str(self.runtime_root)
         self.process = subprocess.Popen(
             [
                 str(VENV_PYTHON),
@@ -45,28 +51,30 @@ class ServiceProcess:
             stdout=self._log_file,
             stderr=subprocess.STDOUT,
             env=env,
+            start_new_session=True,
         )
         deadline = time.time() + 20.0
         while time.time() < deadline:
             if self.process.poll() is not None:
-                raise RuntimeError(f"uvicorn exited early; log at {self._log_file.name}")
+                raise RuntimeError(f"uvicorn exited early; log at {self.log_path}")
             try:
                 with request.urlopen(f"{self.base_url}/healthz", timeout=1.0) as resp:
                     if resp.status == 200:
                         return
             except Exception:
                 time.sleep(0.2)
-        raise RuntimeError(f"timed out waiting for service; log at {self._log_file.name}")
+        raise RuntimeError(f"timed out waiting for service; log at {self.log_path}")
 
     def stop(self) -> None:
         if self.process and self.process.poll() is None:
-            self.process.terminate()
             try:
+                os.killpg(self.process.pid, signal.SIGTERM)
                 self.process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait(timeout=5)
         self._log_file.close()
+        self._temp_dir.cleanup()
 
     def get_json(self, path: str) -> tuple[int, dict]:
         req = request.Request(f"{self.base_url}{path}", method="GET")
@@ -101,7 +109,9 @@ class CudaExecE2ETest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        runtime_root = cls.service.runtime_root
         cls.service.stop()
+        cls.runtime_root_after_stop = runtime_root
 
     def _metadata(self, turn: int) -> dict:
         return {
@@ -226,6 +236,18 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIsInstance(body["logs"], dict)
         else:
             self.assertIn("detail", body)
+
+
+class CudaExecIsolationTest(unittest.TestCase):
+    def test_temporary_runtime_root_is_cleaned_up(self) -> None:
+        service = ServiceProcess()
+        runtime_root = service.runtime_root
+        service.start()
+        status, body = service.get_json("/healthz")
+        self.assertEqual(status, 200)
+        self.assertTrue(runtime_root.exists())
+        service.stop()
+        self.assertFalse(runtime_root.exists())
 
 
 if __name__ == "__main__":

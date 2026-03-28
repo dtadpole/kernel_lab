@@ -467,6 +467,15 @@ The service does not guarantee that an invoked program will remain inside that d
 program itself changes cwd, writes to absolute paths, or spawns child processes with different
 path behavior.
 
+### Test isolation note
+
+For integration tests, the runtime root may be redirected by setting:
+
+- `CUDA_EXEC_ROOT=<temporary-directory>`
+
+This allows tests to run against a real uvicorn subprocess while avoiding lingering runtime files
+under the user's normal `~/.cuda_exec` tree.
+
 ---
 
 ## 11. Caller-facing simplicity rules

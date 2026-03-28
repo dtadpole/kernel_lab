@@ -32,7 +32,7 @@ from fastapi import HTTPException
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
 CUDA_TOOLKIT_BIN = CUDA_TOOLKIT_ROOT / "bin"
-CUDA_EXEC_ROOT = Path.home() / ".cuda_exec"
+CUDA_EXEC_ROOT_ENV = "CUDA_EXEC_ROOT"
 MAX_CAPTURE_BYTES = 1024 * 1024
 SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -53,6 +53,23 @@ def _validate_component(label: str, value: str) -> str:
     return value
 
 
+def _runtime_root() -> Path:
+    """Return the runtime root for turn data.
+
+    Default:
+        Path.home() / ".cuda_exec"
+
+    Tests and isolated runs may override this with the CUDA_EXEC_ROOT
+    environment variable so integration coverage can run without leaving
+    persistent artifacts under the real home directory.
+    """
+
+    override = os.environ.get(CUDA_EXEC_ROOT_ENV)
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".cuda_exec"
+
+
 def resolve_workspace_bundle(
     *,
     run_tag: str,
@@ -65,7 +82,8 @@ def resolve_workspace_bundle(
 
     The returned bundle is the concrete on-disk implementation of the four-dir
     runtime model. `workspace_path` is also the initial cwd for launched
-    processes.
+    processes. The bundle root is normally under ~/.cuda_exec but may be
+    redirected via CUDA_EXEC_ROOT for tests or isolated runs.
     """
 
     safe_run_tag = _validate_component("run_tag", run_tag)
@@ -77,7 +95,7 @@ def resolve_workspace_bundle(
         raise HTTPException(status_code=400, detail="turn must be >= 0")
 
     turn_root = (
-        CUDA_EXEC_ROOT
+        _runtime_root()
         / safe_run_tag
         / safe_version
         / f"{direction_id}_{safe_direction_slug}"

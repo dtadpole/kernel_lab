@@ -115,7 +115,8 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 
 - `cuda_exec/tests/` is reserved for end-to-end integration tests
 - do not put unit tests there
-- tests should start the service and call HTTP interfaces with realistic payloads
+- tests should start a real uvicorn service in a subprocess and call HTTP interfaces with realistic payloads
+- tests should isolate runtime side effects via a temporary `CUDA_EXEC_ROOT`
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 
 ## Owner

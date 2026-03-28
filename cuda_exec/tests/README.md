@@ -19,7 +19,8 @@ Runtime side effects should be isolated during tests:
 - prefer placing the temporary test root under `~/temp/`
 - prefer a kebab-case subfolder name with a slug plus PID, e.g. `cuda-exec-integration-12345-...`
 - preferably also provision the uvicorn Python environment from `cuda_exec/requirements.txt` using `uv` inside a temporary folder, rather than relying forever on a persistent repo-local environment
-- practical note: after `uv venv <temp-dir>/venv`, install dependencies with `uv pip install --python <temp-dir>/venv/bin/python -r cuda_exec/requirements.txt` so the temporary environment is targeted explicitly
+- when doing so, prefer the conventional path `<temp-run-dir>/.venv`
+- practical note: after `uv venv <temp-run-dir>/.venv`, install dependencies with `uv pip install --python <temp-run-dir>/.venv/bin/python -r cuda_exec/requirements.txt` so the temporary environment is targeted explicitly
 
 They are intentionally allowed to observe expected failures from the underlying
 CUDA toolchain or sample kernels. The purpose is to keep interface coverage and

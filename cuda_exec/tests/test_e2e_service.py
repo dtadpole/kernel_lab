@@ -20,6 +20,7 @@ SUITE_RUN_DIR: Path | None = None
 SUITE_VENV_DIR: Path | None = None
 REFERENCE_STACK_SITE_PACKAGES = CUDA_EXEC_DIR / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
 REFERENCE_STACK_EXTRA_PATH = REFERENCE_STACK_SITE_PACKAGES / "nvidia_cutlass_dsl" / "python_packages"
+TEST_BEARER_TOKEN = "test-cuda-exec-token-for-e2e"
 
 
 def _find_free_port() -> int:
@@ -121,6 +122,9 @@ class ServiceProcess:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["CUDA_EXEC_ROOT"] = str(self.runtime_root)
+        key_path = self.run_dir / f"cuda_exec-{self.instance_id:02d}.key"
+        key_path.write_text(TEST_BEARER_TOKEN, encoding="utf-8")
+        env["CUDA_EXEC_KEY_PATH"] = str(key_path)
         env["PYTHONPATH"] = os.pathsep.join(_reference_pythonpath_entries(env.get("PYTHONPATH")))
         self.process = subprocess.Popen(
             [
@@ -163,6 +167,7 @@ class ServiceProcess:
 
     def get_json(self, path: str) -> tuple[int, dict]:
         req = request.Request(f"{self.base_url}{path}", method="GET")
+        req.add_header("Authorization", f"Bearer {TEST_BEARER_TOKEN}")
         try:
             with request.urlopen(req, timeout=10) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -178,8 +183,27 @@ class ServiceProcess:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        req.add_header("Authorization", f"Bearer {TEST_BEARER_TOKEN}")
         try:
             with request.urlopen(req, timeout=30) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            return exc.code, json.loads(body)
+
+    def raw_post_json(self, path: str, payload: dict, *, bearer: str | None = None) -> tuple[int, dict]:
+        """POST without the default auth header.  Pass *bearer* to send a custom token."""
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        if bearer is not None:
+            req.add_header("Authorization", f"Bearer {bearer}")
+        try:
+            with request.urlopen(req, timeout=10) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8")
@@ -234,6 +258,24 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.get("ok"), True)
         self.assertEqual(body.get("service"), "cuda_exec")
+
+    def test_healthz_requires_no_auth(self) -> None:
+        req = request.Request(f"{self.service.base_url}/healthz", method="GET")
+        with request.urlopen(req, timeout=10) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_protected_endpoint_rejects_missing_token(self) -> None:
+        status, body = self.service.raw_post_json("/compile", self._compile_payload(turn=150))
+        self.assertIn(status, {401, 403})
+        self.assertIn("detail", body)
+
+    def test_protected_endpoint_rejects_wrong_token(self) -> None:
+        status, body = self.service.raw_post_json(
+            "/compile", self._compile_payload(turn=151), bearer="wrong-token"
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("detail", body)
+        self.assertIn("invalid bearer token", body["detail"])
 
     def test_compile_endpoint_accepts_inline_file_maps(self) -> None:
         status, body = self.service.post_json("/compile", self._compile_payload(turn=102))

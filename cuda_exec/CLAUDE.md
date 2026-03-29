@@ -69,6 +69,7 @@ Override with `CUDA_EXEC_ROOT` env var for tests/isolation.
 - **Public responses use `all_ok`** at the top level and per-config `status` fields. Internal `state/` is not exposed in default responses.
 - **Files in responses** are relative-path-keyed dicts of `FilePayload` with `encoding` (utf8/base64) and `truncated` metadata.
 - **`profiler_backend="ncu"`** is a parallel path to `comparison_runtime`, intentionally limited to `generated_only` mode.
+- **Bearer token authentication** gates all endpoints except `/healthz`. Key file at `~/.keys/cuda_exec.key`, overridable via `CUDA_EXEC_KEY_PATH` env var. Service refuses to start without a valid key.
 
 ### DESIGN.md
 

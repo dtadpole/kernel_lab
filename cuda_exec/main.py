@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import re
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+
+from cuda_exec.auth import verify_bearer_token
 
 from cuda_exec.models import (
     CompileArtifacts,
@@ -127,7 +129,7 @@ def _capture_public_files(workspace_path: str, rel_paths: list[str], *, inline: 
 
 
 @app.post("/compile", response_model=CompileResponse)
-def compile_endpoint(request: CompileRequest) -> CompileResponse:
+def compile_endpoint(request: CompileRequest, _auth: None = Depends(verify_bearer_token)) -> CompileResponse:
     """Compile inline code inputs into kept compile artifacts plus logs."""
 
     result = run_compile_task(
@@ -174,7 +176,7 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
 
 
 @app.post("/files/read", response_model=FileReadResponse)
-def file_read_endpoint(request: FileReadRequest) -> FileReadResponse:
+def file_read_endpoint(request: FileReadRequest, _auth: None = Depends(verify_bearer_token)) -> FileReadResponse:
     """Read one turn-relative file from artifacts/, logs/, or state/."""
 
     _validate_file_read_scope(request.path)
@@ -186,7 +188,7 @@ def file_read_endpoint(request: FileReadRequest) -> FileReadResponse:
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
-def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
+def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bearer_token)) -> EvaluateResponse:
     """Evaluate one compiled artifact against slug-keyed runtime configs."""
 
     result = run_evaluate_task(
@@ -224,7 +226,7 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
 
 
 @app.post("/profile", response_model=ProfileResponse)
-def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
+def profile_endpoint(request: ProfileRequest, _auth: None = Depends(verify_bearer_token)) -> ProfileResponse:
     """Profile one compiled artifact against slug-keyed runtime configs."""
 
     result = run_profile_task(
@@ -265,7 +267,7 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
 
 
 @app.post("/execute", response_model=ExecuteResponse)
-def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
+def execute_endpoint(request: ExecuteRequest, _auth: None = Depends(verify_bearer_token)) -> ExecuteResponse:
     """Run a generic CUDA-tool command and return logs only."""
 
     result = run_execute_task(

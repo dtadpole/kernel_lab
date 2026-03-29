@@ -1005,7 +1005,49 @@ Response shape per config:
 }
 ```
 
-## 13. Documentation split
+## 13. Authentication
+
+All endpoints except `/healthz` require a bearer token via the `Authorization` header.
+
+### Key file
+
+| Setting | Value |
+|---------|-------|
+| Default path | `~/.keys/cuda_exec.key` |
+| Override | `CUDA_EXEC_KEY_PATH` environment variable |
+| Format | Plain text, single token, whitespace-stripped |
+| Missing/empty | Service refuses to start |
+
+### Per-endpoint auth
+
+| Endpoint | Auth required |
+|----------|--------------|
+| `GET /healthz` | No |
+| `POST /compile` | Yes |
+| `POST /evaluate` | Yes |
+| `POST /profile` | Yes |
+| `POST /execute` | Yes |
+| `POST /files/read` | Yes |
+
+### Error responses
+
+Missing or invalid `Authorization` header:
+```json
+HTTP 401
+{"detail": "Not authenticated"}
+```
+
+Wrong token:
+```json
+HTTP 401
+{"detail": "invalid bearer token"}
+```
+
+### Test key provisioning
+
+Integration tests write a test token to a temporary file and set `CUDA_EXEC_KEY_PATH` in the service environment.  All test HTTP helpers include the matching `Authorization: Bearer <token>` header automatically.
+
+## 14. Documentation split
 
 - `DESIGN.md` = detailed source of truth
 - `README.md` = short entrypoint

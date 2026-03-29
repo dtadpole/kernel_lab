@@ -236,10 +236,10 @@ class CudaExecE2ETest(unittest.TestCase):
             "metadata": self._metadata(turn),
             "timeout_seconds": 20,
             "reference_files": {
-                "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
             },
             "generated_files": {
-                "cuda/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
             },
         }
 
@@ -249,7 +249,7 @@ class CudaExecE2ETest(unittest.TestCase):
     def _compile_payload_runtime_launch(self, turn: int) -> dict:
         payload = self._compile_payload(turn)
         payload["generated_files"] = {
-            "cuda/vector_add_runtime_launch.cu": (FIXTURES / "generated" / "vector_add_runtime_launch.cu").read_text(encoding="utf-8")
+            "generated.cu": (FIXTURES / "generated" / "generated_runtime_launch.cu").read_text(encoding="utf-8")
         }
         return payload
 
@@ -328,14 +328,13 @@ class CudaExecE2ETest(unittest.TestCase):
                 "timeout_seconds": 20,
                 "reference_files": {},
                 "generated_files": {
-                    "cuda/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                    "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
         self.assertEqual(only_generated_status, 400)
         self.assertIn("detail", only_generated_body)
-        self.assertIn("requires non-empty reference_files and generated_files", only_generated_body["detail"])
-        self.assertIn("Do not compile with only generated files", only_generated_body["detail"])
+        self.assertIn("reference_files must include a file named reference.py", only_generated_body["detail"])
 
         only_reference_status, only_reference_body = self.service.post_json(
             "/compile",
@@ -343,7 +342,7 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(107),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                    "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {},
             },
@@ -355,7 +354,7 @@ class CudaExecE2ETest(unittest.TestCase):
 
     def test_compile_requires_exactly_one_generated_cu_file(self) -> None:
         payload = self._compile_payload(turn=108)
-        payload["generated_files"]["cuda/vector_add_alt.cu"] = payload["generated_files"]["cuda/vector_add_inline_ptx.cu"]
+        payload["generated_files"]["alt.cu"] = payload["generated_files"]["generated.cu"]
         status, body = self.service.post_json("/compile", payload)
         self.assertEqual(status, 400)
         self.assertIn("detail", body)
@@ -434,7 +433,7 @@ class CudaExecE2ETest(unittest.TestCase):
     def test_compile_accepts_reference_files_without_any_reference_cu_file(self) -> None:
         payload = self._compile_payload(turn=112)
         payload["reference_files"] = {
-            "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8"),
+            "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8"),
             "notes/reference.txt": "vector-add reference notes\n",
         }
         status, body = self.service.post_json("/compile", payload)
@@ -449,10 +448,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(113),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                    "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "/tmp/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                    "/tmp/generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -466,10 +465,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(114),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "../dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                    "../reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "cuda/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                    "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -502,7 +501,7 @@ class CudaExecE2ETest(unittest.TestCase):
             "/files/read",
             {
                 "metadata": self._metadata(116),
-                "path": "workspace/inputs/generated/vector_add_inline_ptx.cu",
+                "path": "workspace/inputs/generated/generated.cu",
             },
         )
         self.assertEqual(status, 400)
@@ -958,7 +957,7 @@ class CudaExecE2ETest(unittest.TestCase):
 
 class ReferenceFixtureContractTest(unittest.TestCase):
     def test_reference_fixture_declares_explicit_module_contract(self) -> None:
-        fixture_path = FIXTURES / "reference" / "vector_add_cutedsl.py"
+        fixture_path = FIXTURES / "reference" / "reference.py"
         source = fixture_path.read_text(encoding="utf-8")
         self.assertIn("class Model(nn.Module)", source)
         self.assertIn("def get_init_inputs()", source)
@@ -986,7 +985,7 @@ class ReferenceFixtureContractTest(unittest.TestCase):
         except Exception:
             self.skipTest("torch/cutlass.cute/CUDA is unavailable in cuda_exec runtime environment")
 
-        fixture_path = FIXTURES / "reference" / "vector_add_cutedsl.py"
+        fixture_path = FIXTURES / "reference" / "reference.py"
         env = os.environ.copy()
         env.update(
             {

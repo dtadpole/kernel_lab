@@ -46,4 +46,5 @@ That file now contains the authoritative request/response JSON examples for:
 Current profile note:
 
 - `profiler_backend="comparison_runtime"` is the default behavior-first runtime
-- `profiler_backend="ncu"` is available in parallel and currently scoped to `mode="generated_only"`
+- `profiler_backend="ncu"` is available in parallel and is intentionally scoped to `mode="generated_only"`
+- long-term design: `ncu` stays a generated-side capture backend; cross-side comparison remains under `comparison_runtime`

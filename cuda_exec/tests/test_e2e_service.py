@@ -629,6 +629,25 @@ class CudaExecE2ETest(unittest.TestCase):
         else:
             self.assertIn("detail", body)
 
+    def test_profile_endpoint_rejects_ncu_backend_for_non_generated_modes(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=122))
+        self.assertEqual(compile_status, 200)
+
+        for mode in ["reference_only", "dual"]:
+            status, body = self.service.post_json(
+                "/profile",
+                {
+                    "metadata": self._metadata(122),
+                    "timeout_seconds": 5,
+                    "mode": mode,
+                    "profiler_backend": "ncu",
+                    "configs": self._config_map(),
+                },
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("detail", body)
+            self.assertIn('profiler_backend=ncu currently supports only mode=generated_only', body["detail"])
+
     def test_execute_endpoint_calls_public_interface(self) -> None:
         status, body = self.service.post_json(
             "/execute",

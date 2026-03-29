@@ -99,7 +99,7 @@ class ProfileRequest(RequestBase):
 
     `profiler_backend` selects the implementation path:
     - `comparison_runtime`: current behavior-first runtime
-    - `ncu`: generated-side Nsight Compute capture path
+    - `ncu`: generated-side Nsight Compute capture path intentionally scoped to `mode="generated_only"`
     """
 
     mode: Literal["reference_only", "generated_only", "dual"] = Field(

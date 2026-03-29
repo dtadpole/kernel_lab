@@ -201,11 +201,12 @@ For `profile`, the runtime shape is mode-driven and backend-aware:
 - `reference_only`: run only the reference module side and summarize reference performance
 - `dual`: run both sides and return summary metadata that includes comparison fields such as reference/generated median latency and speedup
 - `profiler_backend="comparison_runtime"` keeps the existing behavior-first runtime
-- `profiler_backend="ncu"` provides a parallel Nsight Compute capture path for `generated_only` requests
+- `profiler_backend="ncu"` provides a parallel Nsight Compute capture path intentionally scoped to `generated_only`
+- long-term boundary decision: keep `ncu` as a generated-side profiler backend rather than extending it to `reference_only` or `dual`; side-by-side comparisons remain the responsibility of `comparison_runtime`
 - persist one kept structured profile artifact per config under `artifacts/profile.attempt_###.config_<slug>.summary.json`
 - when `profiler_backend="ncu"` succeeds, also keep an NCU report under `artifacts/profile.attempt_###.config_<slug>.ncu.ncu-rep`
 - return per-config `summary`, `reference`, `generated`, `reference_summary`, `generated_summary`, `artifacts`, and `logs`
-- integration coverage now explicitly exercises `dual`, `reference_only`, `generated_only`, and the `ncu` backend path
+- integration coverage now explicitly exercises `dual`, `reference_only`, `generated_only`, and the `ncu` backend path within that generated-only scope
 
 Example config fields:
 

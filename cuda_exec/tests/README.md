@@ -27,9 +27,11 @@ Runtime side effects should be isolated during tests:
 - use a temporary runtime root via `CUDA_EXEC_ROOT`
 - clean up the subprocess on teardown
 - preserve the temporary run directory on teardown for inspection
-- prefer placing the temporary test root under `~/temp/`
+- prefer placing the temporary suite run directory under `~/temp/`
+- create one top-level temp directory per integration-suite invocation, not one sibling temp directory per test class or service lifecycle
 - prefix the run directory name with `YYYY-MM-DD-HH-MM-`
 - then use a kebab-case slug plus PID, e.g. `2026-03-28-23-27-cuda-exec-integration-12345-...`
+- if multiple service processes are started within the suite, reuse that same top-level run directory and give each service instance its own namespaced log/runtime-root paths inside it
 - the current harness uses the repo-local Python environment at `cuda_exec/.venv`
 - if the harness is later moved to a fully temporary uv-managed environment, prefer the conventional path `<temp-run-dir>/.venv`
 - practical note for that future shape: after `uv venv <temp-run-dir>/.venv`, install dependencies with `uv pip install --python <temp-run-dir>/.venv/bin/python -r cuda_exec/requirements.txt` so the temporary environment is targeted explicitly

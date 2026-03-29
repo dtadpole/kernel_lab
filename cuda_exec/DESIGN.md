@@ -472,8 +472,10 @@ For integration tests or manual validation runs, the runtime root may be redirec
 Current automated integration-test harness behavior:
 
 - place temporary run roots under `~/temp/`
+- create one top-level temp directory per integration-suite invocation
 - prefix the run directory name with `YYYY-MM-DD-HH-MM-`
 - then use a kebab-case slug plus PID in the run directory name
+- if multiple service processes are started during the suite, reuse that same top-level run directory and namespace per-service logs/runtime roots inside it
 - use the repo-local Python environment at `cuda_exec/.venv`
 - invoke `cuda_exec/scripts/prune_temp_runs.py` before starting the temporary uvicorn service
 - terminate the subprocess on teardown

@@ -16,6 +16,7 @@ VENV_PYTHON = CUDA_EXEC_DIR / ".venv" / "bin" / "python"
 PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CONFIG_FIXTURE = FIXTURES / "configs" / "vector_add_shapes.json"
+SUITE_RUN_DIR: Path | None = None
 
 
 def _find_free_port() -> int:
@@ -34,26 +35,42 @@ def _prune_old_runs() -> None:
     )
 
 
+def _create_suite_run_dir() -> Path:
+    temp_parent = Path.home() / "temp"
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    timestamp_prefix = datetime.now(UTC).strftime("%Y-%m-%d-%H-%M")
+    return Path(
+        tempfile.mkdtemp(
+            dir=str(temp_parent),
+            prefix=f"{timestamp_prefix}-cuda-exec-integration-{os.getpid()}-",
+        )
+    )
+
+
+def _suite_run_dir() -> Path:
+    if SUITE_RUN_DIR is None:
+        raise RuntimeError("suite temp directory is not initialized")
+    return SUITE_RUN_DIR
+
+
 def setUpModule() -> None:
+    global SUITE_RUN_DIR
     _prune_old_runs()
+    SUITE_RUN_DIR = _create_suite_run_dir()
 
 
 class ServiceProcess:
-    def __init__(self) -> None:
+    _instance_counter = 0
+
+    def __init__(self, run_dir: Path) -> None:
+        ServiceProcess._instance_counter += 1
+        self.instance_id = ServiceProcess._instance_counter
         self.port = _find_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
-        temp_parent = Path.home() / "temp"
-        temp_parent.mkdir(parents=True, exist_ok=True)
-        timestamp_prefix = datetime.now(UTC).strftime("%Y-%m-%d-%H-%M")
-        self.run_dir = Path(
-            tempfile.mkdtemp(
-                dir=str(temp_parent),
-                prefix=f"{timestamp_prefix}-cuda-exec-integration-{os.getpid()}-",
-            )
-        )
-        self.runtime_root = self.run_dir / "runtime-root"
+        self.run_dir = run_dir
+        self.runtime_root = self.run_dir / f"runtime-root-{self.instance_id:02d}"
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        self.log_path = self.run_dir / "uvicorn.log"
+        self.log_path = self.run_dir / f"uvicorn-{self.instance_id:02d}.log"
         self._log_file = self.log_path.open("w", encoding="utf-8")
         self.process: subprocess.Popen | None = None
 
@@ -128,7 +145,7 @@ class ServiceProcess:
 class CudaExecE2ETest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.service = ServiceProcess()
+        cls.service = ServiceProcess(_suite_run_dir())
         cls.service.start()
 
     @classmethod
@@ -256,7 +273,7 @@ class CudaExecE2ETest(unittest.TestCase):
 
 class CudaExecIsolationTest(unittest.TestCase):
     def test_temporary_runtime_root_is_preserved_for_inspection(self) -> None:
-        service = ServiceProcess()
+        service = ServiceProcess(_suite_run_dir())
         runtime_root = service.runtime_root
         run_dir = service.run_dir
         service.start()

@@ -119,8 +119,10 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - tests should start a real uvicorn service in a subprocess and call HTTP interfaces with realistic payloads
 - tests should isolate runtime side effects via a temporary `CUDA_EXEC_ROOT`
 - prefer placing temporary test roots under `~/temp/`
+- create one top-level temp directory per integration-suite invocation rather than one sibling temp directory per test class or service lifecycle
 - prefix the run directory name with `YYYY-MM-DD-HH-MM-`
 - then use a kebab-case slug plus PID in the subfolder name
+- if multiple service processes are started during the suite, reuse that same top-level run directory and namespace per-service logs/runtime roots inside it
 - preferred isolation direction: provision the uvicorn Python environment from `cuda_exec/requirements.txt` using `uv`, with the environment itself created under a temporary folder for the test run
 - when using a temp-folder uv-managed environment, prefer naming it `<temp-run-dir>/.venv`
 - preserve run environments and intermediate outputs by default for later inspection; do not rely on immediate deletion after each run

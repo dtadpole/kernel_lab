@@ -1,0 +1,6 @@
+# MCP server HTTP client and tool settings.
+# These values are passed to the MCP subprocess as CUDA_AGENT_MCP_* env vars.
+request_timeout: 300.0
+connect_timeout: 10.0
+max_content_chars: 4000
+tool_timeout_seconds: 180

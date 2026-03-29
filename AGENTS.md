@@ -138,7 +138,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed `.venv` is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 - current integration config coverage should include roughly 4–6 configs spanning multiple 1D sizes plus representative 2D and 3D shape metadata
-- prefer storing integration config sets in fixture files under `cuda_exec/tests/fixtures/` instead of embedding them directly in the main test module
+- prefer storing integration config sets in fixture files under `conf/fixtures/` instead of embedding them directly in the main test module
 - fixture config slugs should make semantic sense for the sample workload; for vector-add fixtures, prefer size/shape/rank-based slugs rather than unrelated causal/noncausal labels
 - for vector-add integration fixtures, the config body itself should stay pertinent: shape/rank/input_size metadata is enough, and unrelated transformer-style fields should be omitted
 

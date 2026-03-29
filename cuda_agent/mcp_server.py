@@ -5,10 +5,18 @@ requests to the running cuda_exec FastAPI service and returns the JSON
 response as text so the calling agent can parse it directly.
 
 Configuration (environment variables):
-    CUDA_EXEC_URL      Base URL of the cuda_exec service.
-                       Default: http://127.0.0.1:8000
-    CUDA_EXEC_KEY_PATH Path to the bearer token key file.
-                       Default: ~/.keys/cuda_exec.key
+    CUDA_EXEC_URL                       Base URL of the cuda_exec service.
+                                        Default: http://127.0.0.1:8000
+    CUDA_EXEC_KEY_PATH                  Path to the bearer token key file.
+                                        Default: ~/.keys/cuda_exec.key
+    CUDA_AGENT_MCP_REQUEST_TIMEOUT      Overall HTTP request timeout (seconds).
+                                        Default: 300.0
+    CUDA_AGENT_MCP_CONNECT_TIMEOUT      TCP connect timeout (seconds).
+                                        Default: 10.0
+    CUDA_AGENT_MCP_MAX_CONTENT_CHARS    Max chars for inline content truncation.
+                                        Default: 4000
+    CUDA_AGENT_MCP_TOOL_TIMEOUT         Default timeout per tool call (seconds).
+                                        Default: 180
 """
 
 from __future__ import annotations
@@ -53,14 +61,18 @@ _BEARER_TOKEN: str = _load_bearer_token()
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
+_TIMEOUT = httpx.Timeout(
+    float(os.environ.get("CUDA_AGENT_MCP_REQUEST_TIMEOUT", "300.0")),
+    connect=float(os.environ.get("CUDA_AGENT_MCP_CONNECT_TIMEOUT", "10.0")),
+)
 
 
 def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {_BEARER_TOKEN}"}
 
 
-_MAX_CONTENT_CHARS = 4000
+_MAX_CONTENT_CHARS = int(os.environ.get("CUDA_AGENT_MCP_MAX_CONTENT_CHARS", "4000"))
+_DEFAULT_TOOL_TIMEOUT = int(os.environ.get("CUDA_AGENT_MCP_TOOL_TIMEOUT", "180"))
 
 # Fields to keep in evaluate/profile per-config outputs.  Everything else
 # (reference, generated, artifacts, logs) can be huge and is available via
@@ -131,7 +143,7 @@ async def cuda_compile(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     reference_files: Annotated[dict[str, str], Field(description="Map of relative_path -> file content for reference source inputs")],
     generated_files: Annotated[dict[str, str], Field(description="Map of relative_path -> file content; must contain exactly one .cu file")],
-    timeout_seconds: Annotated[int, Field(description="Max seconds for compile")] = 180,
+    timeout_seconds: Annotated[int, Field(description="Max seconds for compile")] = _DEFAULT_TOOL_TIMEOUT,
 ) -> str:
     """Compile CUDA source files and produce a binary, PTX, and SASS.
 
@@ -173,7 +185,7 @@ async def cuda_compile(
 async def cuda_evaluate(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads, e.g. {'tensor2d-1024x1024': {shape: [1024,1024]}}")],
-    timeout_seconds: Annotated[int, Field(description="Max seconds for evaluate")] = 180,
+    timeout_seconds: Annotated[int, Field(description="Max seconds for evaluate")] = _DEFAULT_TOOL_TIMEOUT,
 ) -> str:
     """Evaluate a compiled CUDA kernel for correctness and performance.
 
@@ -217,7 +229,7 @@ async def cuda_profile(
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads")],
     mode: Annotated[Literal["generated_only", "reference_only", "dual"], Field(description="Which side(s) to profile")] = "generated_only",
     profiler_backend: Annotated[Literal["comparison_runtime", "ncu"], Field(description="Profile backend; ncu is generated_only only")] = "comparison_runtime",
-    timeout_seconds: Annotated[int, Field(description="Max seconds for profile")] = 180,
+    timeout_seconds: Annotated[int, Field(description="Max seconds for profile")] = _DEFAULT_TOOL_TIMEOUT,
 ) -> str:
     """Profile a compiled CUDA kernel to collect detailed latency data.
 
@@ -266,7 +278,7 @@ async def cuda_execute(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     command: Annotated[list[str], Field(description="Executable plus arguments, e.g. ['/usr/local/cuda/bin/nvcc', '--version']")],
     env: Annotated[dict[str, str], Field(description="Extra environment variables")] = {},
-    timeout_seconds: Annotated[int, Field(description="Max seconds for execute")] = 180,
+    timeout_seconds: Annotated[int, Field(description="Max seconds for execute")] = _DEFAULT_TOOL_TIMEOUT,
 ) -> str:
     """Run an ad-hoc CUDA tool command on the remote service.
 

@@ -27,6 +27,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
+from cuda_agent.config import load_config
 from cuda_agent.prompts import SYSTEM_PROMPT, format_initial_prompt
 from cuda_agent.task import OptimizationTask
 
@@ -91,7 +92,7 @@ async def _deny_direct_cuda_toolkit(
     return SyncHookJSONOutput()
 
 
-def _make_log_tool_use(log_dir: Path):
+def _make_log_tool_use(log_dir: Path, truncation_limit: int):
     """Factory: return a PostToolUse hook that writes to the given log_dir."""
 
     async def _log_tool_use(
@@ -107,11 +108,11 @@ def _make_log_tool_use(log_dir: Path):
 
         # Truncate large values to keep the log readable.
         input_str = json.dumps(tool_input, ensure_ascii=False, default=str)
-        if len(input_str) > 1000:
-            input_str = input_str[:1000] + "..."
+        if len(input_str) > truncation_limit:
+            input_str = input_str[:truncation_limit] + "..."
         output_str = json.dumps(tool_response, ensure_ascii=False, default=str) if tool_response else ""
-        if len(output_str) > 1000:
-            output_str = output_str[:1000] + "..."
+        if len(output_str) > truncation_limit:
+            output_str = output_str[:truncation_limit] + "..."
 
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -135,7 +136,10 @@ def _make_log_tool_use(log_dir: Path):
 # ---------------------------------------------------------------------------
 
 
-async def run_optimization(task: OptimizationTask) -> str:
+async def run_optimization(
+    task: OptimizationTask,
+    overrides: tuple[str, ...] = (),
+) -> str:
     """Run an iterative CUDA optimization loop and return the final summary.
 
     The agent decides internally when to compile, evaluate, modify code,
@@ -144,31 +148,34 @@ async def run_optimization(task: OptimizationTask) -> str:
     counts toward this limit).
     """
 
+    cfg = load_config(overrides)
     prompt = format_initial_prompt(task)
 
-    # Each optimization iteration can consume ~4-6 agent turns
-    # (compile + evaluate + maybe profile + reasoning).
-    max_turns = task.max_iterations * 8
+    max_turns = task.max_iterations * cfg.agent.max_turns_multiplier
 
-    # Build env for the MCP server subprocess.  We pass through HOME and
-    # key-path so the server can locate the bearer token file, plus
-    # CUDA_EXEC_URL for the target service.
+    # Build env for the MCP server subprocess.  Config values from Hydra
+    # are passed as CUDA_AGENT_MCP_* env vars so the subprocess (which
+    # cannot import Hydra config) can read them.
     mcp_env: dict[str, str] = {
         "HOME": os.environ.get("HOME", str(Path.home())),
-        "CUDA_EXEC_URL": task.cuda_exec_url,
+        "CUDA_EXEC_URL": task.cuda_exec_url or cfg.service.cuda_exec_url,
+        "CUDA_AGENT_MCP_REQUEST_TIMEOUT": str(cfg.mcp.request_timeout),
+        "CUDA_AGENT_MCP_CONNECT_TIMEOUT": str(cfg.mcp.connect_timeout),
+        "CUDA_AGENT_MCP_MAX_CONTENT_CHARS": str(cfg.mcp.max_content_chars),
+        "CUDA_AGENT_MCP_TOOL_TIMEOUT": str(cfg.mcp.tool_timeout_seconds),
     }
-    key_path = os.environ.get("CUDA_EXEC_KEY_PATH")
+    key_path = os.environ.get("CUDA_EXEC_KEY_PATH") or cfg.service.key_path
     if key_path:
-        mcp_env["CUDA_EXEC_KEY_PATH"] = key_path
+        mcp_env["CUDA_EXEC_KEY_PATH"] = str(Path(key_path).expanduser())
 
     log_dir = _log_dir_for_task(task)
-    log_tool_use = _make_log_tool_use(log_dir)
+    log_tool_use = _make_log_tool_use(log_dir, cfg.agent.log_truncation_chars)
 
     options = ClaudeAgentOptions(
-        model="claude-sonnet-4-6",
+        model=cfg.agent.model,
         system_prompt=SYSTEM_PROMPT,
         max_turns=max_turns,
-        permission_mode="bypassPermissions",
+        permission_mode=cfg.agent.permission_mode,
         hooks={
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[_deny_direct_cuda_toolkit]),

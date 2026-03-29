@@ -1,0 +1,5 @@
+# Claude Agent SDK settings
+model: "claude-sonnet-4-6"
+max_turns_multiplier: 8
+permission_mode: "bypassPermissions"
+log_truncation_chars: 1000

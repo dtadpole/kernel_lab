@@ -22,9 +22,9 @@ MCP-based CUDA kernel optimization agent. Uses the `cuda_exec` service via MCP t
        --version v1 \
        --direction-id 7 \
        --direction-slug vector-add \
-       --reference-dir cuda_exec/tests/fixtures/reference/ \
-       --generated-file cuda_exec/tests/fixtures/generated/vector_add_runtime_launch.cu \
-       --configs-file cuda_exec/tests/fixtures/configs/vector_add_shapes.json
+       --reference-dir conf/fixtures/reference/ \
+       --generated-file conf/fixtures/generated/generated_runtime_launch.cu \
+       --configs-file conf/fixtures/configs/vector_add_shapes.json
    ```
 
 ## Prerequisites

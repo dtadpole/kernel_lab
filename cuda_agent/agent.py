@@ -169,6 +169,7 @@ async def run_optimization(
         mcp_env["CUDA_EXEC_KEY_PATH"] = str(Path(key_path).expanduser())
 
     log_dir = _log_dir_for_task(task)
+    mcp_env["CUDA_AGENT_DATA_DIR"] = str(log_dir)
     log_tool_use = _make_log_tool_use(log_dir, cfg.agent.log_truncation_chars)
 
     options = ClaudeAgentOptions(

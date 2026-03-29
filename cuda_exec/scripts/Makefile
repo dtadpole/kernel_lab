@@ -35,6 +35,8 @@ COMPILE_SH    := $(SCRIPTS)/compile.sh
 EVALUATE_PY   := $(SCRIPTS)/evaluate.py
 PROFILE_PY    := $(SCRIPTS)/profile.py
 PROFILE_SH    := $(SCRIPTS)/profile.sh
+FMT_EVAL_PY   := $(SCRIPTS)/fmt_eval.py
+EVAL_HARNESS  := $(SCRIPTS)/eval_harness.cu
 
 # ---------------------------------------------------------------------------
 # Metadata — override on command line as needed
@@ -171,10 +173,15 @@ compile: ## Stage reference + generated files and run the 5-step compile pipelin
 	cp "$(GENERATED_CU)" "$(WORKSPACE)/inputs/generated/generated.cu"
 	# Run the 5-step compile pipeline
 	echo "--- compile: staging done, running compile.sh ---"
+	HARNESS_FLAG="" && \
+	if grep -q 'kernel_run' "$(WORKSPACE)/inputs/generated/generated.cu" 2>/dev/null; then \
+		HARNESS_FLAG="--harness $(EVAL_HARNESS)"; \
+	fi && \
 	CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 	bash "$(COMPILE_SH)" \
 		--source "$(WORKSPACE)/inputs/generated/generated.cu" \
-		--output "$(ARTIFACTS)/compile.attempt_001.generated.bin"
+		--output "$(ARTIFACTS)/compile.attempt_001.generated.bin" \
+		$$HARNESS_FLAG
 	# Write the compile manifest so evaluate/profile can find the binary
 	cat > "$(STATE)/compile.attempt_001.json" <<'MANIFEST_EOF'
 	{
@@ -209,7 +216,8 @@ evaluate: ## Run evaluate (reference vs generated comparison) for one config
 		--seed $(SEED) \
 		--num-warmups $(NUM_WARMUPS) \
 		--num-perf-trials $(NUM_PERF_TRIALS) \
-		--num-correctness-trials $(NUM_CORRECTNESS_TRIALS)
+		--num-correctness-trials $(NUM_CORRECTNESS_TRIALS) \
+	| $(VENV_PYTHON) "$(FMT_EVAL_PY)"
 
 .PHONY: profile-reference
 profile-reference: ## Profile reference side only for one config

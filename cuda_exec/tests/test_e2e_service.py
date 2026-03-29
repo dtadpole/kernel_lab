@@ -246,13 +246,6 @@ class CudaExecE2ETest(unittest.TestCase):
     def _config_map(self) -> dict:
         return json.loads(CONFIG_FIXTURE.read_text(encoding="utf-8"))
 
-    def _compile_payload_runtime_launch(self, turn: int) -> dict:
-        payload = self._compile_payload(turn)
-        payload["generated_files"] = {
-            "generated.cu": (FIXTURES / "generated" / "generated_runtime_launch.cu").read_text(encoding="utf-8")
-        }
-        return payload
-
     def test_healthz(self) -> None:
         status, body = self.service.get_json("/healthz")
         self.assertEqual(status, 200)
@@ -805,7 +798,7 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIn("detail", body)
 
     def test_profile_endpoint_can_materialize_ncu_report_with_runtime_launch_fixture(self) -> None:
-        compile_status, _ = self.service.post_json("/compile", self._compile_payload_runtime_launch(turn=124))
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=124))
         self.assertEqual(compile_status, 200)
 
         status, body = self.service.post_json(

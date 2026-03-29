@@ -21,6 +21,7 @@ COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
 EVALUATE_SCRIPT = SCRIPTS_DIR / "evaluate.py"
 PROFILE_SCRIPT = SCRIPTS_DIR / "profile.py"
 PROFILE_NCU_SCRIPT = SCRIPTS_DIR / "profile.sh"
+EVAL_HARNESS = SCRIPTS_DIR / "eval_harness.cu"
 DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
 SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 WORKFLOW_RULES = {
@@ -556,6 +557,9 @@ def run_compile_task(
             "--output",
             str(binary_output),
         ]
+        # Auto-detect harness mode: if the source exports kernel_run, link with harness
+        if EVAL_HARNESS.exists() and 'kernel_run' in source.read_text(encoding="utf-8"):
+            command.extend(["--harness", str(EVAL_HARNESS)])
         run_result = run_generic_command(
             kind="compile",
             command=command,

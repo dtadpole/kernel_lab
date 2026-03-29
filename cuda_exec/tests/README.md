@@ -49,3 +49,37 @@ They are intentionally allowed to observe expected failures from the underlying
 CUDA toolchain or sample kernels. The purpose is to keep interface coverage and
 workflow coverage in place even before the lower-level implementation is fully
 stable.
+
+## Current coverage map and remaining integration-test gaps
+
+Current suite coverage already includes:
+
+- compile request validation, inline file-map handling, second-attempt rejection, and compile artifact exposure
+- file-read success/error behavior and max-bytes truncation
+- evaluate endpoint shape plus standalone `scripts/evaluate.py` CLI execution after compile
+- reference fixture contract enforcement (`Model(nn.Module)`, `get_init_inputs()`, `get_inputs(config)`) and fixture execution from config env
+- profile behavior for `comparison_runtime` across `generated_only`, `reference_only`, and `dual`
+- profile behavior for `ncu` on `generated_only`, including rejection of unsupported non-generated modes
+- a real-kernel generated fixture proving that `ncu` can materialize a report when the binary actually launches CUDA work
+- execute endpoint logs-first public contract
+- temporary runtime-root preservation and temp-venv harness behavior
+
+Most important remaining integration-test gaps:
+
+1. **Negative NCU contract path**
+   - We now know one generated fixture falls back with `No kernels were profiled` while another can materialize a report.
+   - The suite should still add an explicit assertion that the fallback fixture does *not* publish `.ncu-rep` and does record `ncu_profiled=false` / fallback metadata.
+
+2. **Profile manifest/state contract checks**
+   - Current tests mostly assert public response payloads.
+   - We do not yet directly assert the kept `state/profile.attempt_###.json` manifest shape for comparison-runtime vs NCU runs.
+
+3. **Execute failure-mode coverage**
+   - `execute` is only checked for the success-ish `/usr/local/cuda/bin/nvcc --version` path.
+   - We do not yet assert public behavior for a failing command, timeout, or explicit non-zero exit path.
+
+4. **Compile artifact/content contract checks for alternate generated fixture**
+   - The runtime-launch generated fixture now exists for NCU verification, but we do not yet assert compile artifact shape/logs for that alternate generated fixture specifically.
+
+5. **Cross-attempt profile file retention sanity**
+   - We do not yet assert that repeated profile attempts for the same turn create distinct attempt-tagged artifacts/logs rather than overwriting prior public files.

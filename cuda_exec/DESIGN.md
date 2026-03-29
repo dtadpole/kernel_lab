@@ -463,7 +463,7 @@ The service does not guarantee that an invoked program will remain inside that d
 program itself changes cwd, writes to absolute paths, or spawns child processes with different
 path behavior.
 
-### Test isolation note
+### Test isolation and retention note
 
 For integration tests or manual validation runs, the runtime root may be redirected by setting:
 
@@ -476,18 +476,19 @@ Current automated integration-test harness behavior:
 - then use a kebab-case slug plus PID in the run directory name
 - use the repo-local Python environment at `cuda_exec/.venv`
 - invoke `cuda_exec/scripts/prune_temp_runs.py` before starting the temporary uvicorn service
-- terminate the subprocess and delete the temporary run directory on teardown
+- terminate the subprocess on teardown
+- preserve the temporary run directory, service log, and runtime root for later inspection
 
 If the harness is later moved to fully temporary uv-managed environments, prefer `<run-dir>/.venv`.
 
-Retention helper for preserved/manual runs:
+Retention helper for preserved runs:
 
 - the helper script is `cuda_exec/scripts/prune_temp_runs.py`
 - its default behavior deletes preserved run directories older than 7 days
 - `--dry-run` is supported
 - keep rules: skip directories whose name contains `keep`, or that contain keep-marker files such as `KEEP`
 
-This keeps the current automated test behavior explicit while still supporting preserved manual runs when needed.
+This keeps recent integration trajectories available for inspection without committing them into Git.
 
 ---
 

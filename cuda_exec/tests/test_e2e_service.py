@@ -45,13 +45,15 @@ class ServiceProcess:
         temp_parent = Path.home() / "temp"
         temp_parent.mkdir(parents=True, exist_ok=True)
         timestamp_prefix = datetime.now(UTC).strftime("%Y-%m-%d-%H-%M")
-        self._temp_dir = tempfile.TemporaryDirectory(
-            dir=str(temp_parent),
-            prefix=f"{timestamp_prefix}-cuda-exec-integration-{os.getpid()}-",
+        self.run_dir = Path(
+            tempfile.mkdtemp(
+                dir=str(temp_parent),
+                prefix=f"{timestamp_prefix}-cuda-exec-integration-{os.getpid()}-",
+            )
         )
-        self.runtime_root = Path(self._temp_dir.name) / "runtime-root"
+        self.runtime_root = self.run_dir / "runtime-root"
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        self.log_path = Path(self._temp_dir.name) / "uvicorn.log"
+        self.log_path = self.run_dir / "uvicorn.log"
         self._log_file = self.log_path.open("w", encoding="utf-8")
         self.process: subprocess.Popen | None = None
 
@@ -97,7 +99,6 @@ class ServiceProcess:
                 os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait(timeout=5)
         self._log_file.close()
-        self._temp_dir.cleanup()
 
     def get_json(self, path: str) -> tuple[int, dict]:
         req = request.Request(f"{self.base_url}{path}", method="GET")
@@ -254,15 +255,17 @@ class CudaExecE2ETest(unittest.TestCase):
 
 
 class CudaExecIsolationTest(unittest.TestCase):
-    def test_temporary_runtime_root_is_cleaned_up(self) -> None:
+    def test_temporary_runtime_root_is_preserved_for_inspection(self) -> None:
         service = ServiceProcess()
         runtime_root = service.runtime_root
+        run_dir = service.run_dir
         service.start()
         status, body = service.get_json("/healthz")
         self.assertEqual(status, 200)
         self.assertTrue(runtime_root.exists())
         service.stop()
-        self.assertFalse(runtime_root.exists())
+        self.assertTrue(run_dir.exists())
+        self.assertTrue(runtime_root.exists())
 
 
 if __name__ == "__main__":

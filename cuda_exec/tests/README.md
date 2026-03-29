@@ -26,7 +26,7 @@ Runtime side effects should be isolated during tests:
 
 - use a temporary runtime root via `CUDA_EXEC_ROOT`
 - clean up the subprocess on teardown
-- clean up the temporary run directory on teardown
+- preserve the temporary run directory on teardown for inspection
 - prefer placing the temporary test root under `~/temp/`
 - prefix the run directory name with `YYYY-MM-DD-HH-MM-`
 - then use a kebab-case slug plus PID, e.g. `2026-03-28-23-27-cuda-exec-integration-12345-...`
@@ -34,13 +34,13 @@ Runtime side effects should be isolated during tests:
 - if the harness is later moved to a fully temporary uv-managed environment, prefer the conventional path `<temp-run-dir>/.venv`
 - practical note for that future shape: after `uv venv <temp-run-dir>/.venv`, install dependencies with `uv pip install --python <temp-run-dir>/.venv/bin/python -r cuda_exec/requirements.txt` so the temporary environment is targeted explicitly
 
-Retention helper for preserved or manual runs:
+Retention helper for preserved runs:
 
 - helper script: `cuda_exec/scripts/prune_temp_runs.py`
 - invoke this helper before starting the temporary uvicorn service so older preserved run directories are pruned
+- default behavior: delete preserved run directories older than 7 days
 - `--dry-run` shows what would be deleted without removing anything
 - directories are kept if their name contains `keep` or if they contain a marker file such as `KEEP`
-- for intentionally inspection-friendly runs that are preserved outside the default automated harness, the helper's default behavior is to delete preserved run directories older than 7 days
 
 They are intentionally allowed to observe expected failures from the underlying
 CUDA toolchain or sample kernels. The purpose is to keep interface coverage and

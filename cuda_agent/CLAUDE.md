@@ -17,7 +17,7 @@ cuda_agent/.venv/bin/python -m cuda_agent \
     --direction-id 7 \
     --direction-slug vector-add \
     --reference-dir conf/fixtures/reference/ \
-    --generated-file conf/fixtures/generated/generated_runtime_launch.cu \
+    --generated-file conf/fixtures/generated/generated.cu \
     --configs-file conf/fixtures/configs/vector_add_shapes.json \
     --max-iterations 5
 ```

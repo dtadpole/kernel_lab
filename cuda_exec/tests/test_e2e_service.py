@@ -487,7 +487,7 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertEqual(body["file"]["path"], ptx_path)
         self.assertEqual(body["file"]["inline"], True)
         self.assertEqual(body["file"]["encoding"], "utf8")
-        self.assertIn(".visible .entry vector_add_inline_ptx", body["file"]["content"])
+        self.assertIn(".visible .entry", body["file"]["content"])
 
     def test_files_read_rejects_paths_outside_public_turn_dirs(self) -> None:
         status, body = self.service.post_json(

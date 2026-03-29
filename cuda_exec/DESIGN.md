@@ -675,7 +675,7 @@ To keep agent behavior simple:
     "direction_slug": "vector-add",
     "turn": 3
   },
-  "path": "artifacts/compile.attempt_001.vector_add_inline_ptx.ptx",
+  "path": "artifacts/compile.attempt_001.generated.ptx",
   "max_bytes": 65536
 }
 ```
@@ -692,7 +692,7 @@ Response example:
     "turn": 3
   },
   "file": {
-    "path": "artifacts/compile.attempt_001.vector_add_inline_ptx.ptx",
+    "path": "artifacts/compile.attempt_001.generated.ptx",
     "inline": true,
     "content": ".version 8.8\n.target sm_120\n...",
     "encoding": "utf8",

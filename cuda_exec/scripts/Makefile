@@ -52,8 +52,8 @@ CONFIG_SLUG    ?= vec1d-n65536
 # ---------------------------------------------------------------------------
 # Input files — default to vector-add fixtures
 # ---------------------------------------------------------------------------
-REFERENCE_PY  ?= $(TESTS)/fixtures/reference/reference.py
-GENERATED_CU  ?= $(TESTS)/fixtures/generated/generated.cu
+REFERENCE_PY  ?= $(REPO_ROOT)/conf/fixtures/reference/reference.py
+GENERATED_CU  ?= $(REPO_ROOT)/conf/fixtures/generated/generated.cu
 
 # ---------------------------------------------------------------------------
 # Tuning parameters
@@ -82,7 +82,7 @@ STATE      = $(TURN_ROOT)/state
 # ---------------------------------------------------------------------------
 # Test fixture defaults (vector-add)
 # ---------------------------------------------------------------------------
-TEST_FIXTURES     = $(TESTS)/fixtures
+TEST_FIXTURES     = $(REPO_ROOT)/conf/fixtures
 TEST_REFERENCE_PY = $(TEST_FIXTURES)/reference/reference.py
 TEST_GENERATED_CU = $(TEST_FIXTURES)/generated/generated.cu
 TEST_RUN_TAG      = manual-cli-test

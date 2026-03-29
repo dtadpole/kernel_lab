@@ -165,8 +165,8 @@ class FilePayload(BaseModel):
 
     Example path-only payload:
         {
-          "artifacts/compile.attempt_001.vector_add_inline_ptx.cubin": {
-            "path": "artifacts/compile.attempt_001.vector_add_inline_ptx.cubin",
+          "artifacts/compile.attempt_001.generated.cubin": {
+            "path": "artifacts/compile.attempt_001.generated.cubin",
             "inline": false
           }
         }

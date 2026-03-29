@@ -1,12 +1,12 @@
-"""CuTeDSL-style reference fixture exposed through a Kernel Bench / kbEval-like module contract.
+"""BF16 CuTeDSL-style reference fixture for cuda_exec evaluation.
+
+All inputs and outputs use torch.bfloat16.  This matches the BF16-only
+convention enforced by the CUDA eval harness on the generated side.
 
 Contract for cuda_exec reference Python files:
 - export `class Model(torch.nn.Module)`
 - export `get_inputs(config)`
 - export `get_init_inputs()`
-
-This fixture keeps the interface module-based while restoring a real CuTe DSL
-vector-add kernel definition for the reference side.
 """
 
 from __future__ import annotations
@@ -108,8 +108,8 @@ class Model(nn.Module):
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         if x.shape != y.shape:
             raise ValueError(f"shape mismatch: {tuple(x.shape)} vs {tuple(y.shape)}")
-        if x.dtype != torch.float32 or y.dtype != torch.float32:
-            raise ValueError(f"expected float32 inputs, got {x.dtype} and {y.dtype}")
+        if x.dtype != torch.bfloat16 or y.dtype != torch.bfloat16:
+            raise ValueError(f"expected bfloat16 inputs, got {x.dtype} and {y.dtype}")
         if not x.is_cuda or not y.is_cuda:
             raise ValueError("CuTe DSL reference kernel requires CUDA tensors")
         if not x.is_contiguous() or not y.is_contiguous():
@@ -132,8 +132,8 @@ def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
     shape = tuple(int(v) for v in cfg["shape"])
     device = torch.device("cuda")
     numel = int(cfg["input_size"])
-    x = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape).contiguous()
-    y = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape).contiguous()
+    x = torch.arange(numel, dtype=torch.bfloat16, device=device).reshape(shape).contiguous()
+    y = torch.arange(numel, dtype=torch.bfloat16, device=device).reshape(shape).contiguous()
     return [x, y]
 
 

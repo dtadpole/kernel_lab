@@ -1057,7 +1057,55 @@ HTTP 401
 
 Integration tests write a test token to a temporary file and set `CUDA_EXEC_KEY_PATH` in the service environment.  All test HTTP helpers include the matching `Authorization: Bearer <token>` header automatically.
 
-## 14. Documentation split
+## 14. Kernel interface contract (BF16-only)
+
+All generated CUDA kernels and Python reference implementations use **BF16 (`__nv_bfloat16` / `torch.bfloat16`)** exclusively.  There is no float32 path.
+
+### Generated side (CUDA)
+
+Kernel authors implement a single function with this exact signature:
+
+```cpp
+#include <cuda_bf16.h>
+
+extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
+                          __nv_bfloat16** outputs, int num_outputs,
+                          int n, cudaStream_t stream);
+```
+
+- **No custom headers or structs required.**  The only include is `<cuda_bf16.h>` from the CUDA toolkit.
+- `inputs` / `outputs`: arrays of device pointers to BF16 buffers, pre-allocated by the harness.
+- `n`: number of elements per buffer (= `input_size` from config).
+- `stream`: CUDA stream to launch on.  Must not synchronize.
+- Return `0` on success, non-zero on failure.
+
+The eval harness (`eval_harness.cu`) provides `main()`, env-based config parsing, deterministic BF16 input generation (arange pattern), CUDA event timing with warmup, and structured JSON output.  It links with the kernel file via `compile.sh --harness`.
+
+Buffer layout is convention-based:
+- Inputs: `CUDA_EXEC_HARNESS_NUM_INPUTS` buffers (default 2), each `n` BF16 elements.
+- Outputs: `CUDA_EXEC_HARNESS_NUM_OUTPUTS` buffers (default 1), each `n` BF16 elements.
+
+### Reference side (Python)
+
+Reference files export the standard Kernel Bench contract with BF16 tensors:
+
+```python
+class Model(torch.nn.Module):
+    def forward(self, *args) -> torch.Tensor:  # all tensors are torch.bfloat16
+        ...
+
+def get_inputs(config: dict) -> list[torch.Tensor]:  # returns bfloat16 tensors
+    ...
+
+def get_init_inputs() -> list:
+    ...
+```
+
+### Harness detection
+
+`compile.sh` and `tasks.py` auto-detect harness mode by checking whether the source file contains `kernel_run`.  Symbol validation after linking checks for the `kernel_run` symbol in the binary.
+
+## 15. Documentation split
 
 - `DESIGN.md` = detailed source of truth
 - `README.md` = short entrypoint

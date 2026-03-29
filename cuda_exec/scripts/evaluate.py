@@ -12,19 +12,15 @@ Aligned with kbEvalCli.py patterns:
 from __future__ import annotations
 
 import argparse
-import fcntl
-import importlib.util
 import json
 import os
 import signal
-import statistics
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
 
 from _cli_common import add_metadata_args, ensure_repo_root_on_path
 
@@ -33,294 +29,32 @@ ensure_repo_root_on_path()
 from cuda_exec.models import Metadata  # noqa: E402
 from cuda_exec.runner import resolve_workspace_bundle  # noqa: E402
 from cuda_exec.tasks import _config_env, _primary_artifact_from_manifest, _slugify  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Alignment defaults (matching kbEvalCli.py / kbEvalUtil.py defaults)
-# ---------------------------------------------------------------------------
-DEFAULT_SEED = 42
-NUM_CORRECTNESS_TRIALS = 3  # kbEvalCli num_verify_trials
-NUM_WARMUP_RUNS = 5  # kbEvalCli num_warmups
-NUM_PERF_TRIALS = 10  # kbEvalCli num_perf_trials
-ATOL = 1e-02  # kbEvalCli verify_correctness atol
-RTOL = 1e-02  # kbEvalCli verify_correctness rtol
-
-
-# ---------------------------------------------------------------------------
-# Seed control (matching kbEvalUtil.set_seed)
-# ---------------------------------------------------------------------------
-
-def _set_seed(seed: int) -> None:
-    """Set CPU and GPU random seeds for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-
-# ---------------------------------------------------------------------------
-# Device locking (matching kbEvalCli FileLock pattern)
-# ---------------------------------------------------------------------------
-
-def _acquire_device_lock(device: torch.device) -> int | None:
-    """Acquire exclusive fcntl lock for a CUDA device.
-
-    Returns the lock file descriptor on success.  Raises ``RuntimeError``
-    if the device is already locked by another process.
-    """
-    lock_dir = Path.home() / ".cuda_exec"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    device_index = device.index if device.index is not None else 0
-    lock_path = lock_dir / f".lock_cuda_{device_index}"
-    try:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        return fd
-    except BlockingIOError:
-        raise RuntimeError(
-            f"CUDA device {device_index} is locked by another process. "
-            f"Lock file: {lock_path}"
-        )
-
-
-def _release_device_lock(lock_fd: int | None) -> None:
-    """Release a previously-acquired device lock."""
-    if lock_fd is not None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
-        except OSError:
-            pass
+from cuda_exec.scripts.eval_support import (  # noqa: E402
+    ATOL,
+    RTOL,
+    DEFAULT_SEED,
+    NUM_CORRECTNESS_TRIALS,
+    NUM_WARMUP_RUNS,
+    NUM_PERF_TRIALS,
+    set_seed,
+    acquire_device_lock,
+    release_device_lock,
+    gpu_cleanup,
+    watchdog_handler,
+    load_reference_entry,
+    load_reference_module,
+    normalize_reference_contract,
+    extract_config_payload,
+    tensor_to_jsonable,
+    flatten_numeric,
+    infer_shape,
+    allclose_check,
+    measure_reference,
+)
 
 
 # ---------------------------------------------------------------------------
-# GPU cleanup (matching kbEvalUtil.graceful_eval_cleanup)
-# ---------------------------------------------------------------------------
-
-def _gpu_cleanup(device: torch.device) -> None:
-    """Clear CUDA cache, reset memory stats, and synchronize."""
-    with torch.cuda.device(device):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(device=device)
-        torch.cuda.synchronize(device=device)
-
-
-# ---------------------------------------------------------------------------
-# Watchdog (simplified ArmableWatchdog — evaluate.py is already a subprocess)
-# ---------------------------------------------------------------------------
-
-def _watchdog_handler(signum: int, frame: Any) -> None:
-    raise TimeoutError("evaluate watchdog timeout expired")
-
-
-# ---------------------------------------------------------------------------
-# Shape inference from nested lists
-# ---------------------------------------------------------------------------
-
-def _infer_shape(value: Any) -> tuple[int, ...]:
-    """Infer tensor shape from a nested list structure."""
-    if isinstance(value, (int, float)):
-        return ()
-    if isinstance(value, list):
-        if not value:
-            return (0,)
-        return (len(value),) + _infer_shape(value[0])
-    return ()
-
-
-# ---------------------------------------------------------------------------
-# allclose on flattened numeric data
-# ---------------------------------------------------------------------------
-
-def _allclose_check(
-    ref_values: list[float],
-    gen_values: list[float],
-    atol: float = ATOL,
-    rtol: float = RTOL,
-) -> tuple[bool, float, float]:
-    """Check allclose on flattened numeric values.
-
-    Returns ``(passed, max_diff, avg_diff)``.
-    Matches ``torch.allclose`` semantics: ``abs(a - b) <= atol + rtol * abs(b)``.
-    """
-    if not ref_values and not gen_values:
-        return True, 0.0, 0.0
-
-    abs_diffs = [abs(a - b) for a, b in zip(ref_values, gen_values)]
-    tolerances = [atol + rtol * abs(b) for b in gen_values]
-    passed = all(d <= t for d, t in zip(abs_diffs, tolerances))
-    max_diff = max(abs_diffs) if abs_diffs else 0.0
-    avg_diff = statistics.fmean(abs_diffs) if abs_diffs else 0.0
-    return passed, max_diff, avg_diff
-
-
-# ---------------------------------------------------------------------------
-# Reference loading (unchanged)
-# ---------------------------------------------------------------------------
-
-def _load_reference_entry(reference_root: Path) -> Path:
-    candidates = sorted(reference_root.rglob("reference.py"))
-    if len(candidates) != 1:
-        raise RuntimeError(
-            f"reference execution requires exactly one reference.py under {reference_root}; found {len(candidates)}"
-        )
-    return candidates[0]
-
-
-def _load_reference_module(reference_path: Path):
-    spec = importlib.util.spec_from_file_location("cuda_exec_reference_module", reference_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"failed to load reference module from {reference_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _normalize_reference_contract(module: Any) -> tuple[Any, Any, Any]:
-    model_cls = getattr(module, "Model", None)
-    get_inputs = getattr(module, "get_inputs", None)
-    get_init_inputs = getattr(module, "get_init_inputs", None)
-    if model_cls is None or not callable(get_inputs) or not callable(get_init_inputs):
-        raise RuntimeError(
-            "reference module contract requires Model, get_inputs(config), and get_init_inputs()"
-        )
-    if not isinstance(model_cls, type) or not issubclass(model_cls, nn.Module):
-        raise RuntimeError("reference module Model must be a subclass of torch.nn.Module")
-    return model_cls, get_inputs, get_init_inputs
-
-
-def _extract_config_payload(env_json: str) -> dict[str, Any]:
-    payload = json.loads(env_json)
-    if not isinstance(payload, dict):
-        raise RuntimeError("CUDA_EXEC_CONFIG_JSON must decode to a JSON object")
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        raise RuntimeError("CUDA_EXEC_CONFIG_JSON must include object field 'params'")
-    return params
-
-
-# ---------------------------------------------------------------------------
-# Tensor serialisation helpers
-# ---------------------------------------------------------------------------
-
-def _tensor_to_jsonable(value: Any) -> Any:
-    if hasattr(value, "detach"):
-        value = value.detach()
-    if hasattr(value, "cpu"):
-        value = value.cpu()
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    if isinstance(value, (list, tuple)):
-        return [_tensor_to_jsonable(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _tensor_to_jsonable(v) for k, v in value.items()}
-    return value
-
-
-def _flatten_numeric(value: Any) -> list[float]:
-    if isinstance(value, list):
-        out: list[float] = []
-        for item in value:
-            out.extend(_flatten_numeric(item))
-        return out
-    if isinstance(value, (int, float)):
-        return [float(value)]
-    raise RuntimeError(f"reference output contains non-numeric value {value!r}")
-
-
-# ---------------------------------------------------------------------------
-# Reference measurement — CUDA event timing (aligned with kbEvalCli)
-# ---------------------------------------------------------------------------
-
-def _measure_reference(
-    module: Any,
-    config: dict[str, Any],
-    device: torch.device,
-    seed: int = DEFAULT_SEED,
-    num_warmups: int = NUM_WARMUP_RUNS,
-    num_trials: int = NUM_PERF_TRIALS,
-) -> dict[str, Any]:
-    """Measure reference model performance using CUDA event timing.
-
-    Aligned with kbEvalCli's ``time_execution_with_cuda_event`` pattern:
-
-    - Seed control before instantiation
-    - Explicit ``.cuda(device)`` on init_inputs, model, and inputs
-    - ``torch.no_grad()`` context
-    - Warmup runs before measurement
-    - ``torch.cuda.Event`` timing for each trial
-    """
-    model_cls, get_inputs, get_init_inputs = _normalize_reference_contract(module)
-
-    hardware = torch.cuda.get_device_name(device=device)
-
-    with torch.no_grad(), torch.cuda.device(device):
-        # Instantiate model with seed and explicit device placement
-        _set_seed(seed)
-        init_inputs = list(get_init_inputs())
-        init_inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-            for x in init_inputs
-        ]
-        model = model_cls(*init_inputs)
-        model = model.cuda(device=device)
-
-        # Prepare inputs with explicit device placement
-        inputs = list(get_inputs(config))
-        inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-            for x in inputs
-        ]
-
-        # Warmup runs (matching kbEvalCli warmup pattern)
-        for _ in range(num_warmups):
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            start_ev.record()
-            model(*inputs)
-            end_ev.record()
-            torch.cuda.synchronize(device=device)
-
-        # Measurement runs with CUDA event timing
-        latencies_ms: list[float] = []
-        last_output: Any = None
-        for _ in range(num_trials):
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            start_ev.record()
-            last_output = model(*inputs)
-            end_ev.record()
-            torch.cuda.synchronize(device=device)
-            latencies_ms.append(start_ev.elapsed_time(end_ev))
-
-    if last_output is None:
-        raise RuntimeError("reference contract did not produce an output")
-
-    output_json = _tensor_to_jsonable(last_output)
-
-    # Stats matching kbEvalUtil.get_timing_stats
-    std_val = statistics.stdev(latencies_ms) if len(latencies_ms) > 1 else 0.0
-
-    return {
-        "output": output_json,
-        "performance": {
-            "metadata": {
-                "hardware": hardware,
-                "device": str(device),
-            },
-            "latency_ms": {
-                "min": min(latencies_ms),
-                "median": statistics.median(latencies_ms),
-                "max": max(latencies_ms),
-                "mean": statistics.fmean(latencies_ms),
-                "std": std_val,
-            },
-            "runs": len(latencies_ms),
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Generated binary execution (unchanged)
+# Generated binary execution
 # ---------------------------------------------------------------------------
 
 def _run_generated(
@@ -362,23 +96,12 @@ def _verify_correctness(
     num_trials: int = NUM_CORRECTNESS_TRIALS,
     seed: int = DEFAULT_SEED,
 ) -> dict[str, Any]:
-    """Verify correctness with shape check and allclose tolerance.
-
-    Aligned with kbEvalCli's ``verify_correctness``:
-
-    - Shape check before value comparison
-    - ``allclose`` with ``atol=1e-02``, ``rtol=1e-02``
-    - Multi-trial with seed rotation
-    - Reports ``trials``, ``passed_trials``, ``max_diff``, ``avg_diff``,
-      ``output_shape``
-    """
-    model_cls, get_inputs, get_init_inputs = _normalize_reference_contract(module)
+    model_cls, get_inputs, get_init_inputs = normalize_reference_contract(module)
 
     gen_output = generated_payload.get("output", {}).get("result", [])
-    gen_shape = _infer_shape(gen_output)
-    gen_values = _flatten_numeric(gen_output) if gen_output else []
+    gen_shape = infer_shape(gen_output)
+    gen_values = flatten_numeric(gen_output) if gen_output else []
 
-    # Generate trial seeds deterministically (matching kbEvalCli pattern)
     torch.manual_seed(seed)
     trial_seeds = [
         torch.randint(0, 2**32 - 1, (1,)).item() for _ in range(num_trials)
@@ -391,18 +114,18 @@ def _verify_correctness(
 
     with torch.no_grad(), torch.cuda.device(device):
         for trial_seed in trial_seeds:
-            _set_seed(trial_seed)
+            set_seed(trial_seed)
             init_inputs = list(get_init_inputs())
             init_inputs = [
                 x.cuda(device=device) if isinstance(x, torch.Tensor) else x
                 for x in init_inputs
             ]
 
-            _set_seed(trial_seed)
+            set_seed(trial_seed)
             model = model_cls(*init_inputs)
             model = model.cuda(device=device)
 
-            _set_seed(trial_seed)
+            set_seed(trial_seed)
             inputs = list(get_inputs(config))
             inputs = [
                 x.cuda(device=device) if isinstance(x, torch.Tensor) else x
@@ -412,13 +135,11 @@ def _verify_correctness(
             ref_output = model(*inputs)
             torch.cuda.synchronize(device=device)
 
-            ref_json = _tensor_to_jsonable(ref_output)
-            ref_shape = _infer_shape(ref_json)
+            ref_json = tensor_to_jsonable(ref_output)
+            ref_shape = infer_shape(ref_json)
             output_shape_str = "x".join(str(d) for d in ref_shape) if ref_shape else "scalar"
 
-            # Shape check first (matching kbEvalCli shape mismatch check)
             if ref_shape != gen_shape:
-                # Shape mismatch — remaining trials cannot pass either
                 return {
                     "passed": False,
                     "reason": f"shape mismatch: reference={ref_shape} generated={gen_shape}",
@@ -430,12 +151,12 @@ def _verify_correctness(
                     "passed_trials": passed_trials,
                 }
 
-            ref_values = _flatten_numeric(ref_json)
+            ref_values = flatten_numeric(ref_json)
             if len(ref_values) != len(gen_values):
                 worst_max_diff = float("inf")
                 continue
 
-            passed, max_diff, avg_diff = _allclose_check(ref_values, gen_values)
+            passed, max_diff, avg_diff = allclose_check(ref_values, gen_values)
             if passed:
                 passed_trials += 1
             worst_max_diff = max(worst_max_diff, max_diff)
@@ -462,7 +183,6 @@ def _comparison_payload(
     reference_performance: dict[str, Any],
     generated_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build comparison payload with correctness and performance summaries."""
     ref_perf = reference_performance.get("latency_ms", {})
     gen_perf = generated_payload.get("performance", {}).get("latency_ms", {})
     ref_median = float(ref_perf.get("median", 0.0) or 0.0)
@@ -512,27 +232,24 @@ def main() -> int:
     device = torch.device("cuda")
     lock_fd: int | None = None
 
-    # Install watchdog (matching ArmableWatchdog concept)
-    old_handler = signal.signal(signal.SIGALRM, _watchdog_handler)
+    old_handler = signal.signal(signal.SIGALRM, watchdog_handler)
     signal.alarm(args.timeout)
 
     try:
-        # Acquire device lock (matching kbEvalCli FileLock pattern)
-        lock_fd = _acquire_device_lock(device)
+        lock_fd = acquire_device_lock(device)
 
         workspace = resolve_workspace_bundle(**metadata.model_dump())
         workspace_path = workspace["workspace_path"]
         target_path, _ = _primary_artifact_from_manifest(workspace)
         reference_root = Path(workspace_path) / "inputs" / "reference"
-        reference_path = _load_reference_entry(reference_root)
+        reference_path = load_reference_entry(reference_root)
         config_rel = f"state/evaluate.inline.{_slugify(args.config_slug)}.json"
         env = _config_env(workspace, "evaluate", 1, args.config_slug, config, config_rel)
 
-        reference_module = _load_reference_module(reference_path)
-        reference_config = _extract_config_payload(env["CUDA_EXEC_CONFIG_JSON"])
+        reference_module = load_reference_module(reference_path)
+        reference_config = extract_config_payload(env["CUDA_EXEC_CONFIG_JSON"])
 
-        # --- Performance measurement (CUDA event timing) ---
-        reference_result = _measure_reference(
+        reference_result = measure_reference(
             reference_module,
             reference_config,
             device=device,
@@ -541,11 +258,9 @@ def main() -> int:
             num_trials=args.num_perf_trials,
         )
 
-        # --- Run generated binary ---
         generated_run = _run_generated(target_path, env, workspace_path, args.timeout)
         generated_payload = generated_run["payload"]
 
-        # --- Correctness verification (multi-trial, shape check, allclose) ---
         correctness = _verify_correctness(
             reference_module,
             reference_config,
@@ -555,7 +270,6 @@ def main() -> int:
             seed=args.seed,
         )
 
-        # --- Build comparison ---
         comparison = _comparison_payload(
             correctness,
             reference_result["performance"],
@@ -630,18 +344,15 @@ def main() -> int:
         return 1
 
     finally:
-        # Cancel watchdog
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
-        # GPU cleanup (matching graceful_eval_cleanup)
         try:
-            _gpu_cleanup(device)
+            gpu_cleanup(device)
         except Exception:
             pass
 
-        # Release device lock
-        _release_device_lock(lock_fd)
+        release_device_lock(lock_fd)
 
 
 if __name__ == "__main__":

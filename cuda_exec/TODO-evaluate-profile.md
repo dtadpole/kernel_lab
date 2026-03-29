@@ -34,9 +34,10 @@
 - [ ] Decide whether `profile` should keep the current behavior-first comparison runtime long-term,
       or also expose a separate NCU-backed profiler path in parallel.
 
-- [ ] Decide whether profile summaries should return richer structured side-by-side fields
-      for `reference` and `generated` directly in the public response model, instead of only
-      the top-level `summary` plus kept artifact payload.
+- [x] Profile summaries now return richer structured side-by-side fields
+      for `reference` and `generated` directly in the public response model via
+      `reference_summary` and `generated_summary`, while still keeping the top-level
+      `summary` plus retained artifact payload.
 
 - [x] Dedicated tests for `reference_only` and `generated_only` profile modes are now in place,
       including side-specific artifact/log assertions in the public response payloads.

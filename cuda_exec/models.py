@@ -221,6 +221,18 @@ class PerformanceSummary(BaseModel):
     comparison: Dict[str, Any] = Field(default_factory=dict)
 
 
+class SideProfileSummary(BaseModel):
+    """Direct side-specific profile summary exposed in the public response.
+
+    Unlike the top-level `summary`, this mirrors the nested side payload and does
+    not synthesize a `comparison` object when the side is absent.
+    """
+
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    latency_ms: LatencySummary = Field(default_factory=LatencySummary)
+    runs: int | None = None
+
+
 class ToolIOPair(BaseModel):
     stdout: FilePayload | None = None
     stderr: FilePayload | None = None
@@ -311,15 +323,21 @@ class EvaluateResponse(ResponseBase):
 class ProfileConfigOutput(BaseModel):
     """Public profile output for one config slug.
 
-    `summary` carries structured performance/profile information, while
-    `reference` / `generated` expose the side-specific structured payloads
-    and `artifacts` / `logs` carry the raw retained files.
+    `summary` carries the compact top-level profile result.
+    `reference` / `generated` preserve the side-specific raw payloads from the
+    runtime.
+    `reference_summary` / `generated_summary` expose the side-by-side structured
+    summaries directly in the public response model so callers do not need to
+    reach into the nested side payloads for the most common fields.
+    `artifacts` / `logs` carry the raw retained files.
     """
 
     status: Literal["ok", "error", "timeout", "skipped"]
     summary: PerformanceSummary = Field(default_factory=PerformanceSummary)
     reference: Dict[str, Any] = Field(default_factory=dict)
     generated: Dict[str, Any] = Field(default_factory=dict)
+    reference_summary: SideProfileSummary = Field(default_factory=SideProfileSummary)
+    generated_summary: SideProfileSummary = Field(default_factory=SideProfileSummary)
     artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed kept profiling outputs for this config",

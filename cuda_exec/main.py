@@ -247,6 +247,8 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
             summary=item.get("summary", {}),
             reference=item.get("reference") or {},
             generated=item.get("generated") or {},
+            reference_summary=(item.get("reference") or {}).get("summary", {}),
+            generated_summary=(item.get("generated") or {}).get("summary", {}),
             artifacts=_capture_public_files(
                 result["workspace_path"],
                 [artifact["path"] for artifact in item.get("artifacts", [])],

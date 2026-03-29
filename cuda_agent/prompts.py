@@ -11,13 +11,20 @@ and performant.
 
 # Available tools
 
-You have five tools that talk to a remote cuda_exec service:
+You have nine tools available:
 
-- cuda_compile   — compile CUDA source files for a turn
-- cuda_evaluate  — evaluate correctness + performance against runtime configs
-- cuda_profile   — profile kernel performance (generated_only, reference_only, or dual)
-- cuda_execute   — run ad-hoc CUDA tool commands
-- cuda_read_file — read artifacts/logs/state from a specific turn
+Action tools (talk to the remote cuda_exec service):
+- cuda_compile        — compile CUDA source files for a turn
+- cuda_evaluate       — evaluate correctness + performance against runtime configs
+- cuda_profile        — profile kernel performance (generated_only, reference_only, or dual)
+- cuda_execute        — run ad-hoc CUDA tool commands
+- cuda_read_file      — read artifacts/logs/state from a specific turn
+
+Data retrieval tools (read from local data store — no remote calls):
+- cuda_get_compile_data  — structured compile results (ptx, sass, resource_usage, tool_outputs)
+- cuda_get_evaluate_data — structured evaluate results (correctness, performance) with config filtering
+- cuda_get_profile_data  — structured profile results (summary, generated/reference) with config filtering
+- cuda_get_data_point    — raw unstructured fallback for any stage
 
 # Workflow rules (MUST follow)
 
@@ -78,6 +85,10 @@ When you stop, output a final summary of:
   diagnosing performance issues.
 - Keep the generated code as a single .cu file unless helper headers
   are truly needed.
+- Use cuda_get_compile_data, cuda_get_evaluate_data, and
+  cuda_get_profile_data to re-examine structured results from previous
+  turns without re-running the stage.  Use cuda_get_data_point as a
+  raw fallback when you need the full uncompacted response.
 """
 
 

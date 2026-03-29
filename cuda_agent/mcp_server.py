@@ -1,8 +1,13 @@
 """FastMCP stdio server wrapping the cuda_exec HTTP API as MCP tools.
 
-Each tool maps 1:1 to a cuda_exec endpoint.  The server makes HTTP
-requests to the running cuda_exec FastAPI service and returns the JSON
-response as text so the calling agent can parse it directly.
+Exposes 5 action tools (compile, evaluate, profile, execute, read_file)
+that proxy to the cuda_exec HTTP service, plus 4 data retrieval tools
+(get_compile_data, get_evaluate_data, get_profile_data, get_data_point)
+that read from a local data store of raw request/response JSON.
+
+Every action tool call (except read_file) is persisted to the local
+data store before response compaction, so the full unmodified data
+is always available for later retrieval.
 
 Configuration (environment variables):
     CUDA_EXEC_URL                       Base URL of the cuda_exec service.
@@ -17,6 +22,9 @@ Configuration (environment variables):
                                         Default: 4000
     CUDA_AGENT_MCP_TOOL_TIMEOUT         Default timeout per tool call (seconds).
                                         Default: 180
+    CUDA_AGENT_DATA_DIR                 Local directory for raw data store.
+                                        Set by agent.py; if unset, data
+                                        storage and retrieval are disabled.
 """
 
 from __future__ import annotations
@@ -74,6 +82,72 @@ def _auth_headers() -> dict[str, str]:
 _MAX_CONTENT_CHARS = int(os.environ.get("CUDA_AGENT_MCP_MAX_CONTENT_CHARS", "4000"))
 _DEFAULT_TOOL_TIMEOUT = int(os.environ.get("CUDA_AGENT_MCP_TOOL_TIMEOUT", "180"))
 
+# ---------------------------------------------------------------------------
+# Data store — persist raw request/response for every tool call
+# ---------------------------------------------------------------------------
+
+_DATA_DIR: str | None = os.environ.get("CUDA_AGENT_DATA_DIR")
+
+_ENDPOINT_STAGE: dict[str, str] = {
+    "/compile": "compile",
+    "/evaluate": "evaluate",
+    "/profile": "profile",
+    "/execute": "execute",
+}
+
+# In-memory attempt counters: {(turn, stage): count}
+_attempt_counters: dict[tuple[int, str], int] = {}
+
+
+def _save_data_point(
+    endpoint: str,
+    request_body: dict[str, Any],
+    response_data: Any,
+) -> None:
+    """Persist raw request + response to the local data store."""
+    if not _DATA_DIR:
+        return
+    stage = _ENDPOINT_STAGE.get(endpoint)
+    if stage is None:
+        return
+    metadata = request_body.get("metadata", {})
+    turn = metadata.get("turn")
+    if turn is None:
+        return
+
+    key = (int(turn), stage)
+    _attempt_counters[key] = _attempt_counters.get(key, 0) + 1
+    attempt = _attempt_counters[key]
+
+    turn_dir = Path(_DATA_DIR) / f"turn_{turn}"
+    turn_dir.mkdir(parents=True, exist_ok=True)
+
+    prefix = f"{stage}.attempt_{attempt:03d}"
+    (turn_dir / f"{prefix}.request.json").write_text(
+        json.dumps(request_body, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    (turn_dir / f"{prefix}.response.json").write_text(
+        json.dumps(response_data, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+
+
+def _list_available(turn_dir: Path) -> list[str]:
+    """List available data point prefixes in a turn directory."""
+    if not turn_dir.is_dir():
+        return []
+    seen: set[str] = set()
+    for f in sorted(turn_dir.glob("*.json")):
+        # Strip .request.json / .response.json suffix
+        name = f.name
+        for suffix in (".request.json", ".response.json"):
+            if name.endswith(suffix):
+                seen.add(name[: -len(suffix)])
+                break
+    return sorted(seen)
+
+
 # Fields to keep in evaluate/profile per-config outputs.  Everything else
 # (reference, generated, artifacts, logs) can be huge and is available via
 # cuda_read_file on demand.
@@ -128,7 +202,9 @@ async def _post(endpoint: str, body: dict[str, Any]) -> str:
     async with httpx.AsyncClient(base_url=_BASE_URL, timeout=_TIMEOUT) as client:
         resp = await client.post(endpoint, json=body, headers=_auth_headers())
         resp.raise_for_status()
-        data = _compact_response(resp.json())
+        raw = resp.json()
+        _save_data_point(endpoint, body, raw)
+        data = _compact_response(raw)
         return json.dumps(data, indent=2)
 
 # ---------------------------------------------------------------------------
@@ -347,6 +423,309 @@ async def cuda_read_file(
     if max_bytes is not None:
         body["max_bytes"] = max_bytes
     return await _post("/files/read", body)
+
+
+@mcp.tool()
+async def cuda_get_data_point(
+    metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    stage: Annotated[Literal["compile", "evaluate", "profile", "execute"], Field(description="Which stage to retrieve")],
+    attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
+    side: Annotated[Literal["request", "response", "both"], Field(description="Which side(s) to return")] = "both",
+) -> str:
+    """Retrieve the raw input/output from a prior tool call.
+
+    Every cuda_compile, cuda_evaluate, cuda_profile, and cuda_execute
+    call saves its full (uncompacted) request and response to a local
+    data store.  This tool reads those saved files so the agent can
+    re-examine past results without re-calling cuda_exec.
+
+    Parameters:
+        metadata: Turn identity dict (identifies which turn to look up).
+        stage:    "compile", "evaluate", "profile", or "execute".
+        attempt:  1-based attempt number (default 1).  Within a single
+                  turn, each stage tracks its own attempt counter.
+        side:     "request" — return only the saved request body.
+                  "response" — return only the saved response.
+                  "both" — return {"request": ..., "response": ...}.
+
+    Returns JSON with the raw (uncompacted) data.  If the requested
+    data point does not exist, returns an error listing available
+    data points for that turn.
+    """
+
+    if not _DATA_DIR:
+        return json.dumps({"error": "Data store not configured (CUDA_AGENT_DATA_DIR not set)."})
+
+    turn = metadata.get("turn")
+    if turn is None:
+        return json.dumps({"error": "metadata.turn is required."})
+
+    turn_dir = Path(_DATA_DIR) / f"turn_{turn}"
+    prefix = f"{stage}.attempt_{attempt:03d}"
+
+    def _read_side(s: str) -> dict[str, Any] | None:
+        fp = turn_dir / f"{prefix}.{s}.json"
+        if fp.is_file():
+            return json.loads(fp.read_text(encoding="utf-8"))
+        return None
+
+    if side == "both":
+        req = _read_side("request")
+        resp = _read_side("response")
+        if req is None and resp is None:
+            available = _list_available(turn_dir)
+            return json.dumps({
+                "error": f"No data point found for {prefix} in turn {turn}.",
+                "available": available,
+            }, indent=2)
+        result: dict[str, Any] = {}
+        if req is not None:
+            result["request"] = req
+        if resp is not None:
+            result["response"] = _compact_response(resp)
+        return json.dumps(result, indent=2)
+
+    data = _read_side(side)
+    if data is None:
+        available = _list_available(turn_dir)
+        return json.dumps({
+            "error": f"No {side} found for {prefix} in turn {turn}.",
+            "available": available,
+        }, indent=2)
+    if side == "response":
+        data = _compact_response(data)
+    return json.dumps(data, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Typed data retrieval helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_stored_response(turn: int, stage: str, attempt: int) -> dict[str, Any] | None:
+    """Read a stored response JSON from the data store.  Returns None if missing."""
+    if not _DATA_DIR:
+        return None
+    fp = Path(_DATA_DIR) / f"turn_{turn}" / f"{stage}.attempt_{attempt:03d}.response.json"
+    if fp.is_file():
+        return json.loads(fp.read_text(encoding="utf-8"))
+    return None
+
+
+def _not_found_error(turn: int, stage: str, attempt: int) -> str:
+    """Standard error response when a data point is not found."""
+    turn_dir = Path(_DATA_DIR or "") / f"turn_{turn}"
+    return json.dumps({
+        "error": f"No {stage}.attempt_{attempt:03d} response found in turn {turn}.",
+        "available": _list_available(turn_dir),
+    }, indent=2)
+
+
+def _data_store_not_configured() -> str:
+    return json.dumps({"error": "Data store not configured (CUDA_AGENT_DATA_DIR not set)."})
+
+
+# ---------------------------------------------------------------------------
+# Typed per-stage retrieval tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def cuda_get_compile_data(
+    metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
+    field: Annotated[
+        Literal["all", "ptx", "sass", "resource_usage", "tool_outputs"],
+        Field(description="Which part of the compile result to return"),
+    ] = "all",
+) -> str:
+    """Retrieve structured compile results from a prior turn.
+
+    Reads the saved raw compile response and extracts the requested
+    structured field.
+
+    Parameters:
+        metadata: Turn identity dict (identifies which turn to look up).
+        attempt:  1-based attempt number (default 1).
+        field:    "all"            — full compile result (compacted).
+                  "ptx"            — PTX assembly text.
+                  "sass"           — SASS disassembly text.
+                  "resource_usage" — register/shared-memory usage text.
+                  "tool_outputs"   — stdout/stderr from each compile stage
+                                     (nvcc, ptxas, cuobjdump, nvdisasm).
+
+    Returns JSON with {all_ok, field_name: ...}.  For text fields (ptx,
+    sass, resource_usage), the content string is returned directly.
+    """
+
+    if not _DATA_DIR:
+        return _data_store_not_configured()
+    turn = metadata.get("turn")
+    if turn is None:
+        return json.dumps({"error": "metadata.turn is required."})
+
+    data = _read_stored_response(int(turn), "compile", attempt)
+    if data is None:
+        return _not_found_error(int(turn), "compile", attempt)
+
+    all_ok = data.get("all_ok")
+
+    if field == "all":
+        return json.dumps(_compact_response(data), indent=2)
+
+    if field in ("ptx", "sass", "resource_usage"):
+        artifact = data.get("artifacts", {}).get(field, {})
+        content = artifact.get("content", "")
+        return json.dumps({"all_ok": all_ok, field: content}, indent=2)
+
+    if field == "tool_outputs":
+        raw_outputs = data.get("tool_outputs", {})
+        # Extract just the text content from each tool output
+        outputs: dict[str, str] = {}
+        for name, payload in raw_outputs.items():
+            if isinstance(payload, dict):
+                outputs[name] = payload.get("content", "")
+            else:
+                outputs[name] = str(payload)
+        return json.dumps({"all_ok": all_ok, "tool_outputs": outputs}, indent=2)
+
+    return json.dumps({"error": f"Unknown field: {field}"})
+
+
+@mcp.tool()
+async def cuda_get_evaluate_data(
+    metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
+    config_slug: Annotated[str | None, Field(description="Filter to a single config slug (omit for all configs)")] = None,
+    field: Annotated[
+        Literal["all", "correctness", "performance"],
+        Field(description="Which part of the evaluate result to return"),
+    ] = "all",
+) -> str:
+    """Retrieve structured evaluate results from a prior turn.
+
+    Reads the saved raw evaluate response and extracts correctness
+    and/or performance data, optionally filtered to a single config.
+
+    Parameters:
+        metadata:    Turn identity dict (identifies which turn to look up).
+        attempt:     1-based attempt number (default 1).
+        config_slug: If provided, return data only for this config.
+                     If omitted, return data for all configs.
+        field:       "all"         — correctness + performance per config.
+                     "correctness" — only correctness metrics per config.
+                     "performance" — only performance metrics per config.
+
+    Returns JSON with:
+        all_ok:  bool — aggregate success.
+        configs: {config_slug: {status, correctness?, performance?}}
+
+    Available configs are listed in the error message if config_slug
+    does not match.
+    """
+
+    if not _DATA_DIR:
+        return _data_store_not_configured()
+    turn = metadata.get("turn")
+    if turn is None:
+        return json.dumps({"error": "metadata.turn is required."})
+
+    data = _read_stored_response(int(turn), "evaluate", attempt)
+    if data is None:
+        return _not_found_error(int(turn), "evaluate", attempt)
+
+    all_ok = data.get("all_ok")
+    configs = data.get("configs", {})
+
+    if config_slug is not None:
+        if config_slug not in configs:
+            return json.dumps({
+                "error": f"Config '{config_slug}' not found.",
+                "available_configs": sorted(configs.keys()),
+            }, indent=2)
+        configs = {config_slug: configs[config_slug]}
+
+    keep_keys = {"status"}
+    if field in ("all", "correctness"):
+        keep_keys.add("correctness")
+    if field in ("all", "performance"):
+        keep_keys.add("performance")
+
+    result_configs = {
+        slug: {k: v for k, v in cfg.items() if k in keep_keys}
+        for slug, cfg in configs.items()
+    }
+
+    return json.dumps({"all_ok": all_ok, "configs": result_configs}, indent=2)
+
+
+@mcp.tool()
+async def cuda_get_profile_data(
+    metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
+    config_slug: Annotated[str | None, Field(description="Filter to a single config slug (omit for all configs)")] = None,
+    field: Annotated[
+        Literal["all", "summary", "generated_summary", "reference_summary"],
+        Field(description="Which part of the profile result to return"),
+    ] = "all",
+) -> str:
+    """Retrieve structured profile results from a prior turn.
+
+    Reads the saved raw profile response and extracts latency
+    summaries, optionally filtered to a single config.
+
+    Parameters:
+        metadata:    Turn identity dict (identifies which turn to look up).
+        attempt:     1-based attempt number (default 1).
+        config_slug: If provided, return data only for this config.
+                     If omitted, return data for all configs.
+        field:       "all"               — all summaries per config.
+                     "summary"           — overall latency summary.
+                     "generated_summary" — generated-side summary only.
+                     "reference_summary" — reference-side summary only.
+
+    Returns JSON with:
+        all_ok:  bool — aggregate success.
+        configs: {config_slug: {status, summary?, generated_summary?,
+                  reference_summary?}}
+
+    Available configs are listed in the error message if config_slug
+    does not match.
+    """
+
+    if not _DATA_DIR:
+        return _data_store_not_configured()
+    turn = metadata.get("turn")
+    if turn is None:
+        return json.dumps({"error": "metadata.turn is required."})
+
+    data = _read_stored_response(int(turn), "profile", attempt)
+    if data is None:
+        return _not_found_error(int(turn), "profile", attempt)
+
+    all_ok = data.get("all_ok")
+    configs = data.get("configs", {})
+
+    if config_slug is not None:
+        if config_slug not in configs:
+            return json.dumps({
+                "error": f"Config '{config_slug}' not found.",
+                "available_configs": sorted(configs.keys()),
+            }, indent=2)
+        configs = {config_slug: configs[config_slug]}
+
+    keep_keys = {"status"}
+    if field == "all":
+        keep_keys.update({"summary", "generated_summary", "reference_summary"})
+    else:
+        keep_keys.add(field)
+
+    result_configs = {
+        slug: {k: v for k, v in cfg.items() if k in keep_keys}
+        for slug, cfg in configs.items()
+    }
+
+    return json.dumps({"all_ok": all_ok, "configs": result_configs}, indent=2)
 
 
 if __name__ == "__main__":

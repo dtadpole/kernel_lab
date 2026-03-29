@@ -38,7 +38,7 @@ The server uses stdio transport. It reads `CUDA_EXEC_URL` and `CUDA_EXEC_KEY_PAT
 
 ### Module responsibilities
 
-- **`mcp_server.py`** — FastMCP stdio server. Wraps 5 cuda_exec HTTP endpoints as MCP tools (`cuda_compile`, `cuda_evaluate`, `cuda_profile`, `cuda_execute`, `cuda_read_file`). Strips base64 binary content from responses to avoid context bloat. Handles bearer token auth.
+- **`mcp_server.py`** — FastMCP stdio server. Wraps 5 cuda_exec HTTP endpoints as action tools (`cuda_compile`, `cuda_evaluate`, `cuda_profile`, `cuda_execute`, `cuda_read_file`) plus 4 local data retrieval tools (`cuda_get_compile_data`, `cuda_get_evaluate_data`, `cuda_get_profile_data`, `cuda_get_data_point`). Strips base64 binary content from responses to avoid context bloat. Persists raw request/response for every tool call to a local data store. Handles bearer token auth.
 - **`agent.py`** — Agent orchestration. Creates a `claude-agent-sdk` session with the MCP server and runs the optimization loop. Claude manages iteration internally.
 - **`prompts.py`** — System prompt encoding workflow rules, convergence criteria, and CUDA optimization techniques. Initial prompt template formatting.
 - **`task.py`** — `OptimizationTask` dataclass holding all inputs for an optimization run.
@@ -51,3 +51,4 @@ The server uses stdio transport. It reads `CUDA_EXEC_URL` and `CUDA_EXEC_KEY_PAT
 - **Single long agent run** — Claude manages the optimization loop internally rather than an outer Python loop. More flexible; Claude can adapt strategy mid-run.
 - **Binary content filtering** — The MCP server replaces base64-encoded payloads with placeholders to keep tool results within context limits.
 - **Bearer token auth** — The MCP server reads the same key file as cuda_exec (`~/.keys/cuda_exec.key`).
+- **Local data store** — Every tool call saves its full raw request and response (before compaction) to `~/.cuda_agent/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/`. The `cuda_get_data_point` tool reads from this store.

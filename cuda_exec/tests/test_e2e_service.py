@@ -757,6 +757,36 @@ class CudaExecE2ETest(unittest.TestCase):
                 self.assertIn("ncu_report", first["generated"])
             else:
                 self.assertFalse(meta.get("ncu_report_exists"))
+
+    def test_profile_endpoint_ncu_fallback_does_not_publish_missing_report(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=125))
+        self.assertEqual(compile_status, 200)
+
+        status, body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(125),
+                "timeout_seconds": 20,
+                "mode": "generated_only",
+                "profiler_backend": "ncu",
+                "configs": self._config_map(),
+            },
+        )
+        self.assertIn(status, {200, 400, 408})
+        if status == 200:
+            first_slug, first = next(iter(body["configs"].items()))
+            meta = first["summary"].get("metadata", {})
+            self.assertEqual(meta.get("profiler_backend"), "ncu")
+            self.assertFalse(meta.get("ncu_profiled"))
+            self.assertFalse(meta.get("ncu_report_exists"))
+            self.assertEqual(meta.get("source"), "ncu_process_duration_fallback")
+            self.assertIn("ncu_warning", meta)
+            artifact_paths = list(first["artifacts"].keys())
+            self.assertFalse(any(path.endswith(".ncu-rep") for path in artifact_paths))
+            self.assertNotIn("ncu_report", first["generated"])
+            expected_log_prefix = f"logs/profile.attempt_{body['attempt']:03d}.config_{first_slug}"
+            self.assertIn(f"{expected_log_prefix}.stdout", first["logs"])
+            self.assertIn("No kernels were profiled", first["logs"][f"{expected_log_prefix}.stdout"]["content"])
         else:
             self.assertIn("detail", body)
 
@@ -797,6 +827,59 @@ class CudaExecE2ETest(unittest.TestCase):
         else:
             self.assertIn("detail", body)
 
+    def test_execute_endpoint_rejects_non_toolkit_command(self) -> None:
+        status, body = self.service.post_json(
+            "/execute",
+            {
+                "metadata": self._metadata(126),
+                "timeout_seconds": 5,
+                "command": [str(_suite_python()), "-c", "import sys; sys.exit(7)"],
+                "env": {},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("detail", body)
+        self.assertIn("must point to a CUDA Toolkit binary", body["detail"])
+
+
+    def test_profile_attempts_retain_distinct_attempt_tagged_files(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=127))
+        self.assertEqual(compile_status, 200)
+
+        first_status, first_body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(127),
+                "timeout_seconds": 5,
+                "mode": "generated_only",
+                "configs": self._config_map(),
+            },
+        )
+        second_status, second_body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(127),
+                "timeout_seconds": 5,
+                "mode": "generated_only",
+                "configs": self._config_map(),
+            },
+        )
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertNotEqual(first_body["attempt"], second_body["attempt"])
+        first_slug, first_item = next(iter(first_body["configs"].items()))
+        second_slug, second_item = next(iter(second_body["configs"].items()))
+        self.assertEqual(first_slug, second_slug)
+        first_artifacts = list(first_item["artifacts"].keys())
+        second_artifacts = list(second_item["artifacts"].keys())
+        self.assertTrue(any(f"attempt_{first_body['attempt']:03d}" in path for path in first_artifacts))
+        self.assertTrue(any(f"attempt_{second_body['attempt']:03d}" in path for path in second_artifacts))
+        self.assertNotEqual(set(first_artifacts), set(second_artifacts))
+        first_logs = list(first_item["logs"].keys())
+        second_logs = list(second_item["logs"].keys())
+        self.assertTrue(any(f"attempt_{first_body['attempt']:03d}" in path for path in first_logs))
+        self.assertTrue(any(f"attempt_{second_body['attempt']:03d}" in path for path in second_logs))
+        self.assertNotEqual(set(first_logs), set(second_logs))
 
 class ReferenceFixtureContractTest(unittest.TestCase):
     def test_reference_fixture_declares_explicit_module_contract(self) -> None:

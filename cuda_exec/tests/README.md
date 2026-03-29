@@ -83,3 +83,28 @@ Most important remaining integration-test gaps:
 
 5. **Cross-attempt profile file retention sanity**
    - We do not yet assert that repeated profile attempts for the same turn create distinct attempt-tagged artifacts/logs rather than overwriting prior public files.
+
+## Which gaps should be added now vs only documented
+
+Add now:
+
+1. **Negative NCU fallback contract path**
+   - High value because we already know both success-ish and fallback NCU shapes exist.
+   - Prevents regressions where fallback runs incorrectly claim `.ncu-rep` or omit explicit fallback metadata.
+
+2. **Execute failure-mode coverage**
+   - High value because `execute` is a direct public endpoint and its error/timeout contract should stay stable.
+   - Cheap to exercise with one or two subprocess-oriented test cases.
+
+3. **Cross-attempt profile retention sanity**
+   - High value because attempt-tagged artifact retention is part of the public file/log contract, not just an internal detail.
+
+Document only for now:
+
+1. **Profile manifest/state contract checks**
+   - Useful, but lower immediate value than public response/log/artifact regressions.
+   - Better treated after the public API surface is stable.
+
+2. **Alternate generated fixture compile artifact contract checks**
+   - Nice to have, but the runtime-launch fixture was introduced mainly to unlock real NCU verification rather than to establish a second full compile contract matrix.
+   - Can be revisited if alternate-fixture compilation starts to diverge materially.

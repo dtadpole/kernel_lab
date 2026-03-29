@@ -106,13 +106,6 @@ def _validate_file_read_scope(rel_path: str) -> None:
         )
 
 
-def _profile_report_path(config_output: dict) -> str:
-    for artifact in config_output.get("artifacts", []):
-        if artifact.get("kind") == "profile_report":
-            return artifact["path"]
-    raise ValueError("profile config output missing report artifact")
-
-
 def _capture_public_files(workspace_path: str, rel_paths: list[str], *, inline: bool, max_bytes: int | None = None) -> dict[str, dict]:
     """Materialize public response files as relative_path -> FilePayload."""
 

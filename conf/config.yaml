@@ -1,0 +1,5 @@
+defaults:
+  - agent: default
+  - mcp: default
+  - service: default
+  - _self_

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from cuda_agent.agent import run_optimization
+from cuda_agent.config import load_config
 from cuda_agent.task import OptimizationTask
 
 
@@ -45,14 +46,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reference-dir", type=Path, required=True, help="Directory containing reference Python file(s)")
     p.add_argument("--generated-file", type=Path, required=True, help="Path to the initial generated .cu file")
     p.add_argument("--configs-file", type=Path, required=True, help="JSON file with slug-keyed runtime configs")
-    p.add_argument("--max-iterations", type=int, default=10, help="Max optimization iterations (default: 10)")
+    p.add_argument("--max-iterations", type=int, default=None, help="Max optimization iterations (default: from config)")
     p.add_argument("--speedup-target", type=float, default=None, help="Optional speedup target vs reference")
-    p.add_argument("--cuda-exec-url", default="http://127.0.0.1:8000", help="cuda_exec service URL")
+    p.add_argument("--cuda-exec-url", default=None, help="cuda_exec service URL (default: from config)")
+    p.add_argument("--config-override", action="append", default=[], help="Hydra config override, e.g. agent.model=claude-opus-4")
     return p
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+
+    overrides = tuple(args.config_override)
+    cfg = load_config(overrides)
 
     if not args.reference_dir.is_dir():
         print(f"error: --reference-dir is not a directory: {args.reference_dir}", file=sys.stderr)
@@ -76,10 +81,10 @@ def main(argv: list[str] | None = None) -> None:
         reference_files=reference_files,
         initial_generated_files=generated_files,
         configs=configs,
-        max_iterations=args.max_iterations,
+        max_iterations=args.max_iterations if args.max_iterations is not None else 10,
         speedup_target=args.speedup_target,
-        cuda_exec_url=args.cuda_exec_url,
+        cuda_exec_url=args.cuda_exec_url or cfg.service.cuda_exec_url,
     )
 
-    result = asyncio.run(run_optimization(task))
+    result = asyncio.run(run_optimization(task, overrides=overrides))
     print(result)

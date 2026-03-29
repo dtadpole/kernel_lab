@@ -1,0 +1,6 @@
+# cuda_exec service connectivity.
+# These defaults can be overridden by environment variables:
+#   CUDA_EXEC_URL       overrides cuda_exec_url
+#   CUDA_EXEC_KEY_PATH  overrides key_path
+cuda_exec_url: "http://127.0.0.1:8000"
+key_path: "~/.keys/cuda_exec.key"

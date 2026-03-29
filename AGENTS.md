@@ -97,6 +97,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - evaluate config output: `status` + `reference` + `generated` + `correctness` + `performance` + `artifacts` + `logs`
 - profile config output: `status` + `summary` + `reference` + `generated` + `reference_summary` + `generated_summary` + `artifacts` + `logs`
 - profile requests also accept `profiler_backend`, currently `comparison_runtime` or `ncu`
+- supported profile/backend boundary: `comparison_runtime` supports `generated_only`, `reference_only`, and `dual`; `ncu` is intentionally generated-only and should not be treated as a dual/reference comparison backend
 
 #### Execute boundary
 

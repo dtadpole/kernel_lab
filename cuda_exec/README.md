@@ -46,8 +46,10 @@ That file now contains the authoritative request/response JSON examples for:
 Current profile note:
 
 - `profiler_backend="comparison_runtime"` is the default behavior-first runtime
+- supported mode coverage under `comparison_runtime`: `generated_only`, `reference_only`, and `dual`
 - `profiler_backend="ncu"` is available in parallel and is intentionally scoped to `mode="generated_only"`
-- long-term design: `ncu` stays a generated-side capture backend; cross-side comparison remains under `comparison_runtime`
+- `ncu` is **not** a dual/reference comparison backend; cross-side comparison remains under `comparison_runtime`
+- current verified boundary: `ncu` may execute successfully while still reporting `No kernels were profiled`, in which case `cuda_exec` falls back to process-duration summary metadata and only publishes `.ncu-rep` when that artifact actually exists
 
 Current evaluate alignment note:
 

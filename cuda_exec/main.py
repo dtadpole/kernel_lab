@@ -225,7 +225,7 @@ def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bea
     )
 
 
-@app.post("/profile", response_model=ProfileResponse)
+@app.post("/profile", response_model=ProfileResponse, response_model_exclude_none=True)
 def profile_endpoint(request: ProfileRequest, _auth: None = Depends(verify_bearer_token)) -> ProfileResponse:
     """Profile one compiled artifact against slug-keyed runtime configs."""
 

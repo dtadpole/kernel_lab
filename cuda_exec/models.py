@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class Metadata(BaseModel):
@@ -202,8 +202,6 @@ class ResponseBase(BaseModel):
 
 class LatencySummary(BaseModel):
     """Structured latency statistics in milliseconds."""
-
-    model_config = ConfigDict(exclude_none=True)
 
     min: float | None = None
     median: float | None = None

@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from _cli_common import add_metadata_args, ensure_repo_root_on_path
 
 ensure_repo_root_on_path()
@@ -131,7 +133,7 @@ def main() -> int:
 
     if args.mode in {"reference_only", "dual"}:
         reference_module = _load_reference_module(reference_path)
-        measured = _measure_reference(reference_module, reference_config)
+        measured = _measure_reference(reference_module, reference_config, device=torch.device("cuda"))
         reference_summary = {
             **measured["performance"],
             "metadata": reference_config,

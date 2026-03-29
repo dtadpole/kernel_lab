@@ -14,14 +14,15 @@ FastAPI-based remote CUDA execution service.
 
 - compile is code-level and runs once per turn
 - evaluate/profile are config-level and may run many configs per compile
-- compile inputs use `Dict[relative_path, content]`
+- compile inputs use inline file maps via `reference_files` and `generated_files`
 - evaluate/profile configs use `Dict[config_slug, Dict[str, Any]]`
 - config payloads are intentionally kernel-specific and flexible
 - public responses return stage-relevant `artifacts` and `logs` as relative-path keyed dictionaries
 - top-level public responses use `all_ok`
 - evaluate/profile responses mirror request shape with `configs: Dict[config_slug, ...]`
-- evaluate config outputs carry `status`, `correctness`, `performance`, and `logs`
-- profile config outputs carry `status`, `summary`, `artifacts`, and `logs`
+- evaluate config outputs carry `status`, `reference`, `generated`, `correctness`, `performance`, `artifacts`, and `logs`
+- profile requests support `mode` plus `profiler_backend`
+- profile config outputs carry `status`, `summary`, `reference`, `generated`, `reference_summary`, `generated_summary`, `artifacts`, and `logs`
 - internal state is kept for compile/evaluate/profile bookkeeping, but not exposed in default public responses
 - the runtime mental model is:
   - `workspace = inputs + scratch`
@@ -41,3 +42,8 @@ That file now contains the authoritative request/response JSON examples for:
 - evaluate
 - profile
 - execute
+
+Current profile note:
+
+- `profiler_backend="comparison_runtime"` is the default behavior-first runtime
+- `profiler_backend="ncu"` is available in parallel and currently scoped to `mode="generated_only"`

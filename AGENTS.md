@@ -70,7 +70,7 @@ turn_<turn>/
 
 `compile` takes inline file maps, not file lists:
 
-- `original_files: Dict[relative_path, content]`
+- `reference_files: Dict[relative_path, content]`
 - `generated_files: Dict[relative_path, content]`
 
 All public request/response file names should use relative paths.
@@ -92,8 +92,9 @@ Public request/response file names use relative paths, and public returned files
 For evaluate/profile specifically, public responses mirror request shape and use `configs: Dict[config_slug, ...]` instead of result lists.
 Top-level public responses use `all_ok` for aggregate success. Per-config outputs use `status` plus structured summaries instead of raw log-only results.
 
-- evaluate config output: `status` + `correctness` + `performance` + `logs`
-- profile config output: `status` + `summary` + `artifacts` + `logs`
+- evaluate config output: `status` + `reference` + `generated` + `correctness` + `performance` + `artifacts` + `logs`
+- profile config output: `status` + `summary` + `reference` + `generated` + `reference_summary` + `generated_summary` + `artifacts` + `logs`
+- profile requests also accept `profiler_backend`, currently `comparison_runtime` or `ncu`
 
 #### Execute boundary
 

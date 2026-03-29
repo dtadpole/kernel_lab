@@ -145,6 +145,8 @@ Rules:
 - `reference_files` may include `.cu` files, but does not require one
 - if `generated_files` contains zero or multiple `.cu` files, reject the compile request
 - when rejecting multiple generated `.cu` files, the caller-facing guidance should recommend using a generator
+- `reference_files` must include a file keyed as `reference.py` (the entry point)
+- `generated_files` must have its single `.cu` file keyed as `generated.cu` (the entry point)
 
 Conceptual example:
 
@@ -152,10 +154,10 @@ Conceptual example:
 {
   "metadata": { "...": "..." },
   "generated_files": {
-    "kernels/generated.cu": "extern \"C\" __global__ void ..."
+    "generated.cu": "extern \"C\" __global__ void ..."
   },
   "reference_files": {
-    "reference/reference.cu": "extern \"C\" __global__ void ..."
+    "reference.py": "import torch ..."
   }
 }
 ```

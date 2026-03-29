@@ -70,6 +70,7 @@ Override with `CUDA_EXEC_ROOT` env var for tests/isolation.
 - **Files in responses** are relative-path-keyed dicts of `FilePayload` with `encoding` (utf8/base64) and `truncated` metadata.
 - **`profiler_backend="ncu"`** is a parallel path to `comparison_runtime`, intentionally limited to `generated_only` mode.
 - **Bearer token authentication** gates all endpoints except `/healthz`. Key file at `~/.keys/cuda_exec.key`, overridable via `CUDA_EXEC_KEY_PATH` env var. Service refuses to start without a valid key.
+- **Fixed entry file names** — reference entry must be `reference.py`, generated entry must be `generated.cu`. Additional helper files may use any name.
 
 ### DESIGN.md
 

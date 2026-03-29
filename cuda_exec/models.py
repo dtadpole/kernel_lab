@@ -47,10 +47,11 @@ class CompileRequest(RequestBase):
 
     Compile request contract:
     - `reference_files` must be non-empty
+    - `reference_files` must include a file keyed as `reference.py` (the entry point)
     - `generated_files` must be non-empty
-    - `generated_files` must contain exactly one generated `.cu` file
+    - `generated_files` must contain exactly one `.cu` file, keyed as `generated.cu`
     - `generated_files` may include additional headers or inline helper files
-    - `reference_files` may include `.cu` files, but do not need to
+    - `reference_files` may include additional helper files of any type
     - compile may run only once per turn; use a new turn for a different upload set
 
     Why request-side files stay this simple:
@@ -61,11 +62,11 @@ class CompileRequest(RequestBase):
 
     reference_files: Dict[str, str] = Field(
         default_factory=dict,
-        description="Non-empty map of relative path to file content for reference source inputs",
+        description="Non-empty map of relative path to file content; must include reference.py as the entry point",
     )
     generated_files: Dict[str, str] = Field(
         default_factory=dict,
-        description="Non-empty map of generated source inputs that must include exactly one generated .cu file; headers and inline helper files are also allowed",
+        description="Non-empty map of generated source inputs; must include generated.cu as the single .cu entry file; headers and inline helper files also allowed",
     )
 
 

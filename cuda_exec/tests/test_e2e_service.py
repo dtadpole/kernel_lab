@@ -13,11 +13,13 @@ from urllib import error, request
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CUDA_EXEC_DIR = REPO_ROOT / "cuda_exec"
-VENV_PYTHON = CUDA_EXEC_DIR / ".venv" / "bin" / "python"
 PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CONFIG_FIXTURE = FIXTURES / "configs" / "vector_add_shapes.json"
 SUITE_RUN_DIR: Path | None = None
+SUITE_VENV_DIR: Path | None = None
+REFERENCE_STACK_SITE_PACKAGES = CUDA_EXEC_DIR / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+REFERENCE_STACK_EXTRA_PATH = REFERENCE_STACK_SITE_PACKAGES / "nvidia_cutlass_dsl" / "python_packages"
 
 
 def _find_free_port() -> int:
@@ -26,9 +28,38 @@ def _find_free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _suite_venv_dir() -> Path:
+    if SUITE_VENV_DIR is None:
+        raise RuntimeError("suite temp venv is not initialized")
+    return SUITE_VENV_DIR
+
+
+def _suite_python() -> Path:
+    return _suite_venv_dir() / "bin" / "python"
+
+
+def _provision_suite_venv(run_dir: Path) -> Path:
+    venv_dir = run_dir / ".venv"
+    subprocess.run(["uv", "venv", str(venv_dir)], cwd=str(REPO_ROOT), check=True)
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(venv_dir / "bin" / "python"),
+            "-r",
+            str(CUDA_EXEC_DIR / "requirements.txt"),
+        ],
+        cwd=str(REPO_ROOT),
+        check=True,
+    )
+    return venv_dir
+
+
 def _prune_old_runs() -> None:
     subprocess.run(
-        [str(VENV_PYTHON), str(PRUNE_SCRIPT)],
+        [str(_suite_python()), str(PRUNE_SCRIPT)],
         cwd=str(REPO_ROOT),
         check=True,
         stdout=subprocess.DEVNULL,
@@ -55,9 +86,10 @@ def _suite_run_dir() -> Path:
 
 
 def setUpModule() -> None:
-    global SUITE_RUN_DIR
-    _prune_old_runs()
+    global SUITE_RUN_DIR, SUITE_VENV_DIR
     SUITE_RUN_DIR = _create_suite_run_dir()
+    SUITE_VENV_DIR = _provision_suite_venv(SUITE_RUN_DIR)
+    _prune_old_runs()
 
 
 class ServiceProcess:
@@ -79,9 +111,17 @@ class ServiceProcess:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["CUDA_EXEC_ROOT"] = str(self.runtime_root)
+        pythonpath_entries = [str(REPO_ROOT)]
+        for candidate in [REFERENCE_STACK_SITE_PACKAGES, REFERENCE_STACK_EXTRA_PATH]:
+            if candidate.exists():
+                pythonpath_entries.append(str(candidate))
+        existing_pythonpath = env.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_entries.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
         self.process = subprocess.Popen(
             [
-                str(VENV_PYTHON),
+                str(_suite_python()),
                 "-m",
                 "uvicorn",
                 "cuda_exec.main:app",
@@ -672,9 +712,12 @@ class ReferenceFixtureContractTest(unittest.TestCase):
         try:
             completed_probe = subprocess.run(
                 [
-                    str(VENV_PYTHON),
+                    str(_suite_python()),
                     "-c",
-                    "import torch, importlib.util; "
+                    "import os, sys, importlib.util; "
+                    f"sys.path.insert(0, '{REFERENCE_STACK_SITE_PACKAGES}'); "
+                    f"sys.path.insert(0, '{REFERENCE_STACK_EXTRA_PATH}'); "
+                    "import torch; "
                     "assert importlib.util.find_spec('cutlass.cute') is not None; "
                     "assert torch.cuda.is_available(); "
                     "print(torch.__version__)"
@@ -697,8 +740,16 @@ class ReferenceFixtureContractTest(unittest.TestCase):
                 "CUDA_EXEC_PARAM_SHAPE_KIND": "2d",
             }
         )
+        pythonpath_entries = []
+        for candidate in [REFERENCE_STACK_SITE_PACKAGES, REFERENCE_STACK_EXTRA_PATH]:
+            if candidate.exists():
+                pythonpath_entries.append(str(candidate))
+        existing_pythonpath = env.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_entries.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
         completed = subprocess.run(
-            [str(VENV_PYTHON), str(fixture_path)],
+            [str(_suite_python()), str(fixture_path)],
             check=True,
             capture_output=True,
             text=True,

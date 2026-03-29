@@ -255,6 +255,10 @@ class EvaluateConfigOutput(BaseModel):
     status: Literal["ok", "error", "timeout", "skipped"]
     correctness: CorrectnessSummary = Field(default_factory=CorrectnessSummary)
     performance: PerformanceSummary = Field(default_factory=PerformanceSummary)
+    artifacts: Dict[str, FilePayload] = Field(
+        default_factory=dict,
+        description="Relative-path keyed kept evaluate comparison artifacts for this config",
+    )
     logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed per-config evaluate log/stdout/stderr files",

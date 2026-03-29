@@ -207,6 +207,11 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
             status=item["status"],
             correctness=item.get("correctness", {}),
             performance=item.get("performance", {}),
+            artifacts=_capture_public_files(
+                result["workspace_path"],
+                [artifact["path"] for artifact in item.get("artifacts", [])],
+                inline=True,
+            ),
             logs=_capture_public_files(
                 result["workspace_path"],
                 _stage_log_paths("evaluate", attempt, config_slug),

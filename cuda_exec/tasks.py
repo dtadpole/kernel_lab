@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+import sys
 from typing import Any, Dict, List
 
 from fastapi import HTTPException
@@ -17,6 +18,7 @@ from cuda_exec.runner import (
 
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
+EVALUATE_SCRIPT = SCRIPTS_DIR / "evaluate.py"
 PROFILE_SCRIPT = SCRIPTS_DIR / "profile.sh"
 DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
 SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -314,6 +316,13 @@ def _fallback_performance_summary(run_result: dict, *, source: str, config: dict
 
 def _evaluate_correctness_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
+    if payload and isinstance(payload.get("comparison"), dict):
+        comparison = payload["comparison"]
+        correctness = comparison.get("correctness")
+        if isinstance(correctness, dict):
+            correctness.setdefault("metadata", {})
+            correctness["metadata"] = {**_config_metadata(config), **correctness["metadata"]}
+            return correctness
     if payload and isinstance(payload.get("correctness"), dict):
         correctness = payload["correctness"]
         correctness.setdefault("metadata", {})
@@ -324,6 +333,13 @@ def _evaluate_correctness_summary(run_result: dict, *, config: dict) -> dict:
 
 def _evaluate_performance_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
+    if payload and isinstance(payload.get("generated"), dict):
+        generated = payload["generated"]
+        performance = generated.get("performance")
+        if isinstance(performance, dict):
+            performance.setdefault("metadata", {})
+            performance["metadata"] = {**_config_metadata(config), **performance["metadata"]}
+            return performance
     if payload and isinstance(payload.get("performance"), dict):
         performance = payload["performance"]
         performance.setdefault("metadata", {})
@@ -646,25 +662,62 @@ def run_evaluate_task(
 
     for config_slug, config in configs.items():
         config_rel = _write_config_record(workspace, "evaluate", attempt, config_slug, config)
-        env = _config_env(workspace, "evaluate", attempt, config_slug, config, config_rel)
+        comparison_rel = _config_artifact_rel("evaluate", attempt, config_slug, "comparison.json")
+        command = [
+            sys.executable,
+            str(EVALUATE_SCRIPT),
+            "--run-tag",
+            metadata.run_tag,
+            "--version",
+            metadata.version,
+            "--direction-id",
+            str(metadata.direction_id),
+            "--direction-slug",
+            metadata.direction_slug,
+            "--turn",
+            str(metadata.turn),
+            "--config-slug",
+            config_slug,
+            "--config-json",
+            json.dumps(config),
+            "--timeout",
+            str(timeout_seconds),
+        ]
         run_result = run_generic_command(
             kind="evaluate",
-            command=[str(target_path)],
+            command=command,
             workspace_path=str(workspace_path),
-            env=env,
+            env={},
             timeout_seconds=timeout_seconds,
             return_files=[config_rel],
             log_file=_stage_log_rel("evaluate", attempt, config_slug),
         )
+        payload_json = _parse_structured_stdout(run_result["output"]["stdout"]) or {}
+        comparison_path = Path(workspace["root_path"]) / comparison_rel
+        comparison_path.parent.mkdir(parents=True, exist_ok=True)
+        comparison_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")
         payload = _config_result_payload(
             config_slug=config_slug,
             config=config,
             run_result=run_result,
+            artifacts=[
+                _build_artifact(
+                    artifact_id=f"evaluate:comparison:{config_slug}",
+                    kind="comparison",
+                    path=comparison_rel,
+                    description=f"Reference/generated comparison payload for config {config_slug}",
+                )
+            ],
             correctness=_evaluate_correctness_summary(run_result, config=config),
             performance=_evaluate_performance_summary(run_result, config=config),
         )
+        payload["comparison"] = payload_json.get("comparison", {}) if isinstance(payload_json, dict) else {}
+        payload["reference"] = payload_json.get("reference", {}) if isinstance(payload_json, dict) else {}
+        payload["generated"] = payload_json.get("generated", {}) if isinstance(payload_json, dict) else {}
+        payload["files"].append(capture_turn_file(comparison_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
+        stage_artifacts.extend(payload["artifacts"])
 
     manifest = _workflow_payload(
         metadata,

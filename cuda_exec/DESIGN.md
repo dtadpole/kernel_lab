@@ -185,6 +185,15 @@ workspace/inputs/generated/<relative_path>
 
 That means one compile can fan out into many configs.
 
+For `evaluate`, the current runtime shape is comparison-first:
+
+- load exactly one reference Python module from `workspace/inputs/reference/`
+- require the module contract `Model`, `get_inputs(config)`, and `get_init_inputs()`
+- run the reference side through that module contract
+- run the generated side through the compiled primary artifact
+- persist one kept comparison artifact per config under `artifacts/evaluate.attempt_###.config_<slug>.comparison.json`
+- return per-config `correctness`, `performance`, `artifacts`, and `logs`
+
 Example config fields:
 
 - transformer layer count
@@ -270,6 +279,7 @@ Examples:
 
 ```text
 logs/evaluate.attempt_001.config_fa4_causal_l12_e4096_h32.log
+artifacts/evaluate.attempt_001.config_fa4_causal_l12_e4096_h32.comparison.json
 logs/profile.attempt_001.config_fa4_causal_l12_e4096_h32.log
 artifacts/profile.attempt_001.config_fa4_causal_l12_e4096_h32.ncu-rep
 ```
@@ -648,6 +658,111 @@ Rules:
 - if `max_bytes` is provided, return at most that many bytes in `content`
 - when `max_bytes` causes truncation, return `truncated = true`
 - if the file does not exist for that turn/path, return `404`
+
+### Reference Python contract
+
+Current contract: reference execution is Python-only and module-based.
+
+A reference Python file must export:
+
+- `class Model(torch.nn.Module)`
+- `get_inputs(config: dict) -> list`
+- `get_init_inputs(config: dict) -> list` (or equivalent zero-arg init list when config is unused)
+
+`cuda_exec` owns the evaluator/profiler runtime. Reference files do not need to implement
+comparison logic themselves. They only need to expose a runnable module interface compatible
+with the evaluator, similar to the `kbEval` expectation.
+
+### Evaluate request
+
+Evaluate is always a comparison between `reference` and `generated` for the same config set.
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "vector-add",
+    "turn": 4
+  },
+  "timeout_seconds": 180,
+  "configs": {
+    "shape-1d-1048576": {
+      "shape_kind": "1d",
+      "rank": 1,
+      "input_size": 1048576,
+      "shape": [1048576]
+    }
+  }
+}
+```
+
+Response shape per config:
+
+- `status`
+- `reference`
+  - `correctness`
+  - `performance`
+  - `logs`
+- `generated`
+  - `correctness`
+  - `performance`
+  - `logs`
+- `comparison`
+  - `correctness_match`
+  - `performance`
+    - `reference_median_ms`
+    - `generated_median_ms`
+    - `delta_ms`
+    - `speedup`
+
+### Profile request
+
+Profile supports an explicit mode:
+
+- `reference_only`
+- `generated_only`
+- `dual`
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "vector-add",
+    "turn": 4
+  },
+  "timeout_seconds": 180,
+  "mode": "dual",
+  "configs": {
+    "shape-1d-1048576": {
+      "shape_kind": "1d",
+      "rank": 1,
+      "input_size": 1048576,
+      "shape": [1048576]
+    }
+  }
+}
+```
+
+Response shape per config:
+
+- `status`
+- `reference` (present in `reference_only` and `dual`)
+  - `summary`
+  - `artifacts`
+  - `logs`
+- `generated` (present in `generated_only` and `dual`)
+  - `summary`
+  - `artifacts`
+  - `logs`
+- `comparison` (present in `dual`)
+  - `reference_median_ms`
+  - `generated_median_ms`
+  - `delta_ms`
+  - `speedup`
 
 ### Evaluate request
 

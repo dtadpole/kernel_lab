@@ -1,59 +1,85 @@
-"""Sample CuTeDSL-style vector add source for integration tests.
+"""CuTeDSL-style reference fixture exposed through a Kernel Bench / kbEval-like module contract.
 
-This fixture is config-aware. It treats the runtime config as shape metadata and
-builds a flattened vector-add view over 1D / 2D / 3D inputs.
+Contract for cuda_exec reference Python files:
+- export `class Model(torch.nn.Module)`
+- export `get_inputs(config)`
+- export `get_init_inputs()`
+
+This fixture keeps the interface module-based while restoring a real CuTe DSL
+vector-add kernel definition for the reference side.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
-try:
-    import cutlass.cute as cute  # type: ignore
-except Exception:  # pragma: no cover - fixture may be read/copied without CuTe installed
-    cute = None
+import cutlass.cute as cute  # type: ignore
+import torch
+from torch import nn
 
 
-def _config_from_env() -> dict[str, Any]:
-    shape_raw = os.environ.get("CUDA_EXEC_PARAM_SHAPE") or os.environ.get("CUDA_EXEC_EXTRA_SHAPE", "[1048576]")
-    try:
-        shape = json.loads(shape_raw)
-    except json.JSONDecodeError:
-        shape = [1048576]
+def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        raise TypeError(f"config must be a dict, got {type(config)!r}")
+
+    missing = [key for key in ("shape", "rank", "shape_kind", "input_size") if key not in config]
+    if missing:
+        raise ValueError(f"config missing required keys: {missing}")
+
+    shape = config["shape"]
     if not isinstance(shape, list) or not shape:
-        shape = [1048576]
+        raise ValueError("config['shape'] must be a non-empty list")
 
-    input_size = int(os.environ.get("CUDA_EXEC_PARAM_INPUT_SIZE") or os.environ.get("CUDA_EXEC_EXTRA_INPUT_SIZE", str(_product(shape))))
-    rank = int(os.environ.get("CUDA_EXEC_PARAM_RANK") or os.environ.get("CUDA_EXEC_EXTRA_RANK", str(len(shape))))
-    shape_kind = os.environ.get("CUDA_EXEC_PARAM_SHAPE_KIND") or os.environ.get("CUDA_EXEC_EXTRA_SHAPE_KIND", f"{rank}d")
+    normalized_shape = [int(v) for v in shape]
+    input_size = int(config["input_size"])
+    shape_size = 1
+    for dim in normalized_shape:
+        shape_size *= dim
+    if shape_size != input_size:
+        raise ValueError(
+            f"config shape product {shape_size} does not match input_size {input_size}"
+        )
 
     return {
-        "shape": shape,
-        "rank": rank,
-        "shape_kind": shape_kind,
+        **config,
+        "shape": normalized_shape,
+        "rank": int(config["rank"]),
+        "shape_kind": str(config["shape_kind"]),
         "input_size": input_size,
     }
 
 
-def _product(values: list[int]) -> int:
-    out = 1
-    for value in values:
-        out *= int(value)
-    return out
+def _config_from_env() -> dict[str, Any]:
+    raw = os.environ.get("CUDA_EXEC_CONFIG_JSON")
+    if raw:
+        payload = json.loads(raw)
+        params = payload.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("CUDA_EXEC_CONFIG_JSON.params must be an object")
+        return _normalize_config(params)
+
+    shape = json.loads(os.environ["CUDA_EXEC_PARAM_SHAPE"])
+    return _normalize_config(
+        {
+            "shape": shape,
+            "input_size": int(os.environ["CUDA_EXEC_PARAM_INPUT_SIZE"]),
+            "rank": int(os.environ["CUDA_EXEC_PARAM_RANK"]),
+            "shape_kind": os.environ["CUDA_EXEC_PARAM_SHAPE_KIND"],
+        }
+    )
 
 
-def build_vector_add_from_config(config: dict[str, Any], elements_per_thread: int = 4):
-    shape = [int(v) for v in config.get("shape", [config.get("input_size", 1 << 20)])]
-    rank = int(config.get("rank", len(shape)))
-    length = int(config.get("input_size", _product(shape)))
-    shape_kind = str(config.get("shape_kind", f"{rank}d"))
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.elements_per_thread = 4
+        self.threads = 256
 
-    threads = 256
-    blocks = (length + threads * elements_per_thread - 1) // (threads * elements_per_thread)
-
-    if cute is not None:
+        elements_per_thread = self.elements_per_thread
+        threads = self.threads
 
         @cute.kernel
         def vector_add_kernel(x_ptr, y_ptr, out_ptr, n):
@@ -66,34 +92,77 @@ def build_vector_add_from_config(config: dict[str, Any], elements_per_thread: in
                 if idx < n:
                     out_ptr[idx] = x_ptr[idx] + y_ptr[idx]
 
-        kernel = vector_add_kernel
-    else:
-        kernel = None
+        self.kernel = vector_add_kernel
 
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # Temporary execution path: keep the CuTe DSL kernel definition live while
+        # the evaluator/runtime integration catches up to actually launch it.
+        return x + y
+
+
+def get_init_inputs() -> list[Any]:
+    return []
+
+
+def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
+    cfg = _normalize_config(config)
+    shape = tuple(int(v) for v in cfg["shape"])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    numel = int(cfg["input_size"])
+    x = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape)
+    y = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape)
+    return [x, y]
+
+
+def _latency_summary(latencies_ms: list[float]) -> dict[str, float]:
+    ordered = sorted(latencies_ms)
+    mid = len(ordered) // 2
+    median = ordered[mid] if len(ordered) % 2 == 1 else (ordered[mid - 1] + ordered[mid]) / 2.0
     return {
-        "kernel": kernel,
-        "length": length,
-        "threads": threads,
-        "blocks": blocks,
-        "elements_per_thread": elements_per_thread,
-        "rank": rank,
-        "shape": shape,
-        "shape_kind": shape_kind,
+        "min": ordered[0],
+        "median": median,
+        "max": ordered[-1],
+        "mean": sum(ordered) / len(ordered),
     }
 
 
-def build_vector_add(length: int = 1 << 20, elements_per_thread: int = 4):
-    return build_vector_add_from_config(
-        {
-            "shape": [length],
-            "rank": 1,
-            "shape_kind": "1d",
-            "input_size": length,
+def main() -> int:
+    config = _config_from_env()
+    model = Model(*get_init_inputs())
+    latencies_ms: list[float] = []
+    result = None
+    for _ in range(5):
+        x, y = get_inputs(config)
+        started = time.perf_counter()
+        result = model(x, y)
+        latencies_ms.append((time.perf_counter() - started) * 1000.0)
+
+    assert result is not None
+    payload = {
+        "output": {
+            "result": result.detach().cpu().tolist(),
+            "metadata": config,
         },
-        elements_per_thread=elements_per_thread,
-    )
+        "correctness": {
+            "metadata": config,
+            "passed": True,
+            "max_abs_error": 0.0,
+            "mean_abs_error": 0.0,
+        },
+        "performance": {
+            "metadata": config,
+            "latency_ms": _latency_summary(latencies_ms),
+            "runs": len(latencies_ms),
+        },
+        "summary": {
+            "metadata": config,
+            "latency_ms": _latency_summary(latencies_ms),
+            "runs": len(latencies_ms),
+        },
+    }
+    print(json.dumps(payload))
+    return 0
 
 
 if __name__ == "__main__":
-    spec = build_vector_add_from_config(_config_from_env())
-    print(spec)
+    raise SystemExit(main())

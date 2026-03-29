@@ -3,6 +3,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -437,11 +438,14 @@ class CudaExecE2ETest(unittest.TestCase):
                 self.assertIn("status", first)
                 self.assertIn("correctness", first)
                 self.assertIn("performance", first)
+                self.assertIn("artifacts", first)
                 self.assertIn("logs", first)
                 correctness_meta = first["correctness"].get("metadata", {})
                 perf_meta = first["performance"].get("metadata", {})
                 self.assertEqual(correctness_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
                 self.assertEqual(perf_meta.get("input_size"), self._config_map()[first_slug]["input_size"])
+                artifact_paths = list(first["artifacts"].keys())
+                self.assertTrue(any(path.endswith("comparison.json") for path in artifact_paths))
         else:
             self.assertIn("detail", body)
 
@@ -491,6 +495,50 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIsInstance(body["logs"], dict)
         else:
             self.assertIn("detail", body)
+
+
+class ReferenceFixtureContractTest(unittest.TestCase):
+    def test_reference_fixture_runs_from_config_env(self) -> None:
+        try:
+            completed_probe = subprocess.run(
+                [str(VENV_PYTHON), "-c", "import torch; print(torch.__version__)"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertTrue(bool(completed_probe.stdout.strip()))
+        except Exception:
+            self.skipTest("torch is unavailable in cuda_exec runtime environment")
+
+        fixture_path = FIXTURES / "reference" / "vector_add_cutedsl.py"
+        env = os.environ.copy()
+        env.update(
+            {
+                "CUDA_EXEC_PARAM_SHAPE": "[1024, 1024]",
+                "CUDA_EXEC_PARAM_INPUT_SIZE": "1048576",
+                "CUDA_EXEC_PARAM_RANK": "2",
+                "CUDA_EXEC_PARAM_SHAPE_KIND": "2d",
+            }
+        )
+        completed = subprocess.run(
+            [str(VENV_PYTHON), str(fixture_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertIn("output", payload)
+        self.assertIn("correctness", payload)
+        self.assertIn("performance", payload)
+        self.assertIn("summary", payload)
+        self.assertEqual(payload["output"]["metadata"]["shape"], [1024, 1024])
+        self.assertEqual(payload["correctness"]["metadata"]["rank"], 2)
+        self.assertEqual(payload["correctness"]["metadata"]["shape_kind"], "2d")
+        self.assertEqual(payload["correctness"]["metadata"]["input_size"], 1048576)
+        self.assertEqual(payload["correctness"]["passed"], True)
+        self.assertIn("latency_ms", payload["performance"])
+        self.assertIn("latency_ms", payload["summary"])
 
 
 class CudaExecIsolationTest(unittest.TestCase):

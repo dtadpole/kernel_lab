@@ -24,10 +24,10 @@ from cuda_exec.tasks import _config_env, _primary_artifact_from_manifest, _slugi
 
 
 def _load_reference_entry(reference_root: Path) -> Path:
-    candidates = sorted(reference_root.rglob("*.py"))
+    candidates = sorted(reference_root.rglob("reference.py"))
     if len(candidates) != 1:
         raise RuntimeError(
-            f"reference execution currently requires exactly one Python file under {reference_root}; found {len(candidates)}"
+            f"reference execution requires exactly one reference.py under {reference_root}; found {len(candidates)}"
         )
     return candidates[0]
 

@@ -46,7 +46,7 @@ The service enforces a strict stage order per turn: **compile -> evaluate -> pro
 - **`runner.py`** — Runtime layout and subprocess execution. Owns the four-directory turn structure (`workspace/`, `artifacts/`, `logs/`, `state/`), path resolution, file capture for responses, and the `CUDA_EXEC_ROOT` override mechanism.
 - **`tasks.py`** — Orchestration logic for each stage. Enforces workflow rules (compile-once, compile-before-evaluate), writes manifests, invokes shell/Python scripts, and assembles structured results with correctness/performance summaries.
 - **`scripts/compile.sh`** — 5-step CUDA compile pipeline: PTX generation, ptxas assembly, resource usage dump, SASS dump via nvdisasm, and binary linking.
-- **`scripts/evaluate.py`** — Comparison runner. Loads reference Python module (must export `Model(nn.Module)`, `get_inputs(config)`, `get_init_inputs()`), runs the generated compiled binary, compares outputs.
+- **`scripts/evaluate.py`** — Comparison runner aligned with `kbEvalCli.py`. CUDA event timing, `allclose` verification (atol/rtol=1e-02), multi-trial correctness (3 trials, seed rotation), warmup=5, timing trials=10, per-GPU device lock, SIGALRM watchdog, GPU cleanup. Loads reference Python module (must export `Model(nn.Module)`, `get_inputs(config)`, `get_init_inputs()`), runs the generated compiled binary, compares outputs.
 - **`scripts/profile.py`** — Profile runner supporting three modes (`generated_only`, `reference_only`, `dual`) under the `comparison_runtime` backend.
 - **`scripts/profile.sh`** — Nsight Compute (`ncu`) capture wrapper, scoped to `generated_only` mode only.
 
@@ -71,6 +71,7 @@ Override with `CUDA_EXEC_ROOT` env var for tests/isolation.
 - **`profiler_backend="ncu"`** is a parallel path to `comparison_runtime`, intentionally limited to `generated_only` mode.
 - **Bearer token authentication** gates all endpoints except `/healthz`. Key file at `~/.keys/cuda_exec.key`, overridable via `CUDA_EXEC_KEY_PATH` env var. Service refuses to start without a valid key.
 - **Fixed entry file names** — reference entry must be `reference.py`, generated entry must be `generated.cu`. Additional helper files may use any name.
+- **Evaluate pipeline aligned with kbEvalCli.py** — CUDA event timing, `allclose` with atol/rtol=1e-02, multi-trial correctness (3 trials with seed rotation), warmup=5, timing trials=10. System-level: per-GPU `fcntl` device lock, `signal.alarm` watchdog, GPU cleanup in `finally`. Only intentional divergence: generated side runs as compiled binary subprocess (not in-process Python).
 
 ### DESIGN.md
 

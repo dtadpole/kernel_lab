@@ -229,36 +229,36 @@ FA4-style example:
 
 ## 6. Evaluate contract alignment notes (`cuda_exec` vs `/home/centos/triton-ag` kbEval)
 
-Current `cuda_exec` evaluate/reference contract deliberately overlaps with the older `/home/centos/triton-ag` kbEval shape, but they are not yet identical.
+`cuda_exec/scripts/evaluate.py` is aligned with `/home/centos/triton-ag/kbEvalCli.py` across timing, verification, run parameters, and system-level behavior. The one intentional divergence is execution mode: `cuda_exec` runs the generated side as a compiled CUDA binary subprocess, while kbEvalCli runs both sides in-process.
 
-Shared requirements already aligned:
+### Aligned areas
 
-- reference code is Python
-- reference code exports `Model`
-- `Model` must be a subclass of `torch.nn.Module`
-- reference code exports `get_init_inputs()`
-- generated/reference comparison remains a first-class evaluate concept
+**Timing** — CUDA event timing via `torch.cuda.Event(enable_timing=True)` with `start_event.record()` / `end_event.record()` / `torch.cuda.synchronize()` / `elapsed_time()`. Matches `time_execution_with_cuda_event()` in kbEvalUtil.py.
 
-Current contract gaps:
+**Verification** — `allclose` tolerance with `atol=1e-02`, `rtol=1e-02` matching `torch.allclose` parameters in kbEvalCli. Shape check via nested-list structure inference before value comparison. Multi-trial correctness with `num_correctness_trials=3` and deterministic seed rotation, matching kbEvalCli's `num_verify_trials=3`. Reports `max_diff`, `avg_diff`, `output_shape`, `trials` (e.g. `"2/3"`), `total_trials`, `passed_trials`.
 
-1. **Generated-side interface differs**
-   - `/home/centos/triton-ag/kbEvalTest/eval.py` expects generated code to define `ModelNew(nn.Module)` in Python and evaluates both sides inside one Python runtime.
-   - `/home/centos/kernel_lab/cuda_exec/scripts/evaluate.py` currently evaluates the generated side through the compiled primary artifact, not through a Python `ModelNew` contract.
+**Run parameters** — warmup=5 (`num_warmups`), timing trials=10 (`num_perf_trials`), correctness trials=3 (`num_correctness_trials`). Latency stats include `mean`, `std`, `min`, `max`, `median`, matching kbEvalUtil's `get_timing_stats`. Performance metadata includes `hardware` (via `torch.cuda.get_device_name`) and `device`.
 
-2. **`get_inputs` signature differs**
-   - kbEval examples use `get_inputs()` with no explicit config argument.
-   - `cuda_exec` uses config-driven evaluation and requires `get_inputs(config)` so the service and CLI can fan out over slug-keyed runtime configs.
+**Configuration** — `_set_seed(seed)` calling `torch.manual_seed(seed)` + `torch.cuda.manual_seed(seed)` before reference execution. All reference execution wrapped in `torch.no_grad()`. Explicit `.cuda(device=device)` placement on `init_inputs`, `model`, and `inputs`.
 
-3. **Reference contract strictness was historically inconsistent**
-   - kbEval utility code already enforces `Model`/`ModelNew` as `nn.Module` subclasses.
-   - `cuda_exec` now matches that for the reference side in `scripts/evaluate.py`, but service/docs/tests must continue to keep that rule explicit.
+**System level** — `fcntl.flock(LOCK_EX | LOCK_NB)` per-GPU device lock at `~/.cuda_exec/.lock_cuda_{device_index}`. `signal.alarm(timeout)` watchdog with SIGALRM handler. GPU cleanup via `torch.cuda.empty_cache()` + `torch.cuda.reset_peak_memory_stats(device)` + `torch.cuda.synchronize(device)` in `finally` block.
 
-Long-term direction for `cuda_exec`:
+### Remaining intentional divergences
+
+1. **Generated-side interface**
+   - kbEvalCli expects generated code to define `ModelNew(nn.Module)` in Python; both sides run in one Python runtime.
+   - `cuda_exec` evaluates the generated side through the compiled primary artifact (subprocess). This is `cuda_exec`'s core value.
+
+2. **`get_inputs` signature**
+   - kbEval uses `get_inputs()` with no explicit config argument.
+   - `cuda_exec` uses `get_inputs(config)` for config-driven evaluation across slug-keyed runtime configs.
+
+### Long-term direction
 
 - keep the reference side explicitly Python + `torch.nn.Module`
 - keep config-driven evaluation as the service-level transport shape
-- keep `evaluate.py` and the HTTP `/evaluate` flow behaviorally aligned
-- borrow the kbEval module-contract discipline for the reference side without regressing the compiled-artifact generated-side path that `cuda_exec` needs
+- keep `evaluate.py` and the HTTP `/evaluate` flow behaviorally aligned with kbEvalCli
+- maintain the compiled-artifact generated-side path that `cuda_exec` needs
 
 ## 7. Runtime config convention
 
@@ -491,11 +491,14 @@ Each evaluate config output contains:
 - absolute variance
 - max / mean relative error
 - relative variance
+- output shape (string representation)
+- trials summary (e.g. `"3/3"`)
+- total_trials / passed_trials counts
 
 `performance` should carry structured timing information such as:
 
-- min / median / max / mean latency
-- run count
+- min / median / max / mean / std latency (all in ms, CUDA event timing)
+- run count (default 10 measurement runs after 5 warmup)
 
 ### Profile response
 
@@ -871,7 +874,11 @@ Response shape per config:
         "abs_variance": 2.5e-14,
         "max_rel_error": 2.4e-5,
         "mean_rel_error": 8.7e-7,
-        "rel_variance": 1.3e-11
+        "rel_variance": 1.3e-11,
+        "output_shape": "[1024, 1024]",
+        "trials": "3/3",
+        "total_trials": 3,
+        "passed_trials": 3
       },
       "performance": {
         "metadata": {},
@@ -879,9 +886,10 @@ Response shape per config:
           "min": 0.82,
           "median": 0.89,
           "max": 0.97,
-          "mean": 0.89
+          "mean": 0.89,
+          "std": 0.04
         },
-        "runs": 100
+        "runs": 10
       },
       "logs": {
         "logs/evaluate.attempt_001.config_tensor2d-1024x1024.stdout": {

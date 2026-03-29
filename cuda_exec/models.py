@@ -77,6 +77,11 @@ class EvaluateRequest(RequestBase):
 
     The service owns the transport shape of config. The kernel owns the semantic
     shape of config.
+
+    Reference-side contract note:
+    - reference Python code is expected to export `Model(torch.nn.Module)`
+    - reference Python code is expected to export `get_init_inputs()`
+    - reference Python code is expected to export `get_inputs(config)`
     """
 
     configs: Dict[str, Dict[str, Any]] = Field(

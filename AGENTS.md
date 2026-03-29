@@ -83,6 +83,8 @@ All public request/response file names should use relative paths.
 - runtime configs are passed as `configs: Dict[config_slug, Dict[str, Any]]`
 - the same config slug is the stable identity on both request and response
 - the config body is intentionally kernel-specific and flexible; do not overfit it to one workload family
+- reference Python code for `evaluate` / `profile` should follow the explicit module contract: `Model(torch.nn.Module)`, `get_init_inputs()`, `get_inputs(config)`
+- `cuda_exec` intentionally borrows that kbEval-style reference contract even though the generated side still runs through the compiled artifact path rather than a Python `ModelNew` class
 
 #### Public response boundary
 

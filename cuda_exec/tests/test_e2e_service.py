@@ -756,6 +756,13 @@ class CudaExecE2ETest(unittest.TestCase):
 
 
 class ReferenceFixtureContractTest(unittest.TestCase):
+    def test_reference_fixture_declares_explicit_module_contract(self) -> None:
+        fixture_path = FIXTURES / "reference" / "vector_add_cutedsl.py"
+        source = fixture_path.read_text(encoding="utf-8")
+        self.assertIn("class Model(nn.Module)", source)
+        self.assertIn("def get_init_inputs()", source)
+        self.assertIn("def get_inputs(config", source)
+
     def test_reference_fixture_runs_from_config_env(self) -> None:
         try:
             completed_probe = subprocess.run(

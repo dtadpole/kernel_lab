@@ -517,11 +517,20 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIn("reference", first)
             self.assertIn("generated", first)
             self.assertIn("artifacts", first)
+            self.assertIn("logs", first)
             self.assertEqual(first["generated"], {})
             self.assertIn("summary", first["reference"])
             self.assertIn("output", first["reference"])
             self.assertEqual(first["summary"]["metadata"]["rank"], self._config_map()[first_slug]["rank"])
             self.assertEqual(first["reference"]["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
+            artifact_paths = list(first["artifacts"].keys())
+            self.assertTrue(any(path.endswith(f"config_{first_slug}.summary.json") for path in artifact_paths))
+            expected_log_prefix = f"logs/profile.attempt_{body['attempt']:03d}.config_{first_slug}"
+            for suffix in ["log", "stdout", "stderr"]:
+                key = f"{expected_log_prefix}.{suffix}"
+                self.assertIn(key, first["logs"])
+                self.assertTrue(first["logs"][key]["inline"])
+            self.assertIn('"mode": "reference_only"', first["logs"][f"{expected_log_prefix}.stdout"]["content"])
         else:
             self.assertIn("detail", body)
 
@@ -546,11 +555,20 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIn("reference", first)
             self.assertIn("generated", first)
             self.assertIn("artifacts", first)
+            self.assertIn("logs", first)
             self.assertEqual(first["reference"], {})
             self.assertIn("summary", first["generated"])
             self.assertIn("output", first["generated"])
             self.assertEqual(first["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
             self.assertEqual(first["generated"]["summary"]["metadata"]["input_size"], self._config_map()[first_slug]["input_size"])
+            artifact_paths = list(first["artifacts"].keys())
+            self.assertTrue(any(path.endswith(f"config_{first_slug}.summary.json") for path in artifact_paths))
+            expected_log_prefix = f"logs/profile.attempt_{body['attempt']:03d}.config_{first_slug}"
+            for suffix in ["log", "stdout", "stderr"]:
+                key = f"{expected_log_prefix}.{suffix}"
+                self.assertIn(key, first["logs"])
+                self.assertTrue(first["logs"][key]["inline"])
+            self.assertIn('"mode": "generated_only"', first["logs"][f"{expected_log_prefix}.stdout"]["content"])
         else:
             self.assertIn("detail", body)
 

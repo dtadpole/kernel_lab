@@ -96,11 +96,19 @@ class ProfileRequest(RequestBase):
     - `generated_only`: profile the compiled/generated side only
     - `reference_only`: profile the reference module side only
     - `dual`: run both sides and include comparison metadata
+
+    `profiler_backend` selects the implementation path:
+    - `comparison_runtime`: current behavior-first runtime
+    - `ncu`: generated-side Nsight Compute capture path
     """
 
     mode: Literal["reference_only", "generated_only", "dual"] = Field(
         default="generated_only",
         description="Which side(s) to profile for each config",
+    )
+    profiler_backend: Literal["comparison_runtime", "ncu"] = Field(
+        default="comparison_runtime",
+        description="Profile implementation backend",
     )
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,

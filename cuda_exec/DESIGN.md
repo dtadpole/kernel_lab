@@ -195,14 +195,17 @@ For `evaluate`, the current runtime shape is comparison-first:
 - persist one kept comparison artifact per config under `artifacts/evaluate.attempt_###.config_<slug>.comparison.json`
 - return per-config `reference`, `generated`, `correctness`, `performance`, `artifacts`, and `logs`
 
-For `profile`, the current runtime shape is mode-driven:
+For `profile`, the runtime shape is mode-driven and backend-aware:
 
 - `generated_only`: run only the compiled/generated side and summarize generated performance
 - `reference_only`: run only the reference module side and summarize reference performance
 - `dual`: run both sides and return summary metadata that includes comparison fields such as reference/generated median latency and speedup
+- `profiler_backend="comparison_runtime"` keeps the existing behavior-first runtime
+- `profiler_backend="ncu"` provides a parallel Nsight Compute capture path for `generated_only` requests
 - persist one kept structured profile artifact per config under `artifacts/profile.attempt_###.config_<slug>.summary.json`
-- return per-config `summary`, `reference`, `generated`, `artifacts`, and `logs`
-- integration coverage now explicitly exercises `dual`, `reference_only`, and `generated_only`
+- when `profiler_backend="ncu"` succeeds, also keep an NCU report under `artifacts/profile.attempt_###.config_<slug>.ncu.ncu-rep`
+- return per-config `summary`, `reference`, `generated`, `reference_summary`, `generated_summary`, `artifacts`, and `logs`
+- integration coverage now explicitly exercises `dual`, `reference_only`, `generated_only`, and the `ncu` backend path
 
 Example config fields:
 
@@ -735,6 +738,11 @@ Profile supports an explicit mode:
 - `generated_only`
 - `dual`
 
+Profile also supports an explicit backend:
+
+- `comparison_runtime` (default)
+- `ncu` (currently `generated_only` only)
+
 ```json
 {
   "metadata": {
@@ -746,6 +754,7 @@ Profile supports an explicit mode:
   },
   "timeout_seconds": 180,
   "mode": "dual",
+  "profiler_backend": "comparison_runtime",
   "configs": {
     "shape-1d-1048576": {
       "shape_kind": "1d",

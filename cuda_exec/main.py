@@ -239,6 +239,7 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
         mode=request.mode,
+        profiler_backend=request.profiler_backend,
     )
     attempt = result["attempt"]
     items = {

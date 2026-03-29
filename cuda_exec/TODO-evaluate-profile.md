@@ -31,8 +31,8 @@
 
 ## Remaining real follow-ups
 
-- [ ] Decide whether `profile` should keep the current behavior-first comparison runtime long-term,
-      or also expose a separate NCU-backed profiler path in parallel.
+- [x] `profile` now keeps the current behavior-first comparison runtime and also exposes
+      a parallel `ncu` backend for `generated_only` requests via `profiler_backend="ncu"`.
 
 - [x] Profile summaries now return richer structured side-by-side fields
       for `reference` and `generated` directly in the public response model via

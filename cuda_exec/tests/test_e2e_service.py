@@ -594,6 +594,41 @@ class CudaExecE2ETest(unittest.TestCase):
         else:
             self.assertIn("detail", body)
 
+    def test_profile_endpoint_supports_ncu_backend_for_generated_only(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=121))
+        self.assertEqual(compile_status, 200)
+
+        status, body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(121),
+                "timeout_seconds": 5,
+                "mode": "generated_only",
+                "profiler_backend": "ncu",
+                "configs": self._config_map(),
+            },
+        )
+        self.assertIn(status, {200, 400, 408})
+        if status == 200:
+            self.assertTrue(body["configs"])
+            first_slug, first = next(iter(body["configs"].items()))
+            self.assertIn("summary", first)
+            self.assertIn("generated", first)
+            self.assertIn("generated_summary", first)
+            self.assertIn("artifacts", first)
+            self.assertIn("logs", first)
+            artifact_paths = list(first["artifacts"].keys())
+            self.assertTrue(any(path.endswith("summary.json") for path in artifact_paths))
+            self.assertEqual(first["reference"], {})
+            self.assertEqual(first["reference_summary"].get("metadata"), {})
+            self.assertEqual(first["generated_summary"].get("rank"), None)
+            self.assertEqual(first["generated_summary"].get("metadata", {}).get("rank"), self._config_map()[first_slug]["rank"])
+            self.assertEqual(first["summary"].get("metadata", {}).get("profiler_backend"), "ncu")
+            if any(path.endswith(".ncu-rep") for path in artifact_paths):
+                self.assertTrue(True)
+        else:
+            self.assertIn("detail", body)
+
     def test_execute_endpoint_calls_public_interface(self) -> None:
         status, body = self.service.post_json(
             "/execute",

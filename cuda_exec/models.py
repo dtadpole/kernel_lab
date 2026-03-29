@@ -306,11 +306,14 @@ class ProfileConfigOutput(BaseModel):
     """Public profile output for one config slug.
 
     `summary` carries structured performance/profile information, while
-    `artifacts` and `logs` carry the raw retained files.
+    `reference` / `generated` expose the side-specific structured payloads
+    and `artifacts` / `logs` carry the raw retained files.
     """
 
     status: Literal["ok", "error", "timeout", "skipped"]
     summary: PerformanceSummary = Field(default_factory=PerformanceSummary)
+    reference: Dict[str, Any] = Field(default_factory=dict)
+    generated: Dict[str, Any] = Field(default_factory=dict)
     artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed kept profiling outputs for this config",

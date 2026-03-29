@@ -484,6 +484,60 @@ class CudaExecE2ETest(unittest.TestCase):
         else:
             self.assertIn("detail", body)
 
+    def test_profile_endpoint_supports_reference_only_mode(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=119))
+        self.assertEqual(compile_status, 200)
+
+        status, body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(119),
+                "timeout_seconds": 5,
+                "mode": "reference_only",
+                "configs": self._config_map(),
+            },
+        )
+        self.assertIn(status, {200, 400, 408})
+        if status == 200:
+            self.assertTrue(body["configs"])
+            first_slug, first = next(iter(body["configs"].items()))
+            self.assertIn("summary", first)
+            self.assertIn("reference", first)
+            self.assertIn("generated", first)
+            self.assertIn("artifacts", first)
+            self.assertEqual(first["generated"], {})
+            self.assertIn("summary", first["reference"])
+            self.assertEqual(first["summary"]["metadata"]["rank"], self._config_map()[first_slug]["rank"])
+        else:
+            self.assertIn("detail", body)
+
+    def test_profile_endpoint_supports_generated_only_mode(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=120))
+        self.assertEqual(compile_status, 200)
+
+        status, body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(120),
+                "timeout_seconds": 5,
+                "mode": "generated_only",
+                "configs": self._config_map(),
+            },
+        )
+        self.assertIn(status, {200, 400, 408})
+        if status == 200:
+            self.assertTrue(body["configs"])
+            first_slug, first = next(iter(body["configs"].items()))
+            self.assertIn("summary", first)
+            self.assertIn("reference", first)
+            self.assertIn("generated", first)
+            self.assertIn("artifacts", first)
+            self.assertEqual(first["reference"], {})
+            self.assertIn("summary", first["generated"])
+            self.assertEqual(first["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
+        else:
+            self.assertIn("detail", body)
+
     def test_execute_endpoint_calls_public_interface(self) -> None:
         status, body = self.service.post_json(
             "/execute",

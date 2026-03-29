@@ -243,6 +243,8 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         config_slug: ProfileConfigOutput(
             status=item["status"],
             summary=item.get("summary", {}),
+            reference=item.get("reference") or {},
+            generated=item.get("generated") or {},
             artifacts=_capture_public_files(
                 result["workspace_path"],
                 [artifact["path"] for artifact in item.get("artifacts", [])],

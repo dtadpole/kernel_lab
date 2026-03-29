@@ -38,5 +38,5 @@
    for `reference` and `generated` directly in the public response model, instead of only
    the top-level `summary` plus kept artifact payload.
 
-3. If needed, add dedicated tests for `reference_only` and `generated_only` profile modes
-   instead of only the current `dual`-mode e2e coverage.
+3. Dedicated tests for `reference_only` and `generated_only` profile modes are now in place.
+   Next optional tightening would be side-specific artifact/log assertions beyond the current response-shape coverage.

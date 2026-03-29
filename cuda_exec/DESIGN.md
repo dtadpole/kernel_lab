@@ -201,7 +201,8 @@ For `profile`, the current runtime shape is mode-driven:
 - `reference_only`: run only the reference module side and summarize reference performance
 - `dual`: run both sides and return summary metadata that includes comparison fields such as reference/generated median latency and speedup
 - persist one kept structured profile artifact per config under `artifacts/profile.attempt_###.config_<slug>.summary.json`
-- return per-config `summary`, `artifacts`, and `logs`
+- return per-config `summary`, `reference`, `generated`, `artifacts`, and `logs`
+- integration coverage now explicitly exercises `dual`, `reference_only`, and `generated_only`
 
 Example config fields:
 

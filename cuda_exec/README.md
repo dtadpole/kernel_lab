@@ -48,3 +48,8 @@ Current profile note:
 - `profiler_backend="comparison_runtime"` is the default behavior-first runtime
 - `profiler_backend="ncu"` is available in parallel and is intentionally scoped to `mode="generated_only"`
 - long-term design: `ncu` stays a generated-side capture backend; cross-side comparison remains under `comparison_runtime`
+
+Current evaluate alignment note:
+
+- the reference side intentionally follows a kbEval-like Python module contract: `Model(torch.nn.Module)`, `get_init_inputs()`, `get_inputs(config)`
+- unlike the older `/home/centos/triton-ag` kbEval Python-only flow, `cuda_exec` still evaluates the generated side via the compiled primary artifact rather than a Python `ModelNew` class

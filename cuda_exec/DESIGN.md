@@ -224,7 +224,40 @@ FA4-style example:
 
 ---
 
-## 6. Runtime config convention
+## 6. Evaluate contract alignment notes (`cuda_exec` vs `/home/centos/triton-ag` kbEval)
+
+Current `cuda_exec` evaluate/reference contract deliberately overlaps with the older `/home/centos/triton-ag` kbEval shape, but they are not yet identical.
+
+Shared requirements already aligned:
+
+- reference code is Python
+- reference code exports `Model`
+- `Model` must be a subclass of `torch.nn.Module`
+- reference code exports `get_init_inputs()`
+- generated/reference comparison remains a first-class evaluate concept
+
+Current contract gaps:
+
+1. **Generated-side interface differs**
+   - `/home/centos/triton-ag/kbEvalTest/eval.py` expects generated code to define `ModelNew(nn.Module)` in Python and evaluates both sides inside one Python runtime.
+   - `/home/centos/kernel_lab/cuda_exec/scripts/evaluate.py` currently evaluates the generated side through the compiled primary artifact, not through a Python `ModelNew` contract.
+
+2. **`get_inputs` signature differs**
+   - kbEval examples use `get_inputs()` with no explicit config argument.
+   - `cuda_exec` uses config-driven evaluation and requires `get_inputs(config)` so the service and CLI can fan out over slug-keyed runtime configs.
+
+3. **Reference contract strictness was historically inconsistent**
+   - kbEval utility code already enforces `Model`/`ModelNew` as `nn.Module` subclasses.
+   - `cuda_exec` now matches that for the reference side in `scripts/evaluate.py`, but service/docs/tests must continue to keep that rule explicit.
+
+Long-term direction for `cuda_exec`:
+
+- keep the reference side explicitly Python + `torch.nn.Module`
+- keep config-driven evaluation as the service-level transport shape
+- keep `evaluate.py` and the HTTP `/evaluate` flow behaviorally aligned
+- borrow the kbEval module-contract discipline for the reference side without regressing the compiled-artifact generated-side path that `cuda_exec` needs
+
+## 7. Runtime config convention
 
 `evaluate` and `profile` accept slug-keyed config maps:
 

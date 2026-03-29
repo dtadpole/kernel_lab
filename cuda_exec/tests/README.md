@@ -13,7 +13,7 @@ These tests should exercise the public service interface by:
 
 Current fixture direction:
 
-- use one original CuTeDSL-style vector-add source and one generated inline-PTX CUDA source
+- use one reference CuTeDSL-style vector-add source and one generated inline-PTX CUDA source
 - keep evaluate/profile config sets in fixture files rather than embedding them directly in the main integration-test code
 - current config fixture: `tests/fixtures/configs/vector_add_shapes.json`
 - drive evaluate/profile with 4–6 slug-keyed configs

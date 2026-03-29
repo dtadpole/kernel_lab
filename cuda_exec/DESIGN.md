@@ -89,7 +89,7 @@ Common subpaths inside `workspace/`:
 ```text
 workspace/
   inputs/
-    original/
+    reference/
     generated/
 ```
 
@@ -111,8 +111,9 @@ Rules:
 
 - `compile` must run first for a turn
 - `compile` may run only once per turn
+- do not reuse the same turn to upload a different file set for compile
+- if new reference/generated inputs arrive after compile, start a new turn
 - `evaluate` and `profile` require compile state from the same turn
-- if new code inputs arrive after compile, start a new turn
 - old turns are immutable
 
 ---
@@ -127,16 +128,23 @@ Both of these request fields are:
 
 Specifically:
 
-- `original_files: Dict[str, str]`
+- `reference_files: Dict[str, str]`
 - `generated_files: Dict[str, str]`
 
 Rules:
 
+- `reference_files` must be non-empty
+- `generated_files` must be non-empty
 - keys must be relative paths
 - keys may include folder names
 - keys must not be absolute paths
 - keys must not contain `.` or `..` path traversal segments
 - values are file contents
+- `generated_files` must contain exactly one `.cu` file
+- `generated_files` may also include multiple headers or inline helper files
+- `reference_files` may include `.cu` files, but does not require one
+- if `generated_files` contains zero or multiple `.cu` files, reject the compile request
+- when rejecting multiple generated `.cu` files, the caller-facing guidance should recommend using a generator
 
 Conceptual example:
 
@@ -144,10 +152,10 @@ Conceptual example:
 {
   "metadata": { "...": "..." },
   "generated_files": {
-    "kernels/candidate.cu": "extern \"C\" __global__ void ..."
+    "kernels/generated.cu": "extern \"C\" __global__ void ..."
   },
-  "original_files": {
-    "reference/baseline.cu": "extern \"C\" __global__ void ..."
+  "reference_files": {
+    "reference/reference.cu": "extern \"C\" __global__ void ..."
   }
 }
 ```
@@ -155,7 +163,7 @@ Conceptual example:
 The service writes these inputs under:
 
 ```text
-workspace/inputs/original/<relative_path>
+workspace/inputs/reference/<relative_path>
 workspace/inputs/generated/<relative_path>
 ```
 
@@ -276,13 +284,20 @@ Even though compile runs only once per turn, it still uses `attempt_001` for nam
 
 Kept results:
 
-- compiled binary in `artifacts/`
+- runnable binary in `artifacts/`
+- generated PTX in `artifacts/`
+- ptxas-produced CUBIN in `artifacts/`
+- resource-usage text report in `artifacts/`
+- SASS dump from `nvdisasm` in `artifacts/`
 
 Process output:
 
-- `logs/compile.attempt_001.log`
-- `logs/compile.attempt_001.stdout`
-- `logs/compile.attempt_001.stderr`
+- `logs/compile.attempt_001.nvcc-ptx.stdout`
+- `logs/compile.attempt_001.nvcc-ptx.stderr`
+- `logs/compile.attempt_001.ptxas.stdout`
+- `logs/compile.attempt_001.ptxas.stderr`
+- `logs/compile.attempt_001.resource-usage.stdout`
+- `logs/compile.attempt_001.resource-usage.stderr`
 
 Workflow record:
 
@@ -373,8 +388,25 @@ Return only:
 - `metadata`
 - `all_ok`
 - `attempt`
-- `artifacts: Dict[relative_path, file_payload]`
-- `logs: Dict[relative_path, file_payload]`
+- `artifacts`
+- `tool_outputs`
+
+`artifacts` should be a structured object containing the stage-relevant kept outputs when present, especially:
+
+- `binary`
+- `ptx`
+- `cubin`
+- `resource_usage`
+- `sass.nvdisasm`
+
+These compile artifacts may be returned as path-only file references when inline content is not required.
+
+`tool_outputs` should be a structured object containing the inline stdout/stderr payloads needed by callers, especially:
+
+- `nvcc_ptx.stdout` / `nvcc_ptx.stderr`
+- `ptxas.stdout` / `ptxas.stderr`
+- `resource_usage.stdout` / `resource_usage.stderr`
+- `nvdisasm.stdout` / `nvdisasm.stderr`
 
 ### Evaluate response
 
@@ -520,11 +552,11 @@ To keep agent behavior simple:
     "turn": 3
   },
   "timeout_seconds": 180,
-  "original_files": {
-    "reference/baseline.cu": "extern \"C\" __global__ void baseline() {}"
+  "reference_files": {
+    "reference/reference.cu": "extern \"C\" __global__ void reference() {}"
   },
   "generated_files": {
-    "kernels/candidate.cu": "extern \"C\" __global__ void candidate() {}"
+    "kernels/generated.cu": "extern \"C\" __global__ void generated() {}"
   }
 }
 ```
@@ -543,7 +575,7 @@ To keep agent behavior simple:
   "all_ok": true,
   "attempt": 1,
   "artifacts": {
-    "artifacts/compile.attempt_001.candidate.bin": {
+    "artifacts/compile.attempt_001.generated.bin": {
       "content": "<base64>",
       "encoding": "base64",
       "truncated": false
@@ -568,6 +600,54 @@ To keep agent behavior simple:
   }
 }
 ```
+
+### File read request
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "vector-add",
+    "turn": 3
+  },
+  "path": "artifacts/compile.attempt_001.vector_add_inline_ptx.ptx",
+  "max_bytes": 65536
+}
+```
+
+Response example:
+
+```json
+{
+  "metadata": {
+    "run_tag": "agent_a",
+    "version": "v1",
+    "direction_id": 7,
+    "direction_slug": "vector-add",
+    "turn": 3
+  },
+  "file": {
+    "path": "artifacts/compile.attempt_001.vector_add_inline_ptx.ptx",
+    "inline": true,
+    "content": ".version 8.8\n.target sm_120\n...",
+    "encoding": "utf8",
+    "truncated": false
+  }
+}
+```
+
+Rules:
+
+- use `POST /files/read`
+- `path` must be a relative path under the resolved turn root
+- `path` must stay within one of: `artifacts/`, `logs/`, `state/`
+- do not allow absolute paths or `..` traversal
+- return the requested file as an inline `FilePayload`
+- if `max_bytes` is provided, return at most that many bytes in `content`
+- when `max_bytes` causes truncation, return `truncated = true`
+- if the file does not exist for that turn/path, return `404`
 
 ### Evaluate request
 

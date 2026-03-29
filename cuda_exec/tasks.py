@@ -51,27 +51,42 @@ def _write_input_files(files: Dict[str, str], destination_root: Path) -> List[Pa
     return written
 
 
-def _pick_single_cuda_source(generated: List[Path], original: List[Path]) -> Path:
+def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Path:
+    if not reference:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "compile requires non-empty reference_files and generated_files. "
+                "Do not compile with only generated files; upload both file groups for the turn."
+            ),
+        )
+    if not generated:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "compile requires non-empty reference_files and generated_files. "
+                "Do not compile with only reference files; upload both file groups for the turn."
+            ),
+        )
+
     generated_cu = [path for path in generated if path.suffix == ".cu"]
-    original_cu = [path for path in original if path.suffix == ".cu"]
 
     if len(generated_cu) == 1:
         return generated_cu[0]
     if len(generated_cu) > 1:
         raise HTTPException(
             status_code=400,
-            detail="compile expects at most one generated .cu file in this hardened flow",
-        )
-    if len(original_cu) == 1:
-        return original_cu[0]
-    if len(original_cu) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="compile expects at most one original .cu file in this hardened flow",
+            detail=(
+                "generated_files must contain exactly one .cu file. We recommend a generator. "
+                "Include a single generated .cu file for the optimized kernel, plus any number of headers or inline helper files if needed."
+            ),
         )
     raise HTTPException(
         status_code=400,
-        detail="compile could not find a single .cu source file in generated_files or original_files",
+        detail=(
+            "generated_files must contain exactly one .cu file. We recommend a generator. "
+            "Include one generated .cu file for compile; reference_files may include supporting sources, headers, or non-.cu inputs."
+        ),
     )
 
 
@@ -137,8 +152,12 @@ def _stage_log_rel(stage: str, attempt: int, config_slug: str | None = None) -> 
     return base + ".log"
 
 
-def _compile_artifact_rel(attempt: int, stem: str) -> str:
-    return f"artifacts/compile.{_attempt_tag(attempt)}.{_slugify(stem)}.bin"
+def _compile_artifact_rel(attempt: int, stem: str, suffix: str) -> str:
+    return f"artifacts/compile.{_attempt_tag(attempt)}.{_slugify(stem)}.{suffix}"
+
+
+def _compile_log_rel(attempt: int, suffix: str) -> str:
+    return f"logs/compile.{_attempt_tag(attempt)}.{suffix}.log"
 
 
 def _config_artifact_rel(stage: str, attempt: int, config_slug: str, suffix: str) -> str:
@@ -451,7 +470,7 @@ def run_compile_task(
     *,
     metadata,
     timeout_seconds: int,
-    original_files: Dict[str, str],
+    reference_files: Dict[str, str],
     generated_files: Dict[str, str],
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
@@ -464,7 +483,7 @@ def run_compile_task(
             status_code=409,
             detail=(
                 "Workflow violation: compile may run only once per turn. "
-                "If you have new files or want to retry with different inputs, start a new turn."
+                "Do not reuse the same turn to upload another file set. If you have new files or want a different compile input set, start a new turn and compile there."
             ),
         )
 
@@ -481,11 +500,15 @@ def run_compile_task(
 
     started = time.perf_counter()
     try:
-        copied_original = _write_input_files(original_files, workspace_path / "inputs" / "original")
+        copied_reference = _write_input_files(reference_files, workspace_path / "inputs" / "reference")
         copied_generated = _write_input_files(generated_files, workspace_path / "inputs" / "generated")
-        source = _pick_single_cuda_source(copied_generated, copied_original)
+        source = _pick_single_cuda_source(copied_generated, copied_reference)
 
-        binary_rel = _compile_artifact_rel(attempt, source.stem)
+        binary_rel = _compile_artifact_rel(attempt, source.stem, "bin")
+        ptx_rel = _compile_artifact_rel(attempt, source.stem, "ptx")
+        cubin_rel = _compile_artifact_rel(attempt, source.stem, "cubin")
+        resource_usage_rel = _compile_artifact_rel(attempt, source.stem, "resource-usage.txt")
+        sass_nvdisasm_rel = _compile_artifact_rel(attempt, source.stem, "nvdisasm.sass")
         binary_output = Path(workspace["root_path"]) / binary_rel
         command = [
             "/usr/bin/env",
@@ -503,6 +526,12 @@ def run_compile_task(
             env={},
             timeout_seconds=timeout_seconds,
             log_file=_stage_log_rel("compile", attempt),
+            return_files=[
+                ptx_rel,
+                cubin_rel,
+                resource_usage_rel,
+                sass_nvdisasm_rel,
+            ],
         )
 
         artifacts = [
@@ -510,7 +539,31 @@ def run_compile_task(
                 artifact_id=DEFAULT_COMPILE_ARTIFACT_ID,
                 kind="binary",
                 path=binary_rel,
-                description="Default executable artifact produced by compile",
+                description="Primary runnable binary artifact produced by compile",
+            ),
+            _build_artifact(
+                artifact_id="compile:primary_ptx",
+                kind="ptx",
+                path=ptx_rel,
+                description="Primary PTX artifact produced by the compile front-end",
+            ),
+            _build_artifact(
+                artifact_id="compile:primary_cubin",
+                kind="cubin",
+                path=cubin_rel,
+                description="Primary CUBIN artifact produced by ptxas",
+            ),
+            _build_artifact(
+                artifact_id="compile:resource_usage",
+                kind="report",
+                path=resource_usage_rel,
+                description="Resource-usage report extracted from the compiled CUBIN",
+            ),
+            _build_artifact(
+                artifact_id="compile:sass_nvdisasm",
+                kind="sass",
+                path=sass_nvdisasm_rel,
+                description="SASS dump generated by nvdisasm from the compiled CUBIN",
             ),
             _build_artifact(
                 artifact_id="compile:state",

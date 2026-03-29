@@ -167,8 +167,8 @@ class CudaExecE2ETest(unittest.TestCase):
         return {
             "metadata": self._metadata(turn),
             "timeout_seconds": 20,
-            "original_files": {
-                "dsl/vector_add_cutedsl.py": (FIXTURES / "original" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+            "reference_files": {
+                "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
             },
             "generated_files": {
                 "cuda/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
@@ -190,8 +190,230 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertIn("metadata", body)
         self.assertIn("all_ok", body)
         self.assertIn("attempt", body)
-        self.assertIsInstance(body["artifacts"], dict)
-        self.assertIsInstance(body["logs"], dict)
+        self.assertIn("artifacts", body)
+        self.assertIn("tool_outputs", body)
+
+        artifacts = body["artifacts"]
+        self.assertTrue(artifacts["binary"]["path"].endswith(".bin"))
+        self.assertTrue(artifacts["ptx"]["path"].endswith(".ptx"))
+        self.assertTrue(artifacts["cubin"]["path"].endswith(".cubin"))
+        self.assertTrue(artifacts["resource_usage"]["path"].endswith(".resource-usage.txt"))
+        self.assertTrue(artifacts["sass"]["nvdisasm"]["path"].endswith(".nvdisasm.sass"))
+
+        for payload in [
+            artifacts["binary"],
+            artifacts["ptx"],
+            artifacts["cubin"],
+            artifacts["resource_usage"],
+            artifacts["sass"]["nvdisasm"],
+        ]:
+            self.assertEqual(payload["inline"], False)
+            self.assertIsNone(payload.get("content"))
+            self.assertIsNone(payload.get("encoding"))
+
+        tool_outputs = body["tool_outputs"]
+        for pair in [
+            tool_outputs["nvcc_ptx"],
+            tool_outputs["ptxas"],
+            tool_outputs["resource_usage"],
+            tool_outputs["nvdisasm"],
+        ]:
+            self.assertIn("stdout", pair)
+            self.assertIn("stderr", pair)
+            self.assertEqual(pair["stdout"]["inline"], True)
+            self.assertEqual(pair["stderr"]["inline"], True)
+            self.assertIn("content", pair["stdout"])
+            self.assertIn("content", pair["stderr"])
+            self.assertEqual(pair["stdout"]["encoding"], "utf8")
+            self.assertEqual(pair["stderr"]["encoding"], "utf8")
+
+    def test_compile_requires_both_reference_and_generated_file_groups(self) -> None:
+        only_generated_status, only_generated_body = self.service.post_json(
+            "/compile",
+            {
+                "metadata": self._metadata(106),
+                "timeout_seconds": 20,
+                "reference_files": {},
+                "generated_files": {
+                    "cuda/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                },
+            },
+        )
+        self.assertEqual(only_generated_status, 400)
+        self.assertIn("detail", only_generated_body)
+        self.assertIn("requires non-empty reference_files and generated_files", only_generated_body["detail"])
+        self.assertIn("Do not compile with only generated files", only_generated_body["detail"])
+
+        only_reference_status, only_reference_body = self.service.post_json(
+            "/compile",
+            {
+                "metadata": self._metadata(107),
+                "timeout_seconds": 20,
+                "reference_files": {
+                    "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                },
+                "generated_files": {},
+            },
+        )
+        self.assertEqual(only_reference_status, 400)
+        self.assertIn("detail", only_reference_body)
+        self.assertIn("requires non-empty reference_files and generated_files", only_reference_body["detail"])
+        self.assertIn("Do not compile with only reference files", only_reference_body["detail"])
+
+    def test_compile_requires_exactly_one_generated_cu_file(self) -> None:
+        payload = self._compile_payload(turn=108)
+        payload["generated_files"]["cuda/vector_add_alt.cu"] = payload["generated_files"]["cuda/vector_add_inline_ptx.cu"]
+        status, body = self.service.post_json("/compile", payload)
+        self.assertEqual(status, 400)
+        self.assertIn("detail", body)
+        self.assertIn("generated_files must contain exactly one .cu file", body["detail"])
+        self.assertIn("We recommend a generator", body["detail"])
+        self.assertIn("headers or inline helper files", body["detail"])
+
+    def test_compile_rejects_second_attempt_for_same_turn(self) -> None:
+        first_status, _ = self.service.post_json("/compile", self._compile_payload(turn=109))
+        self.assertEqual(first_status, 200)
+
+        second_status, second_body = self.service.post_json("/compile", self._compile_payload(turn=109))
+        self.assertEqual(second_status, 409)
+        self.assertIn("detail", second_body)
+        self.assertIn("compile may run only once per turn", second_body["detail"])
+        self.assertIn("Do not reuse the same turn", second_body["detail"])
+        self.assertIn("start a new turn", second_body["detail"])
+
+    def test_compile_rejects_generated_files_without_a_cu_file(self) -> None:
+        payload = self._compile_payload(turn=110)
+        payload["generated_files"] = {
+            "include/vector_add_device.h": "#pragma once\n__device__ inline float addf(float a, float b) { return a + b; }\n",
+            "include/vector_add_inline.inc": "#define VECTOR_ADD_INLINE 1\n",
+        }
+        status, body = self.service.post_json("/compile", payload)
+        self.assertEqual(status, 400)
+        self.assertIn("detail", body)
+        self.assertIn("generated_files must contain exactly one .cu file", body["detail"])
+        self.assertIn("We recommend a generator", body["detail"])
+
+    def test_compile_accepts_single_generated_cu_with_helper_files(self) -> None:
+        payload = self._compile_payload(turn=111)
+        payload["generated_files"]["include/vector_add_device.h"] = (
+            "#pragma once\n"
+            "__device__ inline float addf(float a, float b) { return a + b; }\n"
+        )
+        payload["generated_files"]["include/vector_add_inline.inc"] = "#define VECTOR_ADD_INLINE 1\n"
+        status, body = self.service.post_json("/compile", payload)
+        self.assertEqual(status, 200)
+        self.assertIn("artifacts", body)
+        self.assertIn("tool_outputs", body)
+
+    def test_compile_accepts_reference_files_without_any_reference_cu_file(self) -> None:
+        payload = self._compile_payload(turn=112)
+        payload["reference_files"] = {
+            "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8"),
+            "notes/reference.txt": "vector-add reference notes\n",
+        }
+        status, body = self.service.post_json("/compile", payload)
+        self.assertEqual(status, 200)
+        self.assertIn("artifacts", body)
+        self.assertIn("tool_outputs", body)
+
+    def test_compile_rejects_invalid_relative_paths(self) -> None:
+        absolute_status, absolute_body = self.service.post_json(
+            "/compile",
+            {
+                "metadata": self._metadata(113),
+                "timeout_seconds": 20,
+                "reference_files": {
+                    "dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                },
+                "generated_files": {
+                    "/tmp/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                },
+            },
+        )
+        self.assertEqual(absolute_status, 400)
+        self.assertIn("detail", absolute_body)
+        self.assertIn("path must be relative", absolute_body["detail"])
+
+        traversal_status, traversal_body = self.service.post_json(
+            "/compile",
+            {
+                "metadata": self._metadata(114),
+                "timeout_seconds": 20,
+                "reference_files": {
+                    "../dsl/vector_add_cutedsl.py": (FIXTURES / "reference" / "vector_add_cutedsl.py").read_text(encoding="utf-8")
+                },
+                "generated_files": {
+                    "cuda/vector_add_inline_ptx.cu": (FIXTURES / "generated" / "vector_add_inline_ptx.cu").read_text(encoding="utf-8")
+                },
+            },
+        )
+        self.assertEqual(traversal_status, 400)
+        self.assertIn("detail", traversal_body)
+        self.assertIn("path contains invalid relative segments", traversal_body["detail"])
+
+    def test_files_read_returns_inline_artifact_content_by_relative_path(self) -> None:
+        compile_status, compile_body = self.service.post_json("/compile", self._compile_payload(turn=115))
+        self.assertEqual(compile_status, 200)
+        ptx_path = compile_body["artifacts"]["ptx"]["path"]
+
+        status, body = self.service.post_json(
+            "/files/read",
+            {
+                "metadata": self._metadata(115),
+                "path": ptx_path,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("metadata", body)
+        self.assertIn("file", body)
+        self.assertEqual(body["file"]["path"], ptx_path)
+        self.assertEqual(body["file"]["inline"], True)
+        self.assertEqual(body["file"]["encoding"], "utf8")
+        self.assertIn(".visible .entry vector_add_inline_ptx", body["file"]["content"])
+
+    def test_files_read_rejects_paths_outside_public_turn_dirs(self) -> None:
+        status, body = self.service.post_json(
+            "/files/read",
+            {
+                "metadata": self._metadata(116),
+                "path": "workspace/inputs/generated/vector_add_inline_ptx.cu",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("detail", body)
+        self.assertIn("file reads are limited to artifacts/, logs/, and state/", body["detail"])
+
+    def test_files_read_returns_404_for_missing_turn_file(self) -> None:
+        status, body = self.service.post_json(
+            "/files/read",
+            {
+                "metadata": self._metadata(117),
+                "path": "artifacts/compile.attempt_001.missing.ptx",
+            },
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("detail", body)
+        self.assertIn("file not found for this turn/path", body["detail"])
+
+    def test_files_read_respects_max_bytes(self) -> None:
+        compile_status, compile_body = self.service.post_json("/compile", self._compile_payload(turn=118))
+        self.assertEqual(compile_status, 200)
+        path = compile_body["artifacts"]["sass"]["nvdisasm"]["path"]
+
+        status, body = self.service.post_json(
+            "/files/read",
+            {
+                "metadata": self._metadata(118),
+                "path": path,
+                "max_bytes": 128,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["file"]["path"], path)
+        self.assertEqual(body["file"]["inline"], True)
+        self.assertEqual(body["file"]["encoding"], "utf8")
+        self.assertEqual(body["file"]["truncated"], True)
+        self.assertLessEqual(len(body["file"]["content"].encode("utf-8")), 128)
 
     def test_evaluate_endpoint_accepts_slug_keyed_configs(self) -> None:
         compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=103))

@@ -10,23 +10,30 @@ from __future__ import annotations
 
 import re
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from cuda_exec.models import (
+    CompileArtifacts,
     CompileRequest,
     CompileResponse,
+    CompileSassArtifacts,
+    CompileToolOutputs,
     EvaluateConfigOutput,
     EvaluateRequest,
     EvaluateResponse,
     ExecuteRequest,
     ExecuteResponse,
+    FileReadRequest,
+    FileReadResponse,
     HealthResponse,
     ProfileConfigOutput,
     ProfileRequest,
     ProfileResponse,
+    ToolIOPair,
 )
-from cuda_exec.runner import capture_turn_file
+from cuda_exec.runner import capture_turn_file, resolve_workspace_bundle
 from cuda_exec.tasks import (
+    _validate_relative_path,
     run_compile_task,
     run_evaluate_task,
     run_execute_task,
@@ -66,11 +73,37 @@ def _stage_log_paths(stage: str, attempt: int, config_slug: str | None = None) -
     return [f"{base}.log", f"{base}.stdout", f"{base}.stderr"]
 
 
-def _compile_binary_path(result: dict) -> str:
+def _compile_artifact_map(result: dict) -> dict[str, str]:
+    artifact_map: dict[str, str] = {}
     for artifact in result.get("artifacts", []):
-        if artifact.get("artifact_id") == "compile:primary_binary":
-            return artifact["path"]
-    raise ValueError("compile result missing primary binary artifact")
+        artifact_id = artifact.get("artifact_id")
+        if artifact_id == "compile:primary_binary":
+            artifact_map["binary"] = artifact["path"]
+        elif artifact_id == "compile:primary_ptx":
+            artifact_map["ptx"] = artifact["path"]
+        elif artifact_id == "compile:primary_cubin":
+            artifact_map["cubin"] = artifact["path"]
+        elif artifact_id == "compile:resource_usage":
+            artifact_map["resource_usage"] = artifact["path"]
+        elif artifact_id == "compile:sass_nvdisasm":
+            artifact_map["sass_nvdisasm"] = artifact["path"]
+    if not artifact_map:
+        raise ValueError("compile result missing public compile artifacts")
+    return artifact_map
+
+
+def _capture_public_file(workspace_path: str, rel_path: str, *, inline: bool, max_bytes: int | None = None) -> dict | None:
+    return _capture_public_files(workspace_path, [rel_path], inline=inline, max_bytes=max_bytes).get(rel_path)
+
+
+def _validate_file_read_scope(rel_path: str) -> None:
+    _validate_relative_path(rel_path)
+    allowed_prefixes = ("artifacts/", "logs/", "state/")
+    if not rel_path.startswith(allowed_prefixes):
+        raise HTTPException(
+            status_code=400,
+            detail="file reads are limited to artifacts/, logs/, and state/ paths under the resolved turn root",
+        )
 
 
 def _profile_report_path(config_output: dict) -> str:
@@ -80,24 +113,23 @@ def _profile_report_path(config_output: dict) -> str:
     raise ValueError("profile config output missing report artifact")
 
 
-def _capture_public_files(workspace_path: str, rel_paths: list[str]) -> dict[str, dict]:
-    """Materialize public response files as relative_path -> FilePayload.
-
-    The dict key stays the relative path.
-    The value is a FilePayload carrying content plus the minimal metadata needed
-    on the response side: encoding and truncation.
-    """
+def _capture_public_files(workspace_path: str, rel_paths: list[str], *, inline: bool, max_bytes: int | None = None) -> dict[str, dict]:
+    """Materialize public response files as relative_path -> FilePayload."""
 
     payload: dict[str, dict] = {}
     for rel_path in rel_paths:
-        item = capture_turn_file(rel_path, workspace_path)
+        item = capture_turn_file(rel_path, workspace_path, max_bytes=max_bytes)
         if not item.get("exists") or item.get("error"):
             continue
-        payload[rel_path] = {
-            "content": item.get("content") or "",
-            "encoding": item.get("encoding") or "utf8",
+        entry = {
+            "path": rel_path,
+            "inline": inline,
             "truncated": bool(item.get("truncated", False)),
         }
+        if inline:
+            entry["content"] = item.get("content") or ""
+            entry["encoding"] = item.get("encoding") or "utf8"
+        payload[rel_path] = entry
     return payload
 
 
@@ -108,17 +140,56 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
     result = run_compile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        original_files=request.original_files,
+        reference_files=request.reference_files,
         generated_files=request.generated_files,
     )
     attempt = result["attempt"]
+    artifact_map = _compile_artifact_map(result)
+    workspace_path = result["workspace_path"]
     return CompileResponse(
         metadata=request.metadata,
         all_ok=result["all_ok"],
         attempt=attempt,
-        artifacts=_capture_public_files(result["workspace_path"], [_compile_binary_path(result)]),
-        logs=_capture_public_files(result["workspace_path"], _stage_log_paths("compile", attempt)),
+        artifacts=CompileArtifacts(
+            binary=_capture_public_file(workspace_path, artifact_map["binary"], inline=False) if "binary" in artifact_map else None,
+            ptx=_capture_public_file(workspace_path, artifact_map["ptx"], inline=False) if "ptx" in artifact_map else None,
+            cubin=_capture_public_file(workspace_path, artifact_map["cubin"], inline=False) if "cubin" in artifact_map else None,
+            resource_usage=_capture_public_file(workspace_path, artifact_map["resource_usage"], inline=False) if "resource_usage" in artifact_map else None,
+            sass=CompileSassArtifacts(
+                nvdisasm=_capture_public_file(workspace_path, artifact_map["sass_nvdisasm"], inline=False) if "sass_nvdisasm" in artifact_map else None,
+            ),
+        ),
+        tool_outputs=CompileToolOutputs(
+            nvcc_ptx=ToolIOPair(
+                stdout=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.nvcc-ptx.stdout", inline=True),
+                stderr=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.nvcc-ptx.stderr", inline=True),
+            ),
+            ptxas=ToolIOPair(
+                stdout=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.ptxas.stdout", inline=True),
+                stderr=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.ptxas.stderr", inline=True),
+            ),
+            resource_usage=ToolIOPair(
+                stdout=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.resource-usage.stdout", inline=True),
+                stderr=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.resource-usage.stderr", inline=True),
+            ),
+            nvdisasm=ToolIOPair(
+                stdout=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.nvdisasm.stdout", inline=True),
+                stderr=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.nvdisasm.stderr", inline=True),
+            ),
+        ),
     )
+
+
+@app.post("/files/read", response_model=FileReadResponse)
+def file_read_endpoint(request: FileReadRequest) -> FileReadResponse:
+    """Read one turn-relative file from artifacts/, logs/, or state/."""
+
+    _validate_file_read_scope(request.path)
+    workspace = resolve_workspace_bundle(**request.metadata.model_dump())
+    file_payload = _capture_public_file(workspace["workspace_path"], request.path, inline=True, max_bytes=request.max_bytes)
+    if file_payload is None:
+        raise HTTPException(status_code=404, detail=f"file not found for this turn/path: {request.path}")
+    return FileReadResponse(metadata=request.metadata, file=file_payload)
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
@@ -139,6 +210,7 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
             logs=_capture_public_files(
                 result["workspace_path"],
                 _stage_log_paths("evaluate", attempt, config_slug),
+                inline=True,
             ),
         )
         for config_slug, item in result.get("configs", {}).items()
@@ -165,10 +237,11 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         config_slug: ProfileConfigOutput(
             status=item["status"],
             summary=item.get("summary", {}),
-            artifacts=_capture_public_files(result["workspace_path"], [_profile_report_path(item)]),
+            artifacts=_capture_public_files(result["workspace_path"], [_profile_report_path(item)], inline=True),
             logs=_capture_public_files(
                 result["workspace_path"],
                 _stage_log_paths("profile", attempt, config_slug),
+                inline=True,
             ),
         )
         for config_slug, item in result.get("configs", {}).items()
@@ -196,5 +269,5 @@ def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
         metadata=request.metadata,
         all_ok=result["all_ok"],
         attempt=attempt,
-        logs=_capture_public_files(result["workspace_path"], _stage_log_paths("execute", attempt)),
+        logs=_capture_public_files(result["workspace_path"], _stage_log_paths("execute", attempt), inline=True),
     )

@@ -139,7 +139,7 @@ def resolve_turn_artifact_path(path_value: str, workspace_path: Path) -> Path:
     return path.resolve()
 
 
-def capture_turn_file(path_value: str, workspace_path: str) -> dict:
+def capture_turn_file(path_value: str, workspace_path: str, max_bytes: int | None = None) -> dict:
     """Read a turn-relative file for public response use.
 
     The caller provides a relative path within the turn root. The returned dict
@@ -174,8 +174,9 @@ def capture_turn_file(path_value: str, workspace_path: str) -> dict:
         }
 
     raw = path.read_bytes()
-    truncated = len(raw) > MAX_CAPTURE_BYTES
-    raw_for_response = raw[:MAX_CAPTURE_BYTES]
+    limit = max_bytes if max_bytes is not None else MAX_CAPTURE_BYTES
+    truncated = len(raw) > limit
+    raw_for_response = raw[:limit]
 
     try:
         content = raw_for_response.decode("utf-8")

@@ -10,6 +10,8 @@ Important public conventions captured in this file:
 - Evaluate/profile configs are slug-keyed maps: Dict[config_slug, Dict[str, Any]].
 - Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
+- `reference` means the reference side of a comparison.
+- `generated` means the generated or current side under evaluation.
 - `artifacts` means kept results.
 - `logs` means process output.
 - `state` remains internal-first and is not exposed in default public responses.
@@ -40,8 +42,16 @@ class RequestBase(BaseModel):
 class CompileRequest(RequestBase):
     """Compile request using inline file maps.
 
-    Both `original_files` and `generated_files` are maps of:
+    Both `reference_files` and `generated_files` are maps of:
         relative_path -> file_content
+
+    Compile request contract:
+    - `reference_files` must be non-empty
+    - `generated_files` must be non-empty
+    - `generated_files` must contain exactly one generated `.cu` file
+    - `generated_files` may include additional headers or inline helper files
+    - `reference_files` may include `.cu` files, but do not need to
+    - compile may run only once per turn; use a new turn for a different upload set
 
     Why request-side files stay this simple:
     - compile inputs are expected to be normal text source files
@@ -49,13 +59,13 @@ class CompileRequest(RequestBase):
     - request-side inputs do not need response-only metadata like encoding or truncation
     """
 
-    original_files: Dict[str, str] = Field(
+    reference_files: Dict[str, str] = Field(
         default_factory=dict,
-        description="Map of relative path to file content for original source inputs",
+        description="Non-empty map of relative path to file content for reference source inputs",
     )
     generated_files: Dict[str, str] = Field(
         default_factory=dict,
-        description="Map of relative path to file content for generated source inputs",
+        description="Non-empty map of generated source inputs that must include exactly one generated .cu file; headers and inline helper files are also allowed",
     )
 
 
@@ -102,6 +112,12 @@ class ExecuteRequest(RequestBase):
     env: Dict[str, str] = Field(default_factory=dict, description="Extra environment variables")
 
 
+class FileReadRequest(BaseModel):
+    metadata: Metadata = Field(..., description="Required turn identity used to resolve the turn root")
+    path: str = Field(..., min_length=1, description="Relative path under the turn root to read")
+    max_bytes: int | None = Field(default=None, ge=1, description="Optional maximum number of bytes to inline from the requested file")
+
+
 class HealthResponse(BaseModel):
     ok: bool
     service: str
@@ -113,23 +129,35 @@ class FilePayload(BaseModel):
     Public responses use the shape:
         relative_path -> FilePayload
 
-    Example:
+    Example inline payload:
         {
-          "logs/compile.attempt_001.log": {
-            "content": "toolkit_command: ...",
+          "logs/compile.attempt_001.ptxas.stderr": {
+            "path": "logs/compile.attempt_001.ptxas.stderr",
+            "inline": true,
+            "content": "ptxas info    : Used 6 registers ...",
             "encoding": "utf8",
             "truncated": false
           }
         }
 
-    The relative path itself is the outer dict key.
-    This object only describes the payload stored at that path.
+    Example path-only payload:
+        {
+          "artifacts/compile.attempt_001.vector_add_inline_ptx.cubin": {
+            "path": "artifacts/compile.attempt_001.vector_add_inline_ptx.cubin",
+            "inline": false
+          }
+        }
+
+    The relative path itself is still the outer dict key. `path` repeats it so
+    callers can consume either the mapping key or the payload alone.
     """
 
-    content: str = Field(..., description="Returned file content. Text uses utf8; binary uses base64.")
-    encoding: Literal["utf8", "base64"] = Field(
-        default="utf8",
-        description="Encoding used for `content` so callers can distinguish text from binary payloads.",
+    path: str = Field(..., description="Relative path for this returned file reference")
+    inline: bool = Field(default=True, description="True when file content is inlined in the response; false for path-only references")
+    content: str | None = Field(default=None, description="Returned file content when `inline=true`. Text uses utf8; binary uses base64.")
+    encoding: Literal["utf8", "base64"] | None = Field(
+        default=None,
+        description="Encoding used for `content` when present so callers can distinguish text from binary payloads.",
     )
     truncated: bool = Field(
         default=False,
@@ -183,9 +211,38 @@ class PerformanceSummary(BaseModel):
     runs: int | None = None
 
 
+class ToolIOPair(BaseModel):
+    stdout: FilePayload | None = None
+    stderr: FilePayload | None = None
+
+
+class CompileSassArtifacts(BaseModel):
+    nvdisasm: FilePayload | None = None
+
+
+class CompileToolOutputs(BaseModel):
+    nvcc_ptx: ToolIOPair = Field(default_factory=ToolIOPair)
+    ptxas: ToolIOPair = Field(default_factory=ToolIOPair)
+    resource_usage: ToolIOPair = Field(default_factory=ToolIOPair)
+    nvdisasm: ToolIOPair = Field(default_factory=ToolIOPair)
+
+
+class CompileArtifacts(BaseModel):
+    binary: FilePayload | None = None
+    ptx: FilePayload | None = None
+    cubin: FilePayload | None = None
+    resource_usage: FilePayload | None = None
+    sass: CompileSassArtifacts = Field(default_factory=CompileSassArtifacts)
+
+
 class CompileResponse(ResponseBase):
-    artifacts: Dict[str, FilePayload] = Field(default_factory=dict, description="Relative-path keyed kept compile outputs")
-    logs: Dict[str, FilePayload] = Field(default_factory=dict, description="Relative-path keyed compile log/stdout/stderr files")
+    artifacts: CompileArtifacts = Field(default_factory=CompileArtifacts, description="Structured kept compile outputs")
+    tool_outputs: CompileToolOutputs = Field(default_factory=CompileToolOutputs, description="Structured inline stdout/stderr from compile tools")
+
+
+class FileReadResponse(BaseModel):
+    metadata: Metadata = Field(..., description="Echoed turn identity used to resolve the file")
+    file: FilePayload = Field(..., description="Inline payload for the requested turn-relative file")
 
 
 class EvaluateConfigOutput(BaseModel):

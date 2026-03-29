@@ -401,6 +401,24 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertIn("detail", body)
         self.assertIn("must be named generated.cu", body["detail"])
 
+    def test_compile_rejects_reference_files_without_reference_py(self) -> None:
+        status, body = self.service.post_json(
+            "/compile",
+            {
+                "metadata": self._metadata(153),
+                "timeout_seconds": 20,
+                "reference_files": {
+                    "my_model.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
+                },
+                "generated_files": {
+                    "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+                },
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("detail", body)
+        self.assertIn("must include a file named reference.py", body["detail"])
+
     def test_compile_accepts_single_generated_cu_with_helper_files(self) -> None:
         payload = self._compile_payload(turn=111)
         payload["generated_files"]["include/vector_add_device.h"] = (

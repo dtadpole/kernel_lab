@@ -528,6 +528,17 @@ def run_compile_task(
     try:
         copied_reference = _write_input_files(reference_files, workspace_path / "inputs" / "reference")
         copied_generated = _write_input_files(generated_files, workspace_path / "inputs" / "generated")
+
+        if not any(path.name == "reference.py" for path in copied_reference):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "reference_files must include a file named reference.py as the entry point. "
+                    "Rename your reference module to reference.py and resubmit. "
+                    "Additional helper files may use any name."
+                ),
+            )
+
         source = _pick_single_cuda_source(copied_generated, copied_reference)
 
         binary_rel = _compile_artifact_rel(attempt, source.stem, "bin")

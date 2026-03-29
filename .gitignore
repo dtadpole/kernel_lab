@@ -18,6 +18,10 @@ env/
 build/
 dist/
 
+# Claude Code local settings
+.claude/settings.local.json
+.claude/logs/
+
 # Editors / OS
 .DS_Store
 .vscode/

@@ -2,9 +2,10 @@
 
 A repository for kernel optimization experiments and related tooling.
 
-## Current component
+## Current components
 
 - `cuda_exec/` — FastAPI-based remote CUDA execution service
+- `cuda_agent/` — MCP-based CUDA kernel optimization agent (uses cuda_exec via MCP tools)
 
 ## Repo-level conventions
 
@@ -140,6 +141,17 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - prefer storing integration config sets in fixture files under `cuda_exec/tests/fixtures/` instead of embedding them directly in the main test module
 - fixture config slugs should make semantic sense for the sample workload; for vector-add fixtures, prefer size/shape/rank-based slugs rather than unrelated causal/noncausal labels
 - for vector-add integration fixtures, the config body itself should stay pertinent: shape/rank/input_size metadata is enough, and unrelated transformer-style fields should be omitted
+
+### 7. `cuda_agent` conventions
+
+- `cuda_agent` manages its own Python environment (`cuda_agent/.venv`) via `uv`
+- `cuda_agent` does not import from `cuda_exec` — it communicates via HTTP through an MCP server
+- `cuda_agent` requires `cuda_exec` to be running separately
+- `cuda_agent` requires `ANTHROPIC_API_KEY` in the environment
+- `cuda_agent` reads the bearer token from the same key file as `cuda_exec` (`~/.keys/cuda_exec.key` or `CUDA_EXEC_KEY_PATH`)
+- the MCP server (`mcp_server.py`) is a FastMCP stdio server wrapping cuda_exec endpoints as tools
+- the agent (`agent.py`) uses `claude-agent-sdk` to run a single long optimization session
+- the agent manages its own iteration loop internally — Claude decides when to compile, evaluate, modify, and converge
 
 ## Owner
 

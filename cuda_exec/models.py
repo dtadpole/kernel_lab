@@ -91,8 +91,17 @@ class ProfileRequest(RequestBase):
 
     `configs` is intentionally flexible:
         config_slug -> arbitrary kernel-specific config payload
+
+    `mode` controls which side to profile:
+    - `generated_only`: profile the compiled/generated side only
+    - `reference_only`: profile the reference module side only
+    - `dual`: run both sides and include comparison metadata
     """
 
+    mode: Literal["reference_only", "generated_only", "dual"] = Field(
+        default="generated_only",
+        description="Which side(s) to profile for each config",
+    )
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,
         min_length=1,
@@ -209,6 +218,7 @@ class PerformanceSummary(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     latency_ms: LatencySummary = Field(default_factory=LatencySummary)
     runs: int | None = None
+    comparison: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolIOPair(BaseModel):

@@ -458,6 +458,7 @@ class CudaExecE2ETest(unittest.TestCase):
             {
                 "metadata": self._metadata(104),
                 "timeout_seconds": 5,
+                "mode": "dual",
                 "configs": self._config_map(),
             },
         )
@@ -475,6 +476,11 @@ class CudaExecE2ETest(unittest.TestCase):
                 summary_meta = first["summary"].get("metadata", {})
                 self.assertEqual(summary_meta.get("rank"), self._config_map()[first_slug]["rank"])
                 self.assertEqual(summary_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
+                artifact_paths = list(first["artifacts"].keys())
+                self.assertTrue(any(path.endswith("summary.json") for path in artifact_paths))
+                comparison = first["summary"].get("comparison", {})
+                self.assertIn("reference_median_ms", comparison)
+                self.assertIn("generated_median_ms", comparison)
         else:
             self.assertIn("detail", body)
 

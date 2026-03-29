@@ -195,6 +195,14 @@ For `evaluate`, the current runtime shape is comparison-first:
 - persist one kept comparison artifact per config under `artifacts/evaluate.attempt_###.config_<slug>.comparison.json`
 - return per-config `correctness`, `performance`, `artifacts`, and `logs`
 
+For `profile`, the current runtime shape is mode-driven:
+
+- `generated_only`: run only the compiled/generated side and summarize generated performance
+- `reference_only`: run only the reference module side and summarize reference performance
+- `dual`: run both sides and return summary metadata that includes comparison fields such as reference/generated median latency and speedup
+- persist one kept structured profile artifact per config under `artifacts/profile.attempt_###.config_<slug>.summary.json`
+- return per-config `summary`, `artifacts`, and `logs`
+
 Example config fields:
 
 - transformer layer count

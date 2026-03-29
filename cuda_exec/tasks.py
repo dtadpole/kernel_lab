@@ -19,7 +19,7 @@ from cuda_exec.runner import (
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
 EVALUATE_SCRIPT = SCRIPTS_DIR / "evaluate.py"
-PROFILE_SCRIPT = SCRIPTS_DIR / "profile.sh"
+PROFILE_SCRIPT = SCRIPTS_DIR / "profile.py"
 DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
 SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 WORKFLOW_RULES = {
@@ -779,6 +779,7 @@ def run_profile_task(
     metadata,
     timeout_seconds: int,
     configs: Dict[str, dict],
+    mode: str = "generated_only",
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
@@ -792,34 +793,48 @@ def run_profile_task(
 
     for config_slug, config in configs.items():
         config_rel = _write_config_record(workspace, "profile", attempt, config_slug, config)
-        env = _config_env(workspace, "profile", attempt, config_slug, config, config_rel)
-        report_base_rel = _config_artifact_rel("profile", attempt, config_slug, "ncu")
-        report_file_rel = report_base_rel + ".ncu-rep"
-        report_prefix = Path(workspace["root_path"]) / report_base_rel
+        profile_json_rel = _config_artifact_rel("profile", attempt, config_slug, "summary.json")
         command = [
-            "/usr/bin/env",
-            "bash",
+            sys.executable,
             str(PROFILE_SCRIPT),
-            "--target",
-            str(target_path),
-            "--export-prefix",
-            str(report_prefix),
+            "--run-tag",
+            metadata.run_tag,
+            "--version",
+            metadata.version,
+            "--direction-id",
+            str(metadata.direction_id),
+            "--direction-slug",
+            metadata.direction_slug,
+            "--turn",
+            str(metadata.turn),
+            "--config-slug",
+            config_slug,
+            "--config-json",
+            json.dumps(config),
+            "--mode",
+            mode,
+            "--timeout",
+            str(timeout_seconds),
         ]
         run_result = run_generic_command(
             kind="profile",
             command=command,
             workspace_path=str(workspace_path),
-            env=env,
+            env={},
             timeout_seconds=timeout_seconds,
             return_files=[config_rel],
             log_file=_stage_log_rel("profile", attempt, config_slug),
         )
+        payload_json = _parse_structured_stdout(run_result["output"]["stdout"]) or {}
+        profile_json_path = Path(workspace["root_path"]) / profile_json_rel
+        profile_json_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_json_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")
         config_artifacts = [
             _build_artifact(
-                artifact_id=f"profile:report:{config_slug}",
-                kind="profile_report",
-                path=report_file_rel,
-                description=f"NCU report for config {config_slug}",
+                artifact_id=f"profile:summary:{config_slug}",
+                kind="profile_summary",
+                path=profile_json_rel,
+                description=f"Structured profile payload for config {config_slug}",
             )
         ]
         payload = _config_result_payload(
@@ -829,6 +844,10 @@ def run_profile_task(
             artifacts=config_artifacts,
             summary=_profile_summary(run_result, config=config),
         )
+        payload["mode"] = payload_json.get("mode", mode) if isinstance(payload_json, dict) else mode
+        payload["reference"] = payload_json.get("reference", {}) if isinstance(payload_json, dict) else {}
+        payload["generated"] = payload_json.get("generated", {}) if isinstance(payload_json, dict) else {}
+        payload["files"].append(capture_turn_file(profile_json_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
         stage_artifacts.extend(config_artifacts)
@@ -843,7 +862,8 @@ def run_profile_task(
         {
             "input_artifact_id": target_artifact["artifact_id"],
             "input_path": target_artifact["path"],
-            "profiler": "ncu",
+            "profiler": "comparison_runtime",
+            "mode": mode,
             "configs": {config_slug: _config_payload(config_slug, config) for config_slug, config in configs.items()},
             "config_results": {
                 config_slug: {

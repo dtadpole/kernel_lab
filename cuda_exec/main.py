@@ -236,13 +236,18 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
+        mode=request.mode,
     )
     attempt = result["attempt"]
     items = {
         config_slug: ProfileConfigOutput(
             status=item["status"],
             summary=item.get("summary", {}),
-            artifacts=_capture_public_files(result["workspace_path"], [_profile_report_path(item)], inline=True),
+            artifacts=_capture_public_files(
+                result["workspace_path"],
+                [artifact["path"] for artifact in item.get("artifacts", [])],
+                inline=True,
+            ),
             logs=_capture_public_files(
                 result["workspace_path"],
                 _stage_log_paths("profile", attempt, config_slug),

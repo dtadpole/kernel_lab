@@ -38,6 +38,16 @@ def _suite_python() -> Path:
     return _suite_venv_dir() / "bin" / "python"
 
 
+def _reference_pythonpath_entries(existing_pythonpath: str | None = None) -> list[str]:
+    entries = [str(REPO_ROOT)]
+    for candidate in [REFERENCE_STACK_SITE_PACKAGES, REFERENCE_STACK_EXTRA_PATH]:
+        if candidate.exists():
+            entries.append(str(candidate))
+    if existing_pythonpath:
+        entries.append(existing_pythonpath)
+    return entries
+
+
 def _provision_suite_venv(run_dir: Path) -> Path:
     venv_dir = run_dir / ".venv"
     subprocess.run(["uv", "venv", str(venv_dir)], cwd=str(REPO_ROOT), check=True)
@@ -111,14 +121,7 @@ class ServiceProcess:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["CUDA_EXEC_ROOT"] = str(self.runtime_root)
-        pythonpath_entries = [str(REPO_ROOT)]
-        for candidate in [REFERENCE_STACK_SITE_PACKAGES, REFERENCE_STACK_EXTRA_PATH]:
-            if candidate.exists():
-                pythonpath_entries.append(str(candidate))
-        existing_pythonpath = env.get("PYTHONPATH")
-        if existing_pythonpath:
-            pythonpath_entries.append(existing_pythonpath)
-        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+        env["PYTHONPATH"] = os.pathsep.join(_reference_pythonpath_entries(env.get("PYTHONPATH")))
         self.process = subprocess.Popen(
             [
                 str(_suite_python()),
@@ -497,6 +500,51 @@ class CudaExecE2ETest(unittest.TestCase):
         else:
             self.assertIn("detail", body)
 
+    def test_evaluate_cli_runs_standalone_after_compile(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=123))
+        self.assertEqual(compile_status, 200)
+
+        first_slug, first_config = next(iter(self._config_map().items()))
+        env = os.environ.copy()
+        env["CUDA_EXEC_ROOT"] = str(self.service.runtime_root)
+        env["PYTHONPATH"] = os.pathsep.join(_reference_pythonpath_entries(env.get("PYTHONPATH")))
+        completed = subprocess.run(
+            [
+                str(_suite_python()),
+                str(CUDA_EXEC_DIR / "scripts" / "evaluate.py"),
+                "--run-tag",
+                "integration-tests",
+                "--version",
+                "v1",
+                "--direction-id",
+                "1",
+                "--direction-slug",
+                "vector-add",
+                "--turn",
+                "123",
+                "--config-slug",
+                first_slug,
+                "--config-json",
+                json.dumps(first_config),
+                "--timeout",
+                "5",
+            ],
+            cwd=str(REPO_ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["config_slug"], first_slug)
+        self.assertIn("reference", payload)
+        self.assertIn("generated", payload)
+        self.assertIn("comparison", payload)
+        self.assertEqual(payload["reference"]["output"]["metadata"]["rank"], first_config["rank"])
+        self.assertEqual(payload["generated"]["performance"]["metadata"]["shape_kind"], first_config["shape_kind"])
+        self.assertIn("speedup", payload["comparison"]["performance"])
+
     def test_profile_endpoint_accepts_slug_keyed_configs(self) -> None:
         compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=104))
         self.assertEqual(compile_status, 200)
@@ -740,14 +788,7 @@ class ReferenceFixtureContractTest(unittest.TestCase):
                 "CUDA_EXEC_PARAM_SHAPE_KIND": "2d",
             }
         )
-        pythonpath_entries = []
-        for candidate in [REFERENCE_STACK_SITE_PACKAGES, REFERENCE_STACK_EXTRA_PATH]:
-            if candidate.exists():
-                pythonpath_entries.append(str(candidate))
-        existing_pythonpath = env.get("PYTHONPATH")
-        if existing_pythonpath:
-            pythonpath_entries.append(existing_pythonpath)
-        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+        env["PYTHONPATH"] = os.pathsep.join(_reference_pythonpath_entries(env.get("PYTHONPATH")))
         completed = subprocess.run(
             [str(_suite_python()), str(fixture_path)],
             check=True,

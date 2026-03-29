@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import torch.nn as nn
+
 from _cli_common import add_metadata_args, ensure_repo_root_on_path
 
 ensure_repo_root_on_path()
@@ -47,6 +49,8 @@ def _normalize_reference_contract(module: Any) -> tuple[Any, Any, Any]:
         raise RuntimeError(
             "reference module contract requires Model, get_inputs(config), and get_init_inputs()"
         )
+    if not isinstance(model_cls, type) or not issubclass(model_cls, nn.Module):
+        raise RuntimeError("reference module Model must be a subclass of torch.nn.Module")
     return model_cls, get_inputs, get_init_inputs
 
 

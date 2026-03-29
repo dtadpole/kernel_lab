@@ -222,6 +222,13 @@ class CudaExecE2ETest(unittest.TestCase):
     def _config_map(self) -> dict:
         return json.loads(CONFIG_FIXTURE.read_text(encoding="utf-8"))
 
+    def _compile_payload_runtime_launch(self, turn: int) -> dict:
+        payload = self._compile_payload(turn)
+        payload["generated_files"] = {
+            "cuda/vector_add_runtime_launch.cu": (FIXTURES / "generated" / "vector_add_runtime_launch.cu").read_text(encoding="utf-8")
+        }
+        return payload
+
     def test_healthz(self) -> None:
         status, body = self.service.get_json("/healthz")
         self.assertEqual(status, 200)
@@ -720,6 +727,36 @@ class CudaExecE2ETest(unittest.TestCase):
                 self.assertIn("ncu_report", first["generated"])
             else:
                 self.assertNotIn("ncu_report", first["generated"])
+        else:
+            self.assertIn("detail", body)
+
+    def test_profile_endpoint_can_materialize_ncu_report_with_runtime_launch_fixture(self) -> None:
+        compile_status, _ = self.service.post_json("/compile", self._compile_payload_runtime_launch(turn=124))
+        self.assertEqual(compile_status, 200)
+
+        status, body = self.service.post_json(
+            "/profile",
+            {
+                "metadata": self._metadata(124),
+                "timeout_seconds": 20,
+                "mode": "generated_only",
+                "profiler_backend": "ncu",
+                "configs": self._config_map(),
+            },
+        )
+        self.assertIn(status, {200, 400, 408})
+        if status == 200:
+            self.assertTrue(body["configs"])
+            first_slug, first = next(iter(body["configs"].items()))
+            meta = first["summary"].get("metadata", {})
+            self.assertEqual(meta.get("profiler_backend"), "ncu")
+            artifact_paths = list(first["artifacts"].keys())
+            has_report_artifact = any(path.endswith(".ncu-rep") for path in artifact_paths)
+            if has_report_artifact:
+                self.assertTrue(meta.get("ncu_report_exists"))
+                self.assertIn("ncu_report", first["generated"])
+            else:
+                self.assertFalse(meta.get("ncu_report_exists"))
         else:
             self.assertIn("detail", body)
 

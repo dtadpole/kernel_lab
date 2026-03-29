@@ -463,30 +463,31 @@ The service does not guarantee that an invoked program will remain inside that d
 program itself changes cwd, writes to absolute paths, or spawns child processes with different
 path behavior.
 
-### Test isolation and retention note
+### Test isolation note
 
 For integration tests or manual validation runs, the runtime root may be redirected by setting:
 
 - `CUDA_EXEC_ROOT=<temporary-directory>`
 
-Preferred layout for preserved runs:
+Current automated integration-test harness behavior:
 
-- place run roots under `~/temp/`
+- place temporary run roots under `~/temp/`
 - prefix the run directory name with `YYYY-MM-DD-HH-MM-`
 - then use a kebab-case slug plus PID in the run directory name
-- when a temporary uv-managed environment is created there, prefer `<run-dir>/.venv`
+- use the repo-local Python environment at `cuda_exec/.venv`
+- invoke `cuda_exec/scripts/prune_temp_runs.py` before starting the temporary uvicorn service
+- terminate the subprocess and delete the temporary run directory on teardown
 
-Retention policy direction:
+If the harness is later moved to fully temporary uv-managed environments, prefer `<run-dir>/.venv`.
 
-- do **not** immediately delete the run environment or intermediate outputs after a successful run
-- preserve request/response logs, service logs, runtime root contents, and temporary `.venv` for later inspection
-- handle cleanup through a separate retention process, for example deleting runs older than 7 days
+Retention helper for preserved/manual runs:
+
 - the helper script is `cuda_exec/scripts/prune_temp_runs.py`
 - its default behavior deletes preserved run directories older than 7 days
 - `--dry-run` is supported
 - keep rules: skip directories whose name contains `keep`, or that contain keep-marker files such as `KEEP`
 
-This keeps recent integration trajectories available without committing them into Git.
+This keeps the current automated test behavior explicit while still supporting preserved manual runs when needed.
 
 ---
 
@@ -512,7 +513,7 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "timeout_seconds": 180,
@@ -533,7 +534,7 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "all_ok": true,
@@ -600,13 +601,13 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "all_ok": true,
   "attempt": 1,
   "configs": {
-    "fa4-causal-l12-e4096-h32": {
+    "tensor2d-1024x1024": {
       "status": "ok",
       "correctness": {
         "metadata": {},
@@ -629,7 +630,7 @@ To keep agent behavior simple:
         "runs": 100
       },
       "logs": {
-        "logs/evaluate.attempt_001.config_fa4-causal-l12-e4096-h32.stdout": {
+        "logs/evaluate.attempt_001.config_tensor2d-1024x1024.stdout": {
           "content": "...",
           "encoding": "utf8",
           "truncated": false
@@ -670,13 +671,13 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "all_ok": true,
   "attempt": 1,
   "configs": {
-    "fa4-causal-l12-e4096-h32": {
+    "tensor2d-1024x1024": {
       "status": "ok",
       "summary": {
         "metadata": {},
@@ -689,14 +690,14 @@ To keep agent behavior simple:
         "runs": 100
       },
       "artifacts": {
-        "artifacts/profile.attempt_001.config_fa4-causal-l12-e4096-h32.ncu-rep": {
+        "artifacts/profile.attempt_001.config_tensor2d-1024x1024.ncu-rep": {
           "content": "<base64>",
           "encoding": "base64",
           "truncated": false
         }
       },
       "logs": {
-        "logs/profile.attempt_001.config_fa4-causal-l12-e4096-h32.log": {
+        "logs/profile.attempt_001.config_tensor2d-1024x1024.log": {
           "content": "...",
           "encoding": "utf8",
           "truncated": false
@@ -715,7 +716,7 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "timeout_seconds": 180,
@@ -732,7 +733,7 @@ To keep agent behavior simple:
     "run_tag": "agent_a",
     "version": "v1",
     "direction_id": 7,
-    "direction_slug": "fa4",
+    "direction_slug": "vector-add",
     "turn": 3
   },
   "all_ok": true,

@@ -712,8 +712,14 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertEqual(first["generated_summary"].get("rank"), None)
             self.assertEqual(first["generated_summary"].get("metadata", {}).get("rank"), self._config_map()[first_slug]["rank"])
             self.assertEqual(first["summary"].get("metadata", {}).get("profiler_backend"), "ncu")
-            if any(path.endswith(".ncu-rep") for path in artifact_paths):
-                self.assertTrue(True)
+            self.assertIn("ncu_profiled", first["summary"].get("metadata", {}))
+            self.assertIn("ncu_report_exists", first["summary"].get("metadata", {}))
+            has_report_artifact = any(path.endswith(".ncu-rep") for path in artifact_paths)
+            self.assertEqual(has_report_artifact, bool(first["summary"].get("metadata", {}).get("ncu_report_exists")))
+            if has_report_artifact:
+                self.assertIn("ncu_report", first["generated"])
+            else:
+                self.assertNotIn("ncu_report", first["generated"])
         else:
             self.assertIn("detail", body)
 

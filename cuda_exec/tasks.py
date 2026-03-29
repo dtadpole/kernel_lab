@@ -881,8 +881,20 @@ def run_profile_task(
                 return_files=[config_rel, ncu_report_rel],
                 log_file=_stage_log_rel("profile", attempt, config_slug),
             )
+            ncu_stdout = run_result.get("output", {}).get("stdout", "") or ""
+            ncu_profiled = "No kernels were profiled." not in ncu_stdout and "No metrics to collect found in sections." not in ncu_stdout
+            ncu_report_abs = Path(workspace["root_path"]) / ncu_report_rel
+            ncu_report_exists = ncu_report_abs.exists()
             ncu_summary = _fallback_performance_summary(run_result, source="ncu_process_duration_fallback", config=config)
-            ncu_summary["metadata"] = {**config, **ncu_summary.get("metadata", {}), "profiler_backend": "ncu"}
+            ncu_summary["metadata"] = {
+                **config,
+                **ncu_summary.get("metadata", {}),
+                "profiler_backend": "ncu",
+                "ncu_profiled": ncu_profiled,
+                "ncu_report_exists": ncu_report_exists,
+            }
+            if not ncu_profiled:
+                ncu_summary["metadata"]["ncu_warning"] = "ncu reported no profiled kernels or no metrics to collect"
             payload_json = {
                 "metadata": metadata.model_dump(),
                 "config_slug": config_slug,
@@ -890,10 +902,11 @@ def run_profile_task(
                 "profiler_backend": profiler_backend,
                 "generated": {
                     "summary": ncu_summary,
-                    "ncu_report": {"path": ncu_report_rel},
                 },
                 "summary": ncu_summary,
             }
+            if ncu_report_exists:
+                payload_json["generated"]["ncu_report"] = {"path": ncu_report_rel}
             profile_json_path = Path(workspace["root_path"]) / profile_json_rel
             profile_json_path.parent.mkdir(parents=True, exist_ok=True)
             profile_json_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")
@@ -904,13 +917,16 @@ def run_profile_task(
                     path=profile_json_rel,
                     description=f"Structured profile payload for config {config_slug}",
                 ),
-                _build_artifact(
-                    artifact_id=f"profile:ncu_report:{config_slug}",
-                    kind="ncu_report",
-                    path=ncu_report_rel,
-                    description=f"Nsight Compute report for config {config_slug}",
-                ),
             ]
+            if ncu_report_exists:
+                config_artifacts.append(
+                    _build_artifact(
+                        artifact_id=f"profile:ncu_report:{config_slug}",
+                        kind="ncu_report",
+                        path=ncu_report_rel,
+                        description=f"Nsight Compute report for config {config_slug}",
+                    )
+                )
             payload = _config_result_payload(
                 config_slug=config_slug,
                 config=config,

@@ -24,7 +24,7 @@
      - `generated_only`
      - `dual`
    - profile persists structured summary artifacts per config
-   - `/profile` returns per-config summary/artifacts/logs
+   - `/profile` returns per-config summary/reference/generated/artifacts/logs
 
 5. Integration coverage
    - end-to-end suite currently passes with the updated evaluate/profile behavior

@@ -260,9 +260,15 @@ class EvaluateConfigOutput(BaseModel):
 
     `status` is the per-config result, while the top-level response uses
     `all_ok` as the aggregate stage result.
+
+    `reference` / `generated` expose the side-specific structured payloads,
+    while `correctness` and `performance` provide the compact comparison-facing
+    summaries used by the public evaluate contract.
     """
 
     status: Literal["ok", "error", "timeout", "skipped"]
+    reference: Dict[str, Any] = Field(default_factory=dict)
+    generated: Dict[str, Any] = Field(default_factory=dict)
     correctness: CorrectnessSummary = Field(default_factory=CorrectnessSummary)
     performance: PerformanceSummary = Field(default_factory=PerformanceSummary)
     artifacts: Dict[str, FilePayload] = Field(

@@ -193,7 +193,7 @@ For `evaluate`, the current runtime shape is comparison-first:
 - the current vector-add reference fixture now genuinely launches a CuTe DSL kernel from a `@cute.jit` host launcher, rather than falling back to eager `x + y`
 - run the generated side through the compiled primary artifact
 - persist one kept comparison artifact per config under `artifacts/evaluate.attempt_###.config_<slug>.comparison.json`
-- return per-config `correctness`, `performance`, `artifacts`, and `logs`
+- return per-config `reference`, `generated`, `correctness`, `performance`, `artifacts`, and `logs`
 
 For `profile`, the current runtime shape is mode-driven:
 

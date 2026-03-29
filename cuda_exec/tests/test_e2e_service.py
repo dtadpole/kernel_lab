@@ -436,6 +436,8 @@ class CudaExecE2ETest(unittest.TestCase):
             if body["configs"]:
                 first_slug, first = next(iter(body["configs"].items()))
                 self.assertIn("status", first)
+                self.assertIn("reference", first)
+                self.assertIn("generated", first)
                 self.assertIn("correctness", first)
                 self.assertIn("performance", first)
                 self.assertIn("artifacts", first)
@@ -444,6 +446,12 @@ class CudaExecE2ETest(unittest.TestCase):
                 perf_meta = first["performance"].get("metadata", {})
                 self.assertEqual(correctness_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
                 self.assertEqual(perf_meta.get("input_size"), self._config_map()[first_slug]["input_size"])
+                self.assertIn("output", first["reference"])
+                self.assertIn("performance", first["reference"])
+                self.assertIn("output", first["generated"])
+                self.assertIn("performance", first["generated"])
+                self.assertEqual(first["reference"]["output"]["metadata"]["rank"], self._config_map()[first_slug]["rank"])
+                self.assertEqual(first["generated"]["performance"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
                 artifact_paths = list(first["artifacts"].keys())
                 self.assertTrue(any(path.endswith("comparison.json") for path in artifact_paths))
         else:
@@ -471,11 +479,15 @@ class CudaExecE2ETest(unittest.TestCase):
                 first_slug, first = next(iter(body["configs"].items()))
                 self.assertIn("status", first)
                 self.assertIn("summary", first)
+                self.assertIn("reference", first)
+                self.assertIn("generated", first)
                 self.assertIn("artifacts", first)
                 self.assertIn("logs", first)
                 summary_meta = first["summary"].get("metadata", {})
                 self.assertEqual(summary_meta.get("rank"), self._config_map()[first_slug]["rank"])
                 self.assertEqual(summary_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
+                self.assertIn("summary", first["reference"])
+                self.assertIn("summary", first["generated"])
                 artifact_paths = list(first["artifacts"].keys())
                 self.assertTrue(any(path.endswith("summary.json") for path in artifact_paths))
                 comparison = first["summary"].get("comparison", {})
@@ -507,7 +519,9 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIn("artifacts", first)
             self.assertEqual(first["generated"], {})
             self.assertIn("summary", first["reference"])
+            self.assertIn("output", first["reference"])
             self.assertEqual(first["summary"]["metadata"]["rank"], self._config_map()[first_slug]["rank"])
+            self.assertEqual(first["reference"]["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
         else:
             self.assertIn("detail", body)
 
@@ -534,7 +548,9 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertIn("artifacts", first)
             self.assertEqual(first["reference"], {})
             self.assertIn("summary", first["generated"])
+            self.assertIn("output", first["generated"])
             self.assertEqual(first["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
+            self.assertEqual(first["generated"]["summary"]["metadata"]["input_size"], self._config_map()[first_slug]["input_size"])
         else:
             self.assertIn("detail", body)
 

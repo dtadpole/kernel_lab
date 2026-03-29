@@ -205,6 +205,8 @@ def evaluate_endpoint(request: EvaluateRequest) -> EvaluateResponse:
     items = {
         config_slug: EvaluateConfigOutput(
             status=item["status"],
+            reference=item.get("reference") or {},
+            generated=item.get("generated") or {},
             correctness=item.get("correctness", {}),
             performance=item.get("performance", {}),
             artifacts=_capture_public_files(

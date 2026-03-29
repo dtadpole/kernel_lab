@@ -207,6 +207,7 @@ class LatencySummary(BaseModel):
     median: float | None = None
     max: float | None = None
     mean: float | None = None
+    std: float | None = None
 
 
 class CorrectnessSummary(BaseModel):
@@ -224,6 +225,10 @@ class CorrectnessSummary(BaseModel):
     max_rel_error: float | None = None
     mean_rel_error: float | None = None
     rel_variance: float | None = None
+    output_shape: str | None = None
+    trials: str | None = None
+    total_trials: int | None = None
+    passed_trials: int | None = None
 
 
 class PerformanceSummary(BaseModel):

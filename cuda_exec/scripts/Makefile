@@ -255,6 +255,34 @@ profile-dual: ## Profile both sides with speedup comparison for one config
 		--mode dual \
 		--timeout $(TIMEOUT)
 
+.PHONY: profile-ncu
+profile-ncu: ## Profile generated binary with NCU (Nsight Compute) for one config
+	@set -euo pipefail
+	BINARY="$(ARTIFACTS)/compile.attempt_001.generated.bin"
+	if [[ ! -x "$$BINARY" ]]; then
+		echo "ERROR: binary not found at $$BINARY — run compile first" >&2
+		exit 1
+	fi
+	NCU_PREFIX="$(ARTIFACTS)/ncu.$(CONFIG_SLUG)"
+	echo "--- profile-ncu: $(CONFIG_SLUG) ---"
+	CUDA_EXEC_CONFIG_ID="$(CONFIG_SLUG)" \
+	CUDA_EXEC_CONFIG_JSON='$(CONFIG_JSON)' \
+	CUDA_EXEC_PARAM_INPUT_SIZE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["input_size"])')" \
+	CUDA_EXEC_PARAM_RANK="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["rank"])')" \
+	CUDA_EXEC_PARAM_SHAPE_KIND="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["shape_kind"])')" \
+	CUDA_EXEC_PARAM_SHAPE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["shape"]))')" \
+	CUDA_EXEC_NUM_WARMUPS=2 \
+	CUDA_EXEC_NUM_TRIALS=1 \
+	sudo --preserve-env bash "$(PROFILE_SH)" \
+		--target "$$BINARY" \
+		--export-prefix "$$NCU_PREFIX" \
+		--set detailed \
+		> "$(LOGS)/ncu.$(CONFIG_SLUG).stdout.log"
+	echo "--- profile-ncu: done ---"
+	echo "NCU report: $$NCU_PREFIX.ncu-rep"
+	echo ""
+	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
+
 .PHONY: execute
 execute: ## Run a generic command in the workspace (override EXEC_CMD="cmd arg1 arg2")
 	@set -euo pipefail

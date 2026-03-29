@@ -12,11 +12,13 @@ vector-add kernel definition for the reference side.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Any
 
 import cutlass.cute as cute  # type: ignore
+from cutlass.cute.arch import block_idx, thread_idx  # type: ignore
 import torch
 from torch import nn
 
@@ -83,9 +85,9 @@ class Model(nn.Module):
 
         @cute.kernel
         def vector_add_kernel(x_ptr, y_ptr, out_ptr, n):
-            block_idx = cute.block_idx.x
-            thread_idx = cute.thread_idx.x
-            base = (block_idx * threads + thread_idx) * elements_per_thread
+            block_id_x, _, _ = block_idx()
+            thread_id_x, _, _ = thread_idx()
+            base = (block_id_x * threads + thread_id_x) * elements_per_thread
 
             for lane in range(elements_per_thread):
                 idx = base + lane
@@ -94,10 +96,31 @@ class Model(nn.Module):
 
         self.kernel = vector_add_kernel
 
+        @cute.jit
+        def launch_vector_add(x_ptr, y_ptr, out_ptr, n, blocks, threads_per_block):
+            self.kernel(x_ptr, y_ptr, out_ptr, n).launch(
+                grid=[blocks, 1, 1],
+                block=[threads_per_block, 1, 1],
+            )
+
+        self.launch_vector_add = launch_vector_add
+
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        # Temporary execution path: keep the CuTe DSL kernel definition live while
-        # the evaluator/runtime integration catches up to actually launch it.
-        return x + y
+        if x.shape != y.shape:
+            raise ValueError(f"shape mismatch: {tuple(x.shape)} vs {tuple(y.shape)}")
+        if x.dtype != torch.float32 or y.dtype != torch.float32:
+            raise ValueError(f"expected float32 inputs, got {x.dtype} and {y.dtype}")
+        if not x.is_cuda or not y.is_cuda:
+            raise ValueError("CuTe DSL reference kernel requires CUDA tensors")
+        if not x.is_contiguous() or not y.is_contiguous():
+            raise ValueError("CuTe DSL reference kernel requires contiguous tensors")
+
+        out = torch.empty_like(x)
+        n = x.numel()
+        blocks = math.ceil(n / (self.threads * self.elements_per_thread))
+        self.launch_vector_add(x, y, out, n, blocks, self.threads)
+        torch.cuda.synchronize(x.device)
+        return out
 
 
 def get_init_inputs() -> list[Any]:
@@ -107,10 +130,10 @@ def get_init_inputs() -> list[Any]:
 def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
     cfg = _normalize_config(config)
     shape = tuple(int(v) for v in cfg["shape"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda")
     numel = int(cfg["input_size"])
-    x = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape)
-    y = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape)
+    x = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape).contiguous()
+    y = torch.arange(numel, dtype=torch.float32, device=device).reshape(shape).contiguous()
     return [x, y]
 
 
@@ -135,6 +158,7 @@ def main() -> int:
         x, y = get_inputs(config)
         started = time.perf_counter()
         result = model(x, y)
+        torch.cuda.synchronize(x.device)
         latencies_ms.append((time.perf_counter() - started) * 1000.0)
 
     assert result is not None

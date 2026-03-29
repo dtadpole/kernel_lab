@@ -190,6 +190,7 @@ For `evaluate`, the current runtime shape is comparison-first:
 - load exactly one reference Python module from `workspace/inputs/reference/`
 - require the module contract `Model`, `get_inputs(config)`, and `get_init_inputs()`
 - run the reference side through that module contract
+- the current vector-add reference fixture now genuinely launches a CuTe DSL kernel from a `@cute.jit` host launcher, rather than falling back to eager `x + y`
 - run the generated side through the compiled primary artifact
 - persist one kept comparison artifact per config under `artifacts/evaluate.attempt_###.config_<slug>.comparison.json`
 - return per-config `correctness`, `performance`, `artifacts`, and `logs`

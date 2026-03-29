@@ -501,14 +501,21 @@ class ReferenceFixtureContractTest(unittest.TestCase):
     def test_reference_fixture_runs_from_config_env(self) -> None:
         try:
             completed_probe = subprocess.run(
-                [str(VENV_PYTHON), "-c", "import torch; print(torch.__version__)"],
+                [
+                    str(VENV_PYTHON),
+                    "-c",
+                    "import torch, importlib.util; "
+                    "assert importlib.util.find_spec('cutlass.cute') is not None; "
+                    "assert torch.cuda.is_available(); "
+                    "print(torch.__version__)"
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
             )
             self.assertTrue(bool(completed_probe.stdout.strip()))
         except Exception:
-            self.skipTest("torch is unavailable in cuda_exec runtime environment")
+            self.skipTest("torch/cutlass.cute/CUDA is unavailable in cuda_exec runtime environment")
 
         fixture_path = FIXTURES / "reference" / "vector_add_cutedsl.py"
         env = os.environ.copy()

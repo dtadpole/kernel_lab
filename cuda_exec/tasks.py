@@ -75,6 +75,15 @@ def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Pa
     generated_cu = [path for path in generated if path.suffix == ".cu"]
 
     if len(generated_cu) == 1:
+        if generated_cu[0].name != "generated.cu":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "the .cu entry file in generated_files must be named generated.cu. "
+                    "Rename your CUDA source to generated.cu and resubmit. "
+                    "Additional header or helper files may use any name."
+                ),
+            )
         return generated_cu[0]
     if len(generated_cu) > 1:
         raise HTTPException(

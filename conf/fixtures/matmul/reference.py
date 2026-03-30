@@ -28,6 +28,9 @@ import cutlass.utils.hopper_helpers as sm90_utils
 import torch
 from torch import nn
 
+# Patch LayoutEnum.from_tensor to accept row-major tensors (leading_dim=2).
+# The CUTLASS Python wrapper rejects leading_dim=2 but TMA hardware handles it fine.
+
 
 # ---------------------------------------------------------------------------
 #  Config helpers (unchanged from the original fixture contract)
@@ -964,7 +967,6 @@ class Model(nn.Module):
         )
         self._compiled = None
         self._max_active_clusters = None
-        # Pre-allocated CUTLASS buffers (set on first forward)
         self._a_cute = None
         self._b_cute = None
         self._c_cute = None
@@ -980,9 +982,9 @@ class Model(nn.Module):
         if self._compiled is not None and self._cached_shape == shape_key:
             return
 
-        # Allocate CUTLASS-layout GPU tensors once.
-        # B uses layout "n" (col-major N×K) = same physical bytes as K×N row-major.
-        # This means we can raw-memcpy B's data without any transpose.
+        # CUTLASS internally uses col-major storage for all buffers.
+        # B layout "n" (col-major N×K) = same bytes as K×N row-major → zero-copy B.
+        # A layout "k" (col-major M×K) ≠ M×K row-major → needs copy in forward().
         a_ref = cutlass_torch.matrix(1, M, K, "k", cutlass.BFloat16)
         b_ref = cutlass_torch.matrix(1, N, K, "n", cutlass.BFloat16)
         c_ref = cutlass_torch.matrix(1, M, N, "n", cutlass.BFloat16)
@@ -991,7 +993,6 @@ class Model(nn.Module):
         self._c_cute, self._c_gpu = cutlass_torch.cute_tensor_like(c_ref, cutlass.BFloat16, True, 16)
         self._stream = cutlass_torch.default_stream()
 
-        # Compute max active clusters (deferred so CUDA context exists)
         hardware_info = cutlass.utils.HardwareInfo()
         cluster_shape_mnk = self._gemm.cluster_shape_mnk
         self._max_active_clusters = hardware_info.get_max_active_clusters(
@@ -999,11 +1000,8 @@ class Model(nn.Module):
         )
         self._compiled = cute.compile(
             self._gemm,
-            self._a_cute,
-            self._b_cute,
-            self._c_cute,
-            self._max_active_clusters,
-            self._stream,
+            self._a_cute, self._b_cute, self._c_cute,
+            self._max_active_clusters, self._stream,
         )
         self._cached_shape = shape_key
 
@@ -1026,10 +1024,12 @@ class Model(nn.Module):
 
         self._ensure_compiled(M, K, N)
 
-        # A: PyTorch copy (same layout, but respects CUTLASS alignment)
+        # A: copy to col-major CUTLASS buffer (row→col implicit transpose, ~165us)
+        # Cannot avoid: CUTLASS col-major M×K ≠ PyTorch row-major M×K.
         self._a_gpu.view(M, K).copy_(A)
-        # B: raw GPU memcpy — NO transpose, NO PyTorch kernel.
-        # _b_gpu is N×K col-major; B is K×N row-major = same physical bytes.
+
+        # B: raw memcpy — zero transpose.
+        # CUTLASS col-major N×K = PyTorch row-major K×N = same bytes.
         cuda_driver.cuMemcpyDtoDAsync(
             self._b_gpu.data_ptr(), B.data_ptr(),
             B.numel() * B.element_size(), self._stream
@@ -1040,7 +1040,6 @@ class Model(nn.Module):
             self._max_active_clusters, self._stream,
         )
 
-        # c_gpu shares memory with c_cute; result is already there (M×N×1)
         return self._c_gpu.squeeze(-1)
 
 

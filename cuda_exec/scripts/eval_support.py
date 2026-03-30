@@ -105,11 +105,6 @@ def load_reference_module(reference_path: Path):
     spec = importlib.util.spec_from_file_location("cuda_exec_reference_module", reference_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"failed to load reference module from {reference_path}")
-    # Add reference directory to sys.path so sibling imports (e.g. cute_gemm) resolve
-    import sys
-    ref_dir = str(reference_path.parent)
-    if ref_dir not in sys.path:
-        sys.path.insert(0, ref_dir)
     module = importlib.util.module_from_spec(spec)
     # Add the reference directory to sys.path so sibling imports (e.g. cute_gemm) work
     ref_dir = str(reference_path.parent)

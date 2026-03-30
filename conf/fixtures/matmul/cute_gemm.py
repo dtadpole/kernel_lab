@@ -1,7 +1,7 @@
-"""CuTe DSL BF16 GEMM for SM120 — zero-copy row-major inputs.
+"""CuTe DSL BF16 GEMM for SM120 — minimal cp.async + mma.sync kernel.
 
-Persistent kernel: TMA global→SMEM, ldmatrix SMEM→register, mma.sync compute.
-Accepts PyTorch row-major A (M,K) and B (K,N) directly — no copy, no transpose.
+Zero-copy from row-major PyTorch tensors.
+No TMA, no persistence, no warp specialization, single-buffer.
 
 Convention (CuTe):
     A: (M, K), K-major (stride K,1) — row-major PyTorch tensor
@@ -10,10 +10,12 @@ Convention (CuTe):
 """
 from __future__ import annotations
 
+import time
+
 import cuda.bindings.driver as cuda_driver
 import cutlass
 import cutlass.cute as cute
-import cutlass.pipeline as pipeline
+from cutlass.cute.nvgpu import cpasync, warp
 import cutlass.utils as utils
 import cutlass.utils.hopper_helpers as sm90_utils
 import torch
@@ -21,21 +23,25 @@ from cutlass.cute.runtime import from_dlpack
 
 
 class Sm120Gemm:
-    """BF16 GEMM for SM120: TMA + mma.sync + persistent kernel."""
+    """Minimal BF16 GEMM for SM120: cp.async G2S, ldmatrix S2R, mma.sync.
 
-    def __init__(self):
-        self.bM = 128
-        self.bN = 128
-        self.bK = 64
-        self.stage = 2  # pipeline stages (fits in SM120's 99KB SMEM)
+    One tile per CTA, single SMEM buffer, all threads do load+compute.
+    """
+
+    def __init__(
+        self,
+        bM: int = 64,
+        bN: int = 64,
+        bK: int = 32,
+        num_warps: int = 4,
+    ):
+        self.bM = bM
+        self.bN = bN
+        self.bK = bK
+        self.num_warps = num_warps
+        self.num_threads = num_warps * 32
+        self.dtype = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
-        self.atom_layout = (2, 2, 1)
-        self.num_mma_warps = 4
-        self.threads_per_cta = (self.num_mma_warps + 1) * 32  # 160
-
-        self.mma_inst_mnk = (16, 8, 16)
-        self.load_register_requirement = 40
-        self.mma_register_requirement = 232
 
     @cute.jit
     def __call__(
@@ -51,295 +57,253 @@ class Sm120Gemm:
         a_layout_enum = utils.LayoutEnum.from_tensor(mA)
         b_layout_enum = utils.LayoutEnum.from_tensor(mB)
 
-        # ---- MMA ----
-        op = cute.nvgpu.warp.MmaF16BF16Op(a_dtype, self.acc_dtype, self.mma_inst_mnk)
-        tC = cute.make_layout(self.atom_layout)
-        permutation_mnk = (
-            self.atom_layout[0] * self.mma_inst_mnk[0],
-            self.atom_layout[1] * self.mma_inst_mnk[1] * 2,
-            self.atom_layout[2] * self.mma_inst_mnk[2],
-        )
-        tiled_mma = cute.make_tiled_mma(op, tC, permutation_mnk=permutation_mnk)
-
-        # ---- SMEM layouts ----
-        a_smem_layout_staged = sm90_utils.make_smem_layout_a(
-            a_layout_enum, (self.bM, self.bN, self.bK), a_dtype, self.stage,
-        )
-        b_smem_layout_staged = sm90_utils.make_smem_layout_b(
-            b_layout_enum, (self.bM, self.bN, self.bK), b_dtype, self.stage,
-        )
-
-        # ---- TMA load atoms ----
-        tma_op = cute.nvgpu.cpasync.CopyBulkTensorTileG2SOp()
-
-        a_smem_1stage = cute.slice_(a_smem_layout_staged, (None, None, 0))
-        tma_atom_a, tma_tensor_a = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            tma_op, mA, a_smem_1stage, (self.bM, self.bK), num_multicast=1,
-        )
-        b_smem_1stage = cute.slice_(b_smem_layout_staged, (None, None, 0))
-        tma_atom_b, tma_tensor_b = cute.nvgpu.cpasync.make_tiled_tma_atom(
-            tma_op, mB, b_smem_1stage, (self.bN, self.bK), num_multicast=1,
-        )
-
-        # ---- Grid ----
         M = mA.layout.shape[0]
+        K = mA.layout.shape[1]
         N = mB.layout.shape[0]
-        num_ctas_mnl = (M // self.bM, N // self.bN, 1)
-        tile_sched_params = utils.PersistentTileSchedulerParams(
-            num_ctas_mnl, (1, 1, 1)
+
+        tile_mnk = (self.bM, self.bN, self.bK)
+
+        # ---- MMA atom ----
+        mma_mnk = (16, 8, 16)
+        op = warp.MmaF16BF16Op(a_dtype, self.acc_dtype, mma_mnk)
+        atom_layout = (self.num_warps, 1, 1)
+        permutation_mnk = (
+            atom_layout[0] * mma_mnk[0],
+            atom_layout[1] * mma_mnk[1] * 2,
+            atom_layout[2] * mma_mnk[2],
         )
-        max_active = cutlass.const_expr(170)
-        grid = utils.StaticPersistentTileScheduler.get_grid_shape(
-            tile_sched_params, max_active
+        tiled_mma = cute.make_tiled_mma(
+            op,
+            cute.make_layout(atom_layout),
+            permutation_mnk=permutation_mnk,
         )
+
+        # ---- SMEM layouts via sm90_utils (handles K-major vs MN-major) ----
+        # A: (M, K), K-major -> K_SW* atom, mode 1 contiguous
+        # B: (N, K), N-major -> MN_SW* atom, mode 0 contiguous
+        sA_layout_staged = sm90_utils.make_smem_layout_a(
+            a_layout_enum, tile_mnk, a_dtype, 1,
+        )
+        sB_layout_staged = sm90_utils.make_smem_layout_b(
+            b_layout_enum, tile_mnk, b_dtype, 1,
+        )
+        # Slice out the single stage dimension
+        sA_layout = cute.slice_(sA_layout_staged, (None, None, 0))
+        sB_layout = cute.slice_(sB_layout_staged, (None, None, 0))
+
+        # ---- Global->SMEM tiled copy (cp.async, 128-bit vectorized) ----
+        copy_bits = 128
+        copy_elems = copy_bits // a_dtype.width  # 8 bf16 elements
+        g2s_atom = cute.make_copy_atom(
+            cpasync.CopyG2SOp(),
+            a_dtype,
+            num_bits_per_copy=copy_bits,
+        )
+
+        # A: K-major, vectorize along K (mode 1)
+        # bK / copy_elems threads along K, rest along M
+        a_k_threads = self.bK // copy_elems
+        a_m_threads = self.num_threads // a_k_threads
+        thr_layout_A = cute.make_ordered_layout(
+            (a_m_threads, a_k_threads), order=(1, 0)
+        )
+        val_layout_A = cute.make_layout((1, copy_elems))
+        gmem_copy_A = cute.make_tiled_copy_tv(
+            g2s_atom, thr_layout_A, val_layout_A
+        )
+
+        # B: N-major, vectorize along N (mode 0)
+        b_n_threads = self.bN // copy_elems
+        b_k_threads = self.num_threads // b_n_threads
+        thr_layout_B = cute.make_ordered_layout(
+            (b_n_threads, b_k_threads), order=(0, 1)
+        )
+        val_layout_B = cute.make_layout((copy_elems, 1))
+        gmem_copy_B = cute.make_tiled_copy_tv(
+            g2s_atom, thr_layout_B, val_layout_B
+        )
+
+        # ---- SMEM->Register copy atoms (ldmatrix) ----
+        a_is_m_major = a_layout_enum.is_m_major_a()
+        b_is_n_major = b_layout_enum.is_n_major_b()
+        # A K-major -> transpose=False; B N-major -> transpose=True
+        ldm_atom_A = cute.make_copy_atom(
+            warp.LdMatrix8x8x16bOp(transpose=a_is_m_major, num_matrices=4),
+            a_dtype,
+        )
+        ldm_atom_B = cute.make_copy_atom(
+            warp.LdMatrix8x8x16bOp(transpose=b_is_n_major, num_matrices=4),
+            b_dtype,
+        )
+        smem_copy_A = cute.make_tiled_copy_A(ldm_atom_A, tiled_mma)
+        smem_copy_B = cute.make_tiled_copy_B(ldm_atom_B, tiled_mma)
 
         # ---- Shared storage ----
         @cute.struct
         class SharedStorage:
-            mbar: cute.struct.MemRange[cutlass.Int64, self.stage * 2]
             sa: cute.struct.Align[
-                cute.struct.MemRange[a_dtype, cute.cosize(a_smem_layout_staged)], 1024
+                cute.struct.MemRange[a_dtype, cute.cosize(sA_layout)], 128
             ]
             sb: cute.struct.Align[
-                cute.struct.MemRange[b_dtype, cute.cosize(b_smem_layout_staged)], 1024
+                cute.struct.MemRange[b_dtype, cute.cosize(sB_layout)], 128
             ]
 
-        self.shared_storage = SharedStorage
+        self._shared_storage = SharedStorage
 
-        self._a_is_m_major = a_layout_enum.is_m_major_a()
-        self._b_is_n_major = b_layout_enum.is_n_major_b()
+        # ---- Grid: one CTA per (m_tile, n_tile) ----
+        grid = (M // self.bM, N // self.bN, 1)
 
         self.kernel(
-            tma_atom_a, tma_tensor_a,
-            tma_atom_b, tma_tensor_b,
-            mC, tiled_mma,
-            a_smem_layout_staged, b_smem_layout_staged,
-            tile_sched_params,
+            mA,
+            mB,
+            mC,
+            tiled_mma,
+            sA_layout,
+            sB_layout,
+            gmem_copy_A,
+            gmem_copy_B,
+            smem_copy_A,
+            smem_copy_B,
         ).launch(
             grid=grid,
-            block=[self.threads_per_cta, 1, 1],
-            cluster=(1, 1, 1),
-            smem=self.shared_storage.size_in_bytes(),
+            block=[self.num_threads, 1, 1],
+            smem=SharedStorage.size_in_bytes(),
             stream=stream,
         )
 
     @cute.kernel
     def kernel(
         self,
-        tma_atom_a: cute.CopyAtom,
-        mA_mk: cute.Tensor,
-        tma_atom_b: cute.CopyAtom,
-        mB_nk: cute.Tensor,
-        mC_mn: cute.Tensor,
+        mA: cute.Tensor,
+        mB: cute.Tensor,
+        mC: cute.Tensor,
         tiled_mma: cute.TiledMma,
-        a_smem_layout_staged: cute.ComposedLayout,
-        b_smem_layout_staged: cute.ComposedLayout,
-        tile_sched_params: utils.PersistentTileSchedulerParams,
+        sA_layout: cute.ComposedLayout,
+        sB_layout: cute.ComposedLayout,
+        gmem_copy_A: cute.TiledCopy,
+        gmem_copy_B: cute.TiledCopy,
+        smem_copy_A: cute.TiledCopy,
+        smem_copy_B: cute.TiledCopy,
     ):
         tidx, _, _ = cute.arch.thread_idx()
-        warp_idx = cute.arch.warp_idx()
-        warp_idx = cute.arch.make_warp_uniform(warp_idx)
+        bx, by, _ = cute.arch.block_idx()
 
-        if warp_idx == 0:
-            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_a)
-            cute.nvgpu.cpasync.prefetch_descriptor(tma_atom_b)
-
-        # ---- Shared memory ----
+        # ---- Allocate SMEM ----
         smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(self.shared_storage)
+        storage = smem.allocate(self._shared_storage)
+        sA = storage.sa.get_tensor(sA_layout)
+        sB = storage.sb.get_tensor(sB_layout)
 
-        # ---- Pipeline ----
-        a_smem_1 = cute.slice_(a_smem_layout_staged, (None, None, 0))
-        b_smem_1 = cute.slice_(b_smem_layout_staged, (None, None, 0))
-        tma_bytes = (
-            cute.size_in_bytes(cutlass.BFloat16, a_smem_1)
-            + cute.size_in_bytes(cutlass.BFloat16, b_smem_1)
-        )
+        # ---- Global tiles for this CTA ----
+        gA = cute.local_tile(mA, (self.bM, self.bK), (bx, None))
+        gB = cute.local_tile(mB, (self.bN, self.bK), (by, None))
+        gC = cute.local_tile(mC, (self.bM, self.bN), (bx, by))
 
-        cta_layout = cute.make_layout((1, 1, 1))
-        cta_layout_v = cute.make_layout((1, *cta_layout.shape))
+        k_tile_count = cute.size(gA, mode=[2])
 
-        prod_group = pipeline.CooperativeGroup(pipeline.Agent.Thread)
-        cons_group = pipeline.CooperativeGroup(
-            pipeline.Agent.Thread,
-            size=self.num_mma_warps * 32,
-        )
+        # ---- G2S thread partitions ----
+        thr_g2s_A = gmem_copy_A.get_slice(tidx)
+        tAgA = thr_g2s_A.partition_S(gA)
+        tAsA = thr_g2s_A.partition_D(sA)
 
-        pipe = pipeline.PipelineTmaAsync.create(
-            barrier_storage=storage.mbar.data_ptr(),
-            num_stages=self.stage,
-            producer_group=prod_group,
-            consumer_group=cons_group,
-            tx_count=tma_bytes,
-            cta_layout_vmnk=cta_layout_v,
-        )
-        cons_state = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Consumer, self.stage
-        )
-        prod_state = pipeline.make_pipeline_state(
-            pipeline.PipelineUserType.Producer, self.stage
-        )
+        thr_g2s_B = gmem_copy_B.get_slice(tidx)
+        tBgB = thr_g2s_B.partition_S(gB)
+        tBsB = thr_g2s_B.partition_D(sB)
 
-        # ---- SMEM tensors ----
-        sA = storage.sa.get_tensor(
-            a_smem_layout_staged.outer, swizzle=a_smem_layout_staged.inner
-        )
-        sB = storage.sb.get_tensor(
-            b_smem_layout_staged.outer, swizzle=b_smem_layout_staged.inner
-        )
-
-        # ---- Global partitions ----
-        gA = cute.local_tile(mA_mk, (self.bM, self.bK), (None, None))
-        gB = cute.local_tile(mB_nk, (self.bN, self.bK), (None, None))
-        gC = cute.local_tile(mC_mn, (self.bM, self.bN), (None, None))
-
-        # ---- TMA partitions ----
-        a_cta = cute.make_layout(cute.slice_(cta_layout, (0, None, 0)).shape)
-        sa_grp = cute.group_modes(sA, 0, 2)
-        gA_grp = cute.group_modes(gA, 0, 2)
-        tAsA, tAgA = cute.nvgpu.cpasync.tma_partition(
-            tma_atom_a, 1, a_cta, sa_grp, gA_grp,
-        )
-
-        b_cta = cute.make_layout(cute.slice_(cta_layout, (None, 0, 0)).shape)
-        sb_grp = cute.group_modes(sB, 0, 2)
-        gB_grp = cute.group_modes(gB, 0, 2)
-        tBsB, tBgB = cute.nvgpu.cpasync.tma_partition(
-            tma_atom_b, 1, b_cta, sb_grp, gB_grp,
-        )
-
-        # ---- MMA partitions ----
+        # ---- MMA thread partitions & register fragments ----
         thr_mma = tiled_mma.get_slice(tidx)
+        tCrA = thr_mma.make_fragment_A(thr_mma.partition_A(sA))
+        tCrB = thr_mma.make_fragment_B(thr_mma.partition_B(sB))
+
+        # ---- S2R (ldmatrix) thread partitions ----
+        thr_s2r_A = smem_copy_A.get_slice(tidx)
+        tCsA = thr_s2r_A.partition_S(sA)
+        tCrA_view = thr_s2r_A.retile(tCrA)
+
+        thr_s2r_B = smem_copy_B.get_slice(tidx)
+        tCsB = thr_s2r_B.partition_S(sB)
+        tCrB_view = thr_s2r_B.retile(tCrB)
+
+        num_k_mma = cute.size(tCsA, mode=[2])
+
+        # ---- Accumulator (zero-initialized) ----
+        acc_shape = thr_mma.partition_shape_C((self.bM, self.bN))
+        acc = cute.make_fragment(acc_shape, self.acc_dtype)
+        acc.fill(0.0)
+
+        # ---- Main loop over K tiles ----
+        for kt in cutlass.range(k_tile_count):
+            # Load A,B tiles from global to shared via cp.async
+            cute.copy(gmem_copy_A, tAgA[None, None, None, kt], tAsA)
+            cute.copy(gmem_copy_B, tBgB[None, None, None, kt], tBsB)
+
+            # Commit + wait for all cp.async to finish
+            cute.arch.cp_async_commit_group()
+            cute.arch.cp_async_wait_group(0)
+            cute.arch.sync_threads()
+
+            # Load from SMEM to registers via ldmatrix, then compute MMA
+            for k in cutlass.range_constexpr(num_k_mma):
+                cute.copy(
+                    smem_copy_A,
+                    tCsA[None, None, k],
+                    tCrA_view[None, None, k],
+                )
+                cute.copy(
+                    smem_copy_B,
+                    tCsB[None, None, k],
+                    tCrB_view[None, None, k],
+                )
+                cute.gemm(
+                    tiled_mma,
+                    acc,
+                    tCrA[None, None, k],
+                    tCrB[None, None, k],
+                    acc,
+                )
+
+            # Barrier before next iteration reuses SMEM
+            cute.arch.sync_threads()
+
+        # ---- Store accumulator to global memory ----
+        st_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyUniversalOp(), self.acc_dtype
+        )
         tCgC = thr_mma.partition_C(gC)
-
-        # ---- Register fragments (must create before retile) ----
-        tCrA = tiled_mma.make_fragment_A(thr_mma.partition_A(sA))
-        tCrB = tiled_mma.make_fragment_B(thr_mma.partition_B(sB))
-
-        # ---- ldmatrix: SMEM → registers ----
-        atom_ldm_A = cute.make_copy_atom(
-            cute.nvgpu.warp.LdMatrix8x8x16bOp(self._a_is_m_major, 4),
-            cutlass.BFloat16,
-        )
-        atom_ldm_B = cute.make_copy_atom(
-            cute.nvgpu.warp.LdMatrix8x8x16bOp(self._b_is_n_major, 4),
-            cutlass.BFloat16,
-        )
-        copy_A = cute.make_tiled_copy_A(atom_ldm_A, tiled_mma)
-        copy_B = cute.make_tiled_copy_B(atom_ldm_B, tiled_mma)
-
-        thr_cA = copy_A.get_slice(tidx)
-        tCsA = thr_cA.partition_S(sA)
-        tCrA_copy = thr_cA.retile(tCrA)  # retile REGISTER fragment
-
-        thr_cB = copy_B.get_slice(tidx)
-        tCsB = thr_cB.partition_S(sB)
-        tCrB_copy = thr_cB.retile(tCrB)  # retile REGISTER fragment
-
-        k_tile_cnt = cute.size(tAgA, mode=[2])
-        num_k_blocks = cute.size(tCrA, mode=[2])
-
-        cute.arch.sync_threads()
-
-        # ---- Persistent scheduler ----
-        sched = utils.StaticPersistentTileScheduler.create(
-            tile_sched_params, cute.arch.block_idx(), cute.arch.grid_dim()
-        )
-        work = sched.initial_work_tile_info()
-
-        # ======== MMA warps (0..3) ========
-        if warp_idx < self.num_mma_warps:
-            cute.arch.setmaxregister_increase(self.mma_register_requirement)
-
-            while work.is_valid_tile:
-                tile_m, tile_n, _ = work.tile_idx
-                # Reset accumulators for new tile
-                accum = cute.make_fragment(
-                    tCgC[None, None, None, 0, 0].shape, self.acc_dtype
-                )
-
-                for _ in cutlass.range(k_tile_cnt):
-                    pipe.consumer_wait(cons_state)
-
-                    for kb in cutlass.range(num_k_blocks, unroll_full=True):
-                        kc = (None, None, kb, cons_state.index)
-                        cute.copy(copy_A, tCsA[kc], tCrA_copy[kc])
-                        cute.copy(copy_B, tCsB[kc], tCrB_copy[kc])
-                        cute.gemm(tiled_mma, accum, tCrA[kc], tCrB[kc], accum)
-
-                    pipe.consumer_release(cons_state)
-                    cons_state.advance()
-
-                # Store results
-                epilog_bar = pipeline.NamedBarrier(
-                    barrier_id=2, num_threads=self.num_mma_warps * 32
-                )
-                epilog_bar.arrive_and_wait()
-
-                st_atom = cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(), self.acc_dtype
-                )
-                cute.copy(st_atom, accum, tCgC[None, None, None, tile_m, tile_n])
-
-                sched.advance_to_next_work()
-                work = sched.get_current_work()
-
-        # ======== DMA warp (4) ========
-        elif warp_idx == self.num_mma_warps:
-            cute.arch.setmaxregister_decrease(self.load_register_requirement)
-            lane_in_warp = cute.arch.warp_idx() % 4
-            lane_in_warp = cute.arch.make_warp_uniform(lane_in_warp)
-
-            while work.is_valid_tile:
-                tile_m, tile_n, _ = work.tile_idx
-
-                for kt in cutlass.range(k_tile_cnt):
-                    pipe.producer_acquire(prod_state)
-
-                    if lane_in_warp == 0:
-                        cute.copy(
-                            tma_atom_a,
-                            tAgA[(None, tile_m, kt)],
-                            tAsA[(None, prod_state.index)],
-                            tma_bar_ptr=pipe.producer_get_barrier(prod_state),
-                            mcast_mask=0,
-                        )
-                        cute.copy(
-                            tma_atom_b,
-                            tBgB[(None, tile_n, kt)],
-                            tBsB[(None, prod_state.index)],
-                            tma_bar_ptr=pipe.producer_get_barrier(prod_state),
-                            mcast_mask=0,
-                        )
-
-                    pipe.producer_commit(prod_state)
-                    prod_state.advance()
-
-                sched.advance_to_next_work()
-                work = sched.get_current_work()
+        cute.copy(st_atom, acc, tCgC)
 
 
 def test():
-    """Verify correctness."""
+    """Verify correctness at 256x256."""
     M, K, N = 256, 256, 256
 
-    A = torch.arange(M * K, dtype=torch.bfloat16, device="cuda").reshape(M, K).contiguous()
-    B = torch.arange(K * N, dtype=torch.bfloat16, device="cuda").reshape(K, N).contiguous()
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
     C = torch.zeros(M, N, dtype=torch.float32, device="cuda")
 
-    # Zero-copy
-    a_cute = from_dlpack(A, assumed_align=16)
-    b_cute = from_dlpack(B.t(), assumed_align=16)  # (N,K) N-major, zero copy
-    c_cute = from_dlpack(C, assumed_align=16)
+    # Zero-copy CuTe tensors
+    a_cute = from_dlpack(A, assumed_align=16)  # (M, K) K-major
+    b_cute = from_dlpack(B.t(), assumed_align=16)  # (N, K) N-major
+    c_cute = from_dlpack(C, assumed_align=16)  # (M, N) N-major
 
-    print(f"A: shape={a_cute.shape}, ld={a_cute.leading_dim}, layout={utils.LayoutEnum.from_tensor(a_cute)}")
-    print(f"B: shape={b_cute.shape}, ld={b_cute.leading_dim}, layout={utils.LayoutEnum.from_tensor(b_cute)}")
+    print(
+        f"A cute: shape={a_cute.shape}, "
+        f"layout={utils.LayoutEnum.from_tensor(a_cute)}"
+    )
+    print(
+        f"B cute: shape={b_cute.shape}, "
+        f"layout={utils.LayoutEnum.from_tensor(b_cute)}"
+    )
+    print(f"C cute: shape={c_cute.shape}")
 
-    gemm = Sm120Gemm()
+    gemm = Sm120Gemm(bM=64, bN=64, bK=32, num_warps=4)
     stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
 
-    print("Compiling...")
+    print("Compiling (MLIR JIT)...")
+    t0 = time.time()
     compiled = cute.compile(gemm, a_cute, b_cute, c_cute, stream=stream)
+    t_compile = time.time() - t0
+    print(f"Compiled in {t_compile:.1f}s")
 
     print("Running...")
     compiled(a_cute, b_cute, c_cute, stream)
@@ -348,10 +312,12 @@ def test():
     ref = A.float() @ B.float()
     diff = (C - ref).abs().max().item()
     print(f"max_diff = {diff:.6f}")
-    print(f"Correctness: {'PASSED' if diff < 1.0 else 'FAILED'}")
-    return diff < 1.0
+    passed = diff < 1.0
+    print(f"Correctness: {'PASSED' if passed else 'FAILED'}")
+    return passed
 
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(0 if test() else 1)

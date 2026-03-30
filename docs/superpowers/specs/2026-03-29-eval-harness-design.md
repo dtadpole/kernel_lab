@@ -174,7 +174,7 @@ RTOL = 1e-02
 
 **evaluate.py**: imports from `eval_support` instead of defining locally. Keeps only: `_run_generated()`, `_verify_correctness()`, `_comparison_payload()`, `main()`.
 
-**profile.py**: imports from `eval_support` instead of from `evaluate`. Keeps only: `_run_generated()`, `_generated_summary()`, `_dual_summary()`, `main()`.
+**profile.py**: (removed — profile is now NCU-only, handled by `profile.sh` and inline NCU commands in `tasks.py`).
 
 ---
 

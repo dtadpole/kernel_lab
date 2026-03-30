@@ -54,7 +54,7 @@ HTTP 400
 ### Reference discovery (scripts/evaluate.py)
 
 - **`_load_reference_entry`**: Change from `rglob("*.py")` finding exactly one `.py` to `rglob("reference.py")` finding exactly one match. Error message updated accordingly.
-- **`scripts/profile.py`**: Inherits the change via import.
+- **`scripts/profile.py`**: (removed — profile is now NCU-only via `profile.sh` and `tasks.py`).
 
 ### Test fixtures
 

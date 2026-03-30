@@ -152,7 +152,7 @@ def _list_available(turn_dir: Path) -> list[str]:
 # (reference, generated, artifacts, logs) can be huge and is available via
 # cuda_read_file on demand.
 _EVAL_CONFIG_KEEP = {"status", "correctness", "performance"}
-_PROFILE_CONFIG_KEEP = {"status", "summary", "reference_summary", "generated_summary"}
+_PROFILE_CONFIG_KEEP = {"status", "summary"}
 
 
 def _compact_response(obj: Any, *, _endpoint: str = "") -> Any:
@@ -185,7 +185,7 @@ def _compact_response(obj: Any, *, _endpoint: str = "") -> Any:
         if "status" in obj and "correctness" in obj:
             # Evaluate config output
             return {k: v for k, v in obj.items() if k in _EVAL_CONFIG_KEEP}
-        if "status" in obj and "summary" in obj and "reference_summary" in obj:
+        if "status" in obj and "summary" in obj and "correctness" not in obj:
             # Profile config output
             return {k: v for k, v in obj.items() if k in _PROFILE_CONFIG_KEEP}
 
@@ -657,29 +657,26 @@ async def cuda_get_profile_data(
     attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
     config_slug: Annotated[str | None, Field(description="Filter to a single config slug (omit for all configs)")] = None,
     field: Annotated[
-        Literal["all", "summary", "generated_summary", "reference_summary"],
+        Literal["all", "summary"],
         Field(description="Which part of the profile result to return"),
     ] = "all",
 ) -> str:
     """Retrieve structured profile results from a prior turn.
 
-    Reads the saved raw profile response and extracts latency
-    summaries, optionally filtered to a single config.
+    Reads the saved raw profile response and extracts the NCU
+    summary, optionally filtered to a single config.
 
     Parameters:
         metadata:    Turn identity dict (identifies which turn to look up).
         attempt:     1-based attempt number (default 1).
         config_slug: If provided, return data only for this config.
                      If omitted, return data for all configs.
-        field:       "all"               — all summaries per config.
-                     "summary"           — overall latency summary.
-                     "generated_summary" — generated-side summary only.
-                     "reference_summary" — reference-side summary only.
+        field:       "all"     — status + summary per config.
+                     "summary" — summary only per config.
 
     Returns JSON with:
         all_ok:  bool — aggregate success.
-        configs: {config_slug: {status, summary?, generated_summary?,
-                  reference_summary?}}
+        configs: {config_slug: {status, summary?}}
 
     Available configs are listed in the error message if config_slug
     does not match.
@@ -707,10 +704,8 @@ async def cuda_get_profile_data(
         configs = {config_slug: configs[config_slug]}
 
     keep_keys = {"status"}
-    if field == "all":
-        keep_keys.update({"summary", "generated_summary", "reference_summary"})
-    else:
-        keep_keys.add(field)
+    if field in ("all", "summary"):
+        keep_keys.add("summary")
 
     result_configs = {
         slug: {k: v for k, v in cfg.items() if k in keep_keys}

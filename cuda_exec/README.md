@@ -21,8 +21,8 @@ FastAPI-based remote CUDA execution service.
 - top-level public responses use `all_ok`
 - evaluate/profile responses mirror request shape with `configs: Dict[config_slug, ...]`
 - evaluate config outputs carry `status`, `reference`, `generated`, `correctness`, `performance`, `artifacts`, and `logs`
-- profile requests support `mode` plus `profiler_backend`
-- profile config outputs carry `status`, `summary`, `reference`, `generated`, `reference_summary`, `generated_summary`, `artifacts`, and `logs`
+- profile requests specify `side: "generated" | "reference"` for NCU profiling
+- profile config outputs carry `status`, `summary`, `artifacts`, and `logs`
 - internal state is kept for compile/evaluate/profile bookkeeping, but not exposed in default public responses
 - the runtime mental model is:
   - `workspace = inputs + scratch`

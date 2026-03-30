@@ -619,53 +619,6 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertEqual(payload["generated"]["performance"]["metadata"]["shape_kind"], first_config["shape_kind"])
         self.assertIn("speedup", payload["comparison"]["performance"])
 
-    def test_profile_endpoint_accepts_slug_keyed_configs(self) -> None:
-        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=104))
-        self.assertEqual(compile_status, 200)
-
-        status, body = self.service.post_json(
-            "/profile",
-            {
-                "metadata": self._metadata(104),
-                "timeout_seconds": 5,
-                "mode": "dual",
-                "configs": self._config_map(),
-            },
-        )
-        self.assertIn(status, {200, 400, 408})
-        if status == 200:
-            self.assertIn("all_ok", body)
-            self.assertIn("configs", body)
-            self.assertIsInstance(body["configs"], dict)
-            if body["configs"]:
-                first_slug, first = next(iter(body["configs"].items()))
-                self.assertIn("status", first)
-                self.assertIn("summary", first)
-                self.assertIn("reference", first)
-                self.assertIn("generated", first)
-                self.assertIn("reference_summary", first)
-                self.assertIn("generated_summary", first)
-                self.assertIn("artifacts", first)
-                self.assertIn("logs", first)
-                summary_meta = first["summary"].get("metadata", {})
-                self.assertEqual(summary_meta.get("rank"), self._config_map()[first_slug]["rank"])
-                self.assertEqual(summary_meta.get("shape_kind"), self._config_map()[first_slug]["shape_kind"])
-                self.assertIn("summary", first["reference"])
-                self.assertIn("summary", first["generated"])
-                self.assertEqual(first["reference_summary"].get("metadata"), first["reference"]["summary"].get("metadata"))
-                self.assertEqual(first["reference_summary"].get("latency_ms"), first["reference"]["summary"].get("latency_ms"))
-                self.assertEqual(first["reference_summary"].get("runs"), first["reference"]["summary"].get("runs"))
-                self.assertEqual(first["generated_summary"].get("metadata"), first["generated"]["summary"].get("metadata"))
-                self.assertEqual(first["generated_summary"].get("latency_ms"), first["generated"]["summary"].get("latency_ms"))
-                self.assertEqual(first["generated_summary"].get("runs"), first["generated"]["summary"].get("runs"))
-                artifact_paths = list(first["artifacts"].keys())
-                self.assertTrue(any(path.endswith("summary.json") for path in artifact_paths))
-                comparison = first["summary"].get("comparison", {})
-                self.assertIn("reference_median_ms", comparison)
-                self.assertIn("generated_median_ms", comparison)
-        else:
-            self.assertIn("detail", body)
-
     def test_profile_endpoint_ncu_generated(self) -> None:
         compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=119))
         self.assertEqual(compile_status, 200)
@@ -781,7 +734,7 @@ class CudaExecE2ETest(unittest.TestCase):
             {
                 "metadata": self._metadata(127),
                 "timeout_seconds": 5,
-                "mode": "generated_only",
+                "side": "generated",
                 "configs": self._config_map(),
             },
         )
@@ -790,7 +743,7 @@ class CudaExecE2ETest(unittest.TestCase):
             {
                 "metadata": self._metadata(127),
                 "timeout_seconds": 5,
-                "mode": "generated_only",
+                "side": "generated",
                 "configs": self._config_map(),
             },
         )

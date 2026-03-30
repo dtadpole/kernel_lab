@@ -154,9 +154,9 @@ Retrieve structured profile results from a prior turn, with optional config filt
 | `metadata` | `dict` | (required) | Turn identity (identifies which turn) |
 | `attempt` | `int` | `1` | 1-based attempt number |
 | `config_slug` | `str \| None` | `None` | Filter to a single config (omit for all) |
-| `field` | `str` | `"all"` | `"all"` / `"summary"` / `"generated_summary"` / `"reference_summary"` |
+| `field` | `str` | `"all"` | `"all"` / `"summary"` |
 
-**Returns:** `{all_ok, configs: {slug: {status, summary?, generated_summary?, reference_summary?}}}`. Unknown `config_slug` returns an error listing available configs.
+**Returns:** `{all_ok, configs: {slug: {status, summary?}}}`. Unknown `config_slug` returns an error listing available configs.
 
 ### cuda_get_data_point
 

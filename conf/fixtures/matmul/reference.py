@@ -135,7 +135,7 @@ class Sm120GemmKernel:
             num_threads=self.num_mma_warps * self.num_threads_per_warp,
         )
         self.load_register_requirement = 40
-        self.mma_register_requirement = 232
+        self.mma_register_requirement = 256
 
     def _setup_attributes(self):
         self.mma_inst_mnk = (16, 8, 16)
@@ -1024,10 +1024,11 @@ class Model(nn.Module):
 
         self._ensure_compiled(M, K, N)
 
-        # Copy inputs into pre-allocated CUTLASS buffers (3D with batch=1)
-        self._a_gpu.copy_(A.unsqueeze(-1))
-        self._b_gpu.copy_(B.t().contiguous().unsqueeze(-1))
-        self._c_gpu.zero_()
+        # Copy A directly (same layout, one memcpy kernel)
+        self._a_gpu.view(M, K).copy_(A)
+        # Transpose B directly into CUTLASS buffer (one kernel, not two)
+        self._b_gpu.view(N, K).copy_(B.t())
+        # Skip zero_() — GEMM accumulator init is 0 (beta=0)
 
         self._compiled(
             self._a_cute, self._b_cute, self._c_cute,

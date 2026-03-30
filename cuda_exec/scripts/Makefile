@@ -55,7 +55,7 @@ else ifeq ($(KERNEL),matmul)
   _KERNEL_DIRECTION_SLUG := matmul
   _KERNEL_CONFIG_SLUG    := mat-4096x4096
   _KERNEL_CONFIG_JSON    := {"family":"integration-matrix-multiplication","rank":2,"shape":[4096,4096],"input_size":16777216,"shape_kind":"2d"}
-  _KERNEL_NCU_FILTER     := regex:"matmul_bf16"
+  _KERNEL_NCU_FILTER     := regex:"matmul_bf16|cutlass"
 else
   # Unknown kernel — assume fixtures exist at conf/fixtures/$(KERNEL)/
   _KERNEL_DIRECTION_ID   := 99

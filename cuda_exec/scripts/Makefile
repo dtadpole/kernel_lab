@@ -57,6 +57,13 @@ else ifeq ($(KERNEL),matmul)
   _KERNEL_CONFIG_SLUG    := mat-4096x4096
   _KERNEL_CONFIG_JSON    := {"family":"integration-matrix-multiplication","rank":2,"shape":[4096,4096],"input_size":16777216,"shape_kind":"2d"}
   _KERNEL_NCU_FILTER     := regex:"matmul_bf16|cutlass"
+else ifeq ($(KERNEL),fa4)
+  _KERNEL_DIRECTION_ID   := 3
+  _KERNEL_DIRECTION_SLUG := fa4
+  _KERNEL_CONFIG_SLUG    := mha-causal-b2-s16384
+  _KERNEL_CONFIG_JSON    := {"family":"fa4-mha","batch_size":2,"seq_len":16384,"num_heads":16,"num_kv_heads":16,"head_dim":128,"causal":true,"total_tokens":32768,"input_size":67108864,"rank":4,"shape":[2,16384,16,128],"shape_kind":"4d"}
+  _KERNEL_NCU_FILTER     := regex:"flash_attention|flash_attn"
+  export CUDA_EXEC_HARNESS_NUM_INPUTS := 3
 else
   # Unknown kernel — assume fixtures exist at conf/fixtures/$(KERNEL)/
   _KERNEL_DIRECTION_ID   := 99
@@ -302,6 +309,7 @@ profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for o
 	NCU_PREFIX="$(ARTIFACTS)/ncu-reference.$(CONFIG_SLUG)"
 	echo "--- profile-ncu-reference [$(KERNEL)]: $(CONFIG_SLUG) ---"
 	$(_NCU_CONFIG_ENV) \
+	CUDA_EXEC_CONFIG_JSON='{"slug":"$(CONFIG_SLUG)","params":$(CONFIG_JSON)}' \
 	CUDA_EXEC_NUM_WARMUPS=2 \
 	CUDA_EXEC_NUM_TRIALS=1 \
 	sudo --preserve-env bash "$(PROFILE_SH)" \

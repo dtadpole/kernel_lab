@@ -31,22 +31,26 @@ from torch import nn
 _FA4_AVAILABLE = False
 _flash_attn_func = None
 
-try:
-    from flash_attn.cute import flash_attn_func as _fa4_func
+# Allow forcing SDPA backend via env var: CUDA_EXEC_FA4_BACKEND=sdpa
+_FORCE_BACKEND = os.environ.get("CUDA_EXEC_FA4_BACKEND", "").lower()
 
-    # Smoke test: compile + run a tiny attention to verify the CuTe DSL
-    # path works end-to-end on this GPU.  flash-attn-4 beta versions may
-    # have compatibility issues with certain cutlass-dsl / quack versions.
-    _probe_q = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
-    _probe_k = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
-    _probe_v = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
-    with torch.no_grad():
-        _fa4_func(_probe_q, _probe_k, _probe_v, causal=False)
-    _flash_attn_func = _fa4_func
-    _FA4_AVAILABLE = True
-    del _probe_q, _probe_k, _probe_v
-except Exception:
-    pass
+if _FORCE_BACKEND != "sdpa":
+    try:
+        from flash_attn.cute import flash_attn_func as _fa4_func
+
+        # Smoke test: compile + run a tiny attention to verify the CuTe DSL
+        # path works end-to-end on this GPU.  flash-attn-4 beta versions may
+        # have compatibility issues with certain cutlass-dsl / quack versions.
+        _probe_q = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
+        _probe_k = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
+        _probe_v = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
+        with torch.no_grad():
+            _fa4_func(_probe_q, _probe_k, _probe_v, causal=False)
+        _flash_attn_func = _fa4_func
+        _FA4_AVAILABLE = True
+        del _probe_q, _probe_k, _probe_v
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +141,12 @@ def get_init_inputs() -> list[Any]:
     return []
 
 
-def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
-    """Create Q, K, V tensors for the given FA4 config.
+def get_inputs(config: dict[str, Any]) -> list:
+    """Create Q, K, V tensors and causal flag for the given FA4 config.
 
-    Returns [Q, K, V] each of shape (batch, seqlen, num_heads, head_dim) BF16.
-    For GQA configs where num_kv_heads < num_heads, K and V use num_kv_heads.
+    Returns [Q, K, V, causal] where Q/K/V are (batch, seqlen, num_heads, head_dim) BF16
+    and causal is a bool.  The eval harness calls model(*get_inputs(config)),
+    so causal must be a positional arg here.
     """
     cfg = _normalize_config(config)
     device = torch.device("cuda")
@@ -154,7 +159,7 @@ def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
     Q = torch.randn(B, S, H, D, dtype=torch.bfloat16, device=device)
     K = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
     V = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
-    return [Q, K, V]
+    return [Q, K, V, cfg["causal"]]
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +187,7 @@ def main() -> int:
     device = torch.device("cuda")
     model = Model()
     model = model.cuda(device=device)
-    Q, K, V = get_inputs(config)
-    causal = config.get("causal", False)
+    Q, K, V, causal = get_inputs(config)
 
     print(
         f"FA4 reference: backend={'fa4_cute_dsl' if _FA4_AVAILABLE else 'pytorch_sdpa'}, "

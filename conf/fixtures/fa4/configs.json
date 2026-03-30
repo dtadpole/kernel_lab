@@ -7,7 +7,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [8, 4096, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-causal-b4-s8192": {
     "family": "fa4-mha",
@@ -17,7 +21,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [4, 8192, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-causal-b2-s16384": {
     "family": "fa4-mha",
@@ -27,7 +35,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [2, 16384, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-causal-b1-s32768": {
     "family": "fa4-mha",
@@ -37,7 +49,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [1, 32768, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-noncausal-b8-s4096": {
     "family": "fa4-mha",
@@ -47,7 +63,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [8, 4096, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-noncausal-b4-s8192": {
     "family": "fa4-mha",
@@ -57,7 +77,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [4, 8192, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-noncausal-b2-s16384": {
     "family": "fa4-mha",
@@ -67,7 +91,11 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [2, 16384, 16, 128],
+    "shape_kind": "4d"
   },
   "mha-noncausal-b1-s32768": {
     "family": "fa4-mha",
@@ -77,6 +105,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "rank": 4,
+    "shape": [1, 32768, 16, 128],
+    "shape_kind": "4d"
   }
 }

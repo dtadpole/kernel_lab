@@ -153,7 +153,9 @@ echo "[compile 3/5] Dump resource usage -> $RESOURCE_USAGE_PATH"
 "${RESOURCE_USAGE_CMD[@]}" > >(tee "$RESOURCE_USAGE_STDOUT_PATH" > "$RESOURCE_USAGE_PATH") 2> >(tee "$RESOURCE_USAGE_STDERR_PATH" >&2)
 
 echo "[compile 4/5] Dump SASS with nvdisasm -> $SASS_NVDISASM_PATH"
-"${NVDISASM_CMD[@]}" > >(tee "$NVDISASM_STDOUT_PATH" > "$SASS_NVDISASM_PATH") 2> >(tee "$NVDISASM_STDERR_PATH" >&2)
+if ! "${NVDISASM_CMD[@]}" > >(tee "$NVDISASM_STDOUT_PATH" > "$SASS_NVDISASM_PATH") 2> >(tee "$NVDISASM_STDERR_PATH" >&2); then
+  echo "[compile 4/5] WARNING: nvdisasm failed (non-fatal, continuing)"
+fi
 
 echo "[compile 5/5] Build runnable binary -> $OUTPUT"
 "${BINARY_CMD[@]}"

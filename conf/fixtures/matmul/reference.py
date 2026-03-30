@@ -980,9 +980,11 @@ class Model(nn.Module):
         if self._compiled is not None and self._cached_shape == shape_key:
             return
 
-        # Allocate CUTLASS-layout GPU tensors once
+        # Allocate CUTLASS-layout GPU tensors once.
+        # B uses layout "n" (col-major N×K) = same physical bytes as K×N row-major.
+        # This means we can raw-memcpy B's data without any transpose.
         a_ref = cutlass_torch.matrix(1, M, K, "k", cutlass.BFloat16)
-        b_ref = cutlass_torch.matrix(1, N, K, "k", cutlass.BFloat16)
+        b_ref = cutlass_torch.matrix(1, N, K, "n", cutlass.BFloat16)
         c_ref = cutlass_torch.matrix(1, M, N, "n", cutlass.BFloat16)
         self._a_cute, self._a_gpu = cutlass_torch.cute_tensor_like(a_ref, cutlass.BFloat16, True, 16)
         self._b_cute, self._b_gpu = cutlass_torch.cute_tensor_like(b_ref, cutlass.BFloat16, True, 16)
@@ -1024,10 +1026,14 @@ class Model(nn.Module):
 
         self._ensure_compiled(M, K, N)
 
-        # Copy A (same layout, memcpy)
+        # A: PyTorch copy (same layout, but respects CUTLASS alignment)
         self._a_gpu.view(M, K).copy_(A)
-        # Transpose B into CUTLASS buffer (single strided copy kernel)
-        self._b_gpu.view(N, K).copy_(B.t())
+        # B: raw GPU memcpy — NO transpose, NO PyTorch kernel.
+        # _b_gpu is N×K col-major; B is K×N row-major = same physical bytes.
+        cuda_driver.cuMemcpyDtoDAsync(
+            self._b_gpu.data_ptr(), B.data_ptr(),
+            B.numel() * B.element_size(), self._stream
+        )
 
         self._compiled(
             self._a_cute, self._b_cute, self._c_cute,

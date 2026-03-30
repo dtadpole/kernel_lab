@@ -255,6 +255,88 @@ FA4-style example:
 - keep `evaluate.py` and the HTTP `/evaluate` flow behaviorally aligned with kbEvalCli
 - maintain the compiled-artifact generated-side path that `cuda_exec` needs
 
+## 6a. CuTe DSL reference benchmarking methodology
+
+CuTe DSL (`cutlass.cute`) reference kernels require specific practices to get accurate timing. Naive usage produces misleading results (e.g. 9ms for a vector-add that actually executes in ~40µs) because host-side overhead is captured in GPU event measurements.
+
+### Problem: per-call overhead inflates event timing
+
+`@cute.jit` functions re-generate their MLIR program on every call to verify the kernel content matches the cache. This host-side work (MLIR verification, DLPack conversion, Python dispatch) takes milliseconds. CUDA events record GPU timestamps — if the GPU sits idle waiting for the host to submit the kernel launch, the elapsed time between `start_event` and `end_event` includes that idle gap. This makes event timing measure host dispatch overhead, not kernel execution time.
+
+### Solution: `cute.compile()` + explicit stream
+
+Two changes eliminate the overhead:
+
+1. **Pre-compile with `cute.compile()`** — Returns a fixed `JitExecutor` that skips MLIR re-verification on subsequent calls. Call once (typically in `__init__` or on first `forward()`), reuse the compiled function for all timing runs.
+
+2. **Pass `cuda_driver.CUstream` explicitly to `kernel.launch(stream=...)`** — Ensures the kernel runs on the same CUDA stream as the PyTorch timing events. Without an explicit stream, CuTe DSL may use an internal stream, making PyTorch events miss the kernel entirely.
+
+### Reference implementation pattern
+
+```python
+from cuda.bindings import driver as cuda_driver
+import cutlass.cute as cute
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self._compiled = None
+
+        @cute.kernel
+        def my_kernel(x_ptr, out_ptr, n):
+            ...  # device code
+
+        self.kernel = my_kernel
+
+        @cute.jit
+        def launch(x_ptr, out_ptr, n, blocks, threads, stream: cuda_driver.CUstream):
+            self.kernel(x_ptr, out_ptr, n).launch(
+                grid=[blocks, 1, 1],
+                block=[threads, 1, 1],
+                stream=stream,
+            )
+
+        self._jit_fn = launch
+
+    def _ensure_compiled(self, *example_args):
+        if self._compiled is not None:
+            return
+        fake_stream = cute.runtime.make_fake_stream()
+        self._compiled = cute.compile(self._jit_fn, *example_args, fake_stream)
+
+    def forward(self, x):
+        out = torch.empty_like(x)
+        n = x.numel()
+        blocks = ...
+        self._ensure_compiled(x, out, n, blocks, self.threads)
+        stream = cuda_driver.CUstream(torch.cuda.current_stream(x.device).cuda_stream)
+        self._compiled(x, out, n, blocks, self.threads, stream)
+        return out
+```
+
+### Timing protocol (eval_support.py `measure_reference`)
+
+```
+warmup (5 runs, no timing)  →  torch.cuda.synchronize()  →  timed trials (10 runs):
+    start_ev.record()  →  model(*inputs)  →  end_ev.record()  →  end_ev.synchronize()
+```
+
+- Warmup amortizes first-call JIT compilation (even with `cute.compile()`, CUDA context setup benefits from warmup).
+- `end_ev.synchronize()` (not `torch.cuda.synchronize()`) matches the generated-side harness which uses `cudaEventSynchronize(end_ev)`.
+
+### CuTe DSL built-in benchmarking (available but not used in the pipeline)
+
+`cutlass.cute.testing` provides `benchmark()` and `get_workspace_count()`:
+
+- `testing.benchmark(compiled_fn, ...)` — uses CUDA driver API events (`cuda.bindings.driver`) for GPU-side timing, supports cold-L2 workspace cycling and CUDA graph capture.
+- `testing.get_workspace_count(workspace_bytes, warmup, iterations)` — computes workspace count for L2 cold-cache benchmarking (3× L2 size).
+
+These are canonical for standalone CuTe DSL benchmarks. The evaluate pipeline uses its own `measure_reference()` because it must conform to the `Model(nn.Module)` / `get_inputs(config)` contract shared with kbEvalCli.
+
+### Do NOT put `torch.cuda.synchronize()` inside `forward()`
+
+Reference `forward()` must not synchronize internally. Synchronization is the responsibility of the external timing harness (`measure_reference()` or `main()`). An internal sync blocks the host, adds overhead to event measurements, and prevents the caller from controlling when synchronization happens.
+
 ## 7. Runtime config convention
 
 `evaluate` and `profile` accept slug-keyed config maps:

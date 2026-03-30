@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CUDA_EXEC_DIR = REPO_ROOT / "cuda_exec"
 PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
 FIXTURES = REPO_ROOT / "conf" / "fixtures"
-CONFIG_FIXTURE = FIXTURES / "configs" / "vector_add_shapes.json"
+CONFIG_FIXTURE = FIXTURES / "vecadd" / "configs.json"
 SUITE_RUN_DIR: Path | None = None
 SUITE_VENV_DIR: Path | None = None
 REFERENCE_STACK_SITE_PACKAGES = CUDA_EXEC_DIR / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
@@ -236,10 +236,10 @@ class CudaExecE2ETest(unittest.TestCase):
             "metadata": self._metadata(turn),
             "timeout_seconds": 20,
             "reference_files": {
-                "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
+                "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
             },
             "generated_files": {
-                "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+                "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
             },
         }
 
@@ -321,7 +321,7 @@ class CudaExecE2ETest(unittest.TestCase):
                 "timeout_seconds": 20,
                 "reference_files": {},
                 "generated_files": {
-                    "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+                    "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -335,7 +335,7 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(107),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
+                    "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {},
             },
@@ -379,12 +379,12 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertIn("We recommend a generator", body["detail"])
 
     def test_compile_rejects_cu_file_not_named_generated_cu(self) -> None:
-        cu_content = (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+        cu_content = (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
         payload = {
             "metadata": self._metadata(turn=152),
             "timeout_seconds": 20,
             "reference_files": {
-                "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8"),
+                "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8"),
             },
             "generated_files": {"my_kernel.cu": cu_content},
         }
@@ -400,10 +400,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(153),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "my_model.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
+                    "my_model.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+                    "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -426,7 +426,7 @@ class CudaExecE2ETest(unittest.TestCase):
     def test_compile_accepts_reference_files_without_any_reference_cu_file(self) -> None:
         payload = self._compile_payload(turn=112)
         payload["reference_files"] = {
-            "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8"),
+            "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8"),
             "notes/reference.txt": "vector-add reference notes\n",
         }
         status, body = self.service.post_json("/compile", payload)
@@ -441,10 +441,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(113),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
+                    "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "/tmp/generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+                    "/tmp/generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -458,10 +458,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(114),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "../reference.py": (FIXTURES / "reference" / "reference.py").read_text(encoding="utf-8")
+                    "../reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "generated.cu": (FIXTURES / "generated" / "generated.cu").read_text(encoding="utf-8")
+                    "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -767,7 +767,7 @@ class CudaExecE2ETest(unittest.TestCase):
 
 class ReferenceFixtureContractTest(unittest.TestCase):
     def test_reference_fixture_declares_explicit_module_contract(self) -> None:
-        fixture_path = FIXTURES / "reference" / "reference.py"
+        fixture_path = FIXTURES / "vecadd" / "reference.py"
         source = fixture_path.read_text(encoding="utf-8")
         self.assertIn("class Model(nn.Module)", source)
         self.assertIn("def get_init_inputs()", source)
@@ -795,7 +795,7 @@ class ReferenceFixtureContractTest(unittest.TestCase):
         except Exception:
             self.skipTest("torch/cutlass.cute/CUDA is unavailable in cuda_exec runtime environment")
 
-        fixture_path = FIXTURES / "reference" / "reference.py"
+        fixture_path = FIXTURES / "vecadd" / "reference.py"
         env = os.environ.copy()
         env.update(
             {

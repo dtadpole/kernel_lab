@@ -235,6 +235,15 @@ int main() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
+    /* L2 cache flush buffer (Triton do_bench / NVBench pattern) */
+    int l2_attr = 0;
+    cudaDeviceGetAttribute(&l2_attr, cudaDevAttrL2CacheSize, 0);
+    size_t l2_size = static_cast<size_t>(l2_attr > 0 ? l2_attr : 0);
+    void* l2_flush_buf = nullptr;
+    if (l2_size > 0) {
+        cudaMalloc(&l2_flush_buf, l2_size);
+    }
+
     /* Warmup */
     for (int i = 0; i < cfg.num_warmups; i++) {
         int rc = kernel_run(d_inputs.data(), num_inputs,
@@ -253,6 +262,11 @@ int main() {
         cudaEvent_t start_ev, end_ev;
         cudaEventCreate(&start_ev);
         cudaEventCreate(&end_ev);
+
+        /* Flush L2 cache before each trial */
+        if (l2_flush_buf != nullptr) {
+            cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
+        }
 
         cudaEventRecord(start_ev, stream);
         int rc = kernel_run(d_inputs.data(), num_inputs,
@@ -286,6 +300,7 @@ int main() {
     print_json(&cfg, latencies, h_outputs);
 
     /* Cleanup */
+    if (l2_flush_buf) cudaFree(l2_flush_buf);
     cudaStreamDestroy(stream);
     for (auto* p : d_inputs)  cudaFree(p);
     for (auto* p : d_outputs) cudaFree(p);

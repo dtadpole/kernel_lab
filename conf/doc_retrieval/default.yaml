@@ -53,6 +53,18 @@ download:
     - "CUDA-For-Tegra-AppNote.pdf"
     - "Demo_Suite.pdf"
   html_pages:
+    - url: "https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html"
+      slug: "cuda-c-programming-guide"
+    - url: "https://docs.nvidia.com/cuda/parallel-thread-execution/index.html"
+      slug: "parallel-thread-execution"
+    - url: "https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html"
+      slug: "cuda-c-best-practices-guide"
+    - url: "https://docs.nvidia.com/cuda/inline-ptx-assembly/index.html"
+      slug: "inline-ptx-assembly"
+    - url: "https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html"
+      slug: "blackwell-tuning-guide"
+    - url: "https://docs.nvidia.com/cuda/blackwell-compatibility-guide/index.html"
+      slug: "blackwell-compatibility-guide"
     - url: "https://docs.nvidia.com/cuda/nvrtc/index.html"
       slug: "nvrtc"
     - url: "https://docs.nvidia.com/cuda/ptx-compiler-api/index.html"
@@ -75,6 +87,35 @@ chunking:
   overlap_tokens: 64
   tokenizer: "cl100k_base"
 
+# --- HTML parsing settings ---
+html_parsing:
+  keep_tags:
+    - "p"
+    - "code"
+    - "pre"
+    - "table"
+    - "tr"
+    - "td"
+    - "th"
+    - "thead"
+    - "tbody"
+    - "strong"
+    - "em"
+    - "a"
+    - "ul"
+    - "ol"
+    - "li"
+    - "blockquote"
+    - "dl"
+    - "dt"
+    - "dd"
+  remove_tags:
+    - "nav"
+    - "script"
+    - "style"
+    - "header"
+    - "footer"
+
 # --- Embedding settings ---
 embedding:
   provider: "local"
@@ -92,7 +133,8 @@ search:
   rrf_k: 60
 
 # --- Storage paths ---
-# Default storage root is doc_retrieval/data/ in the repo.
-# Override via DOC_RETRIEVAL_ROOT env var.
+# Raw source docs (PDFs, HTML+images) live in the repo — single source of truth.
+# Derived artifacts (chunks, indices) live in a runtime directory.
 storage:
-  root: "${oc.env:DOC_RETRIEVAL_ROOT,${oc.env:HOME}/.doc_retrieval}"
+  raw_root: "${oc.env:DOC_RETRIEVAL_RAW_ROOT,doc_retrieval/data/raw}"
+  runtime_root: "${oc.env:DOC_RETRIEVAL_RUNTIME_ROOT,${oc.env:HOME}/.doc_retrieval}"

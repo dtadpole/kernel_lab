@@ -145,6 +145,16 @@ def extract_sections(
             for top_section in body.find_all("section", id=True, recursive=False):
                 _walk(top_section, None, [])
 
+    # Final fallback: find all sections whose direct parent is not another
+    # section tag. Handles Sphinx themes that wrap content in a div hierarchy
+    # (e.g. div.document > div > section) while also using a <section> tag
+    # for the outer nav chrome (wy-nav-content-wrap).
+    if not results:
+        all_secs = soup.find_all("section", id=True)
+        for sec in all_secs:
+            if sec.parent.name != "section":
+                _walk(sec, None, [])
+
     return results
 
 

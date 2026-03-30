@@ -1,8 +1,7 @@
-"""Parse downloaded NVIDIA CUDA docs into structured text chunks using Docling.
+"""Parse downloaded NVIDIA CUDA docs into structured text chunks.
 
-Uses type-aware chunking from ``chunking.py``: narrative strategy for
-programming guides and tutorials, API-reference strategy for API docs
-and library references.
+PDFs are parsed with Docling. HTML docs are parsed with BeautifulSoup
+(via ``html_parser.py``) to preserve anchor IDs for navigation.
 """
 
 from __future__ import annotations
@@ -10,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import tempfile
 from pathlib import Path
 
 import tiktoken
@@ -25,9 +23,19 @@ from doc_retrieval.config import load_config
 logger = logging.getLogger(__name__)
 
 
-def _storage_root() -> Path:
+def _raw_root() -> Path:
+    """Return the raw data root (in-repo)."""
     cfg = load_config()
-    return Path(cfg.doc_retrieval.storage.root).expanduser()
+    p = Path(cfg.doc_retrieval.storage.raw_root).expanduser()
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parents[1] / p
+    return p
+
+
+def _runtime_root() -> Path:
+    """Return the runtime storage root (for derived artifacts)."""
+    cfg = load_config()
+    return Path(cfg.doc_retrieval.storage.runtime_root).expanduser()
 
 
 def _make_doc_id(filename: str) -> str:
@@ -105,49 +113,45 @@ def _parse_pdf(pdf_path: Path, converter, enc: tiktoken.Encoding) -> list[dict]:
     return chunks
 
 
-def _parse_html(html_json_path: Path, converter, enc: tiktoken.Encoding) -> list[dict]:
-    """Parse a single crawled HTML page and return chunks with metadata."""
-    data = json.loads(html_json_path.read_text(encoding="utf-8"))
-    slug = data["slug"]
-    source_url = data["url"]
-    html_content = data["html"]
-    doc_id = slug
+def _parse_html_doc(html_dir_path: Path, enc) -> tuple[list[dict], list[dict], list[dict]]:
+    """Parse a single HTML doc folder using BeautifulSoup.
 
-    logger.info("Parsing HTML: %s (strategy: %s)",
-                slug,
-                "api_reference" if doc_id in API_REFERENCE_DOCS else "narrative")
+    Returns (toc_entries, section_entries, chunks).
+    """
+    from doc_retrieval.html_parser import parse_html_doc
 
-    with tempfile.NamedTemporaryFile(
-        suffix=".html", mode="w", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(html_content)
-        tmp_path = Path(f.name)
+    slug = html_dir_path.name
+    index_path = html_dir_path / "index.html"
+    base_url = f"https://docs.nvidia.com/cuda/{slug}/index.html"
 
-    try:
-        result = converter.convert(str(tmp_path))
-    except Exception:
-        logger.exception("Failed to parse HTML %s", slug)
-        return []
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    cfg = load_config()
+    cc = cfg.doc_retrieval.chunking
 
-    md = result.document.export_to_markdown()
-    title = _extract_title(md, slug.replace("-", " ").title())
-    sections = _chunk_markdown(doc_id, md, enc)
-    chunks = _sections_to_chunks(doc_id, source_url, title, sections)
+    logger.info("Parsing HTML: %s", slug)
 
-    logger.info("  -> %d chunks from %s", len(chunks), slug)
-    return chunks
+    html = index_path.read_text(encoding="utf-8")
+    toc, sections, chunks = parse_html_doc(
+        html, slug, base_url, enc,
+        max_tokens=cc.max_chunk_tokens,
+        min_tokens=cc.min_chunk_tokens,
+        overlap_tokens=cc.overlap_tokens,
+    )
+
+    logger.info("  -> %d sections, %d chunks from %s", len(sections), len(chunks), slug)
+    return toc, sections, chunks
 
 
 def parse_docs(
     with_images: bool = False,
     vlm_captions: bool = False,
 ) -> None:
-    """Parse all downloaded docs into chunks and write to all_chunks.jsonl.
+    """Parse all downloaded docs into chunks, sections, and TOC.
+
+    PDFs are parsed with Docling. HTML docs are parsed with BeautifulSoup
+    to preserve anchor IDs for navigation.
 
     Args:
-        with_images: Extract images (currently not wired — reserved for future).
+        with_images: Extract images (reserved for future).
         vlm_captions: Generate VLM captions for images (reserved for future).
     """
     logging.basicConfig(
@@ -156,40 +160,64 @@ def parse_docs(
         datefmt="%H:%M:%S",
     )
 
-    from docling.document_converter import DocumentConverter
-
-    converter = DocumentConverter()
     cfg = load_config()
     enc = tiktoken.get_encoding(cfg.doc_retrieval.chunking.tokenizer)
 
-    root = _storage_root()
-    pdf_dir = root / "raw" / "pdfs"
-    html_dir = root / "raw" / "html"
-    chunks_dir = root / "chunks"
+    raw = _raw_root()
+    pdf_dir = raw / "pdfs"
+    html_dir = raw / "html"
+    runtime = _runtime_root()
+    chunks_dir = runtime / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     all_chunks: list[dict] = []
+    all_toc: list[dict] = []
+    all_sections: list[dict] = []
 
+    # --- PDFs via Docling ---
     if pdf_dir.exists():
+        from docling.document_converter import DocumentConverter
+        converter = DocumentConverter()
+
         pdfs = sorted(pdf_dir.glob("*.pdf"))
         logger.info("Found %d PDFs to parse", len(pdfs))
         for pdf in pdfs:
             all_chunks.extend(_parse_pdf(pdf, converter, enc))
 
+    # --- HTML via BeautifulSoup ---
     if html_dir.exists():
-        htmls = sorted(html_dir.glob("*.json"))
-        logger.info("Found %d HTML pages to parse", len(htmls))
-        for html_file in htmls:
-            all_chunks.extend(_parse_html(html_file, converter, enc))
+        html_folders = sorted(
+            d for d in html_dir.iterdir()
+            if d.is_dir() and (d / "index.html").exists()
+        )
+        logger.info("Found %d HTML docs to parse", len(html_folders))
+        for html_folder in html_folders:
+            toc, sections, chunks = _parse_html_doc(html_folder, enc)
+            all_toc.extend(toc)
+            all_sections.extend(sections)
+            all_chunks.extend(chunks)
 
-    out_path = chunks_dir / "all_chunks.jsonl"
-    with open(out_path, "w", encoding="utf-8") as f:
+    # --- Write outputs ---
+    out_chunks = chunks_dir / "all_chunks.jsonl"
+    with open(out_chunks, "w", encoding="utf-8") as f:
         for chunk in all_chunks:
             f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+    out_toc = chunks_dir / "toc.jsonl"
+    with open(out_toc, "w", encoding="utf-8") as f:
+        for entry in all_toc:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    out_sections = chunks_dir / "sections.jsonl"
+    with open(out_sections, "w", encoding="utf-8") as f:
+        for sec in all_sections:
+            f.write(json.dumps(sec, ensure_ascii=False) + "\n")
 
     logger.info(
         "Total: %d chunks from %d documents -> %s",
         len(all_chunks),
         len(set(c["doc_id"] for c in all_chunks)),
-        out_path,
+        out_chunks,
     )
+    logger.info("TOC: %d entries -> %s", len(all_toc), out_toc)
+    logger.info("Sections: %d entries -> %s", len(all_sections), out_sections)

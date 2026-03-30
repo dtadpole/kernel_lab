@@ -202,8 +202,11 @@ compile: ## Stage reference + generated files and run the 5-step compile pipelin
 	@set -euo pipefail
 	# Create turn-root directories
 	mkdir -p "$(WORKSPACE)/inputs/reference" "$(WORKSPACE)/inputs/generated" "$(ARTIFACTS)" "$(LOGS)" "$(STATE)"
-	# Stage input files
+	# Stage input files (reference.py + any sibling .py helpers it imports)
 	cp "$(REFERENCE_PY)" "$(WORKSPACE)/inputs/reference/reference.py"
+	for f in $$(dirname "$(REFERENCE_PY)")/*.py; do \
+		[ "$$(basename $$f)" != "reference.py" ] && cp "$$f" "$(WORKSPACE)/inputs/reference/" 2>/dev/null || true; \
+	done
 	cp "$(GENERATED_CU)" "$(WORKSPACE)/inputs/generated/generated.cu"
 	# Run the 5-step compile pipeline
 	echo "--- compile [$(KERNEL)]: staging done, running compile.sh ---"

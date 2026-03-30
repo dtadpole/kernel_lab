@@ -2,13 +2,13 @@
 
 Wraps ``Sm120Gemm`` from ``cute_gemm.py`` into the ``Model(nn.Module)`` contract
 expected by the evaluation harness.  All inputs are ``torch.bfloat16``; the
-accumulator is ``torch.float32`` and the output is converted back to BF16 on
-return.
+accumulator is ``torch.float32`` and FP32->BF16 conversion is done in the kernel
+epilogue (no host-side conversion).  Output buffer is pre-allocated and reused.
 
 Convention for all inputs/outputs:
     A: (M, K)  row-major BF16  — passed directly, zero-copy
     B: (K, N)  row-major BF16  — B.t() view (zero-copy) gives (N, K) N-major
-    C: (M, N)  row-major FP32  — converted to BF16 on return
+    C: (M, N)  row-major BF16  — FP32->BF16 conversion in kernel epilogue
 
 Contract for cuda_exec reference Python files:
 - export ``class Model(torch.nn.Module)``
@@ -92,25 +92,27 @@ class Model(nn.Module):
     """CuTe DSL BF16 GEMM reference kernel for Blackwell (SM120).
 
     Computes C = A @ B where A is M×K, B is K×N, C is M×N.
-    Inputs are BF16 with FP32 accumulation; output is converted to BF16.
+    Inputs are BF16 with FP32 accumulation; output is BF16 (converted in-kernel).
 
     Zero-copy from row-major PyTorch tensors:
         - A passed directly as (M, K) K-major CuTe tensor
         - B passed as B.t() (zero-copy view) giving (N, K) N-major CuTe tensor
-        - C allocated as FP32 row-major; converted to BF16 on return
+        - C is BF16 row-major — FP32->BF16 conversion done in the kernel epilogue
 
     The kernel is JIT-compiled once per unique (A.shape, B.shape) via
     ``cute.compile()`` and reused for subsequent calls with the same shape.
+    Output buffer C is pre-allocated and reused across calls.
     """
 
     def __init__(self):
         super().__init__()
-        self._gemm = Sm120Gemm()
+        self._gemm = Sm120Gemm(output_bf16=True)
         self._compiled = None
         self._stream = None
         self._cached_shape = None
+        self._C = None
 
-    def _ensure_compiled(self, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor) -> None:
+    def _ensure_compiled(self, A: torch.Tensor, B: torch.Tensor) -> None:
         """JIT-compile the kernel on first call or when the matrix shape changes."""
         shape_key = (A.shape, B.shape)
         if self._compiled is not None and self._cached_shape == shape_key:
@@ -120,9 +122,13 @@ class Model(nn.Module):
         import cutlass.cute as cute
         from cutlass.cute.runtime import from_dlpack
 
+        M, K = A.shape
+        _, N = B.shape
+        self._C = torch.empty(M, N, dtype=torch.bfloat16, device=A.device)
+
         a_cute = from_dlpack(A, assumed_align=16)
         b_cute = from_dlpack(B.t(), assumed_align=16)  # zero-copy: swaps strides only
-        c_cute = from_dlpack(C, assumed_align=16)
+        c_cute = from_dlpack(self._C, assumed_align=16)
 
         self._stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
         self._compiled = cute.compile(self._gemm, a_cute, b_cute, c_cute, stream=self._stream)
@@ -140,23 +146,18 @@ class Model(nn.Module):
         if not A.is_cuda or not B.is_cuda:
             raise ValueError("Sm120Gemm reference kernel requires CUDA tensors")
 
-        M, K = A.shape
-        _, N = B.shape
-        C = torch.zeros(M, N, dtype=torch.float32, device=A.device)
-
-        self._ensure_compiled(A, B, C)
+        self._ensure_compiled(A, B)
 
         from cutlass.cute.runtime import from_dlpack
 
         # CuTe tensors are lightweight wrappers (no copy); recreate each forward call
         a_cute = from_dlpack(A, assumed_align=16)
         b_cute = from_dlpack(B.t(), assumed_align=16)
-        c_cute = from_dlpack(C, assumed_align=16)
+        c_cute = from_dlpack(self._C, assumed_align=16)
 
         self._compiled(a_cute, b_cute, c_cute, self._stream)
 
-        # Accumulator is FP32; convert to BF16 to match generated kernel output dtype
-        return C.to(torch.bfloat16)
+        return self._C
 
 
 # ---------------------------------------------------------------------------

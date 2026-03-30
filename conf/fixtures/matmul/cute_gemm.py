@@ -43,6 +43,7 @@ class Sm120Gemm:
         bK: int = 64,
         num_mma_warps: int = 4,
         num_stages: int = 2,
+        output_bf16: bool = False,
     ):
         self.bM = bM
         self.bN = bN
@@ -52,6 +53,7 @@ class Sm120Gemm:
         self.num_stages = num_stages
         self.dtype = cutlass.BFloat16
         self.acc_dtype = cutlass.Float32
+        self.output_bf16 = output_bf16
         # Tile shape in (M, N, K) order for use with slice_ helpers
         self.tile_shape_mnk = (bM, bN, bK)
 
@@ -417,10 +419,14 @@ class Sm120Gemm:
 
                 # ---- Store accumulator to global memory ----
                 tCgC = thr_mma.partition_C(gC)
+                out_dtype = self.dtype if self.output_bf16 else self.acc_dtype
+                out_frag = cute.make_fragment(acc_shape, out_dtype)
+                acc_vec = acc.load()
+                out_frag.store(acc_vec.to(out_dtype))
                 st_atom = cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(), self.acc_dtype
+                    cute.nvgpu.CopyUniversalOp(), out_dtype
                 )
-                cute.copy(st_atom, acc, tCgC)
+                cute.copy(st_atom, out_frag, tCgC)
 
                 # Advance to next work tile
                 tile_sched.advance_to_next_work()

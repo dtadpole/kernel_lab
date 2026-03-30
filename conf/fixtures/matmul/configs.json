@@ -33,5 +33,12 @@
     "shape": [4096, 4096],
     "input_size": 16777216,
     "shape_kind": "2d"
+  },
+  "mat-8192x8192": {
+    "family": "integration-matrix-multiplication",
+    "rank": 2,
+    "shape": [8192, 8192],
+    "input_size": 67108864,
+    "shape_kind": "2d"
   }
 }

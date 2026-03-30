@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
 EVALUATE_SCRIPT = SCRIPTS_DIR / "evaluate.py"
 PROFILE_NCU_SCRIPT = SCRIPTS_DIR / "profile.sh"
+NCU_REPORT_SCRIPT = SCRIPTS_DIR / "ncu_report.py"
 EVAL_HARNESS = SCRIPTS_DIR / "eval_harness.cu"
 DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
 SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -784,6 +786,59 @@ def run_evaluate_task(
     )
 
 
+def _strip_output_result(run_result: dict, stdout_log_path: Path | None) -> None:
+    """Strip the large output.result array from the binary's JSON in stdout.
+
+    The eval_harness binary prints all kernel result values to stdout.  For
+    profiling those values are irrelevant — correctness is evaluate's job.
+    Removes ``output.result`` from the in-memory stdout and the on-disk log.
+    """
+    stdout = run_result.get("output", {}).get("stdout", "") or ""
+    if '"result"' not in stdout:
+        return
+
+    lines = stdout.split("\n")
+    json_start = None
+    json_end = None
+    depth = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if json_start is None and stripped.startswith("{"):
+            json_start = i
+        if json_start is not None:
+            depth += stripped.count("{") - stripped.count("}")
+            if depth == 0:
+                json_end = i
+                break
+
+    if json_start is None or json_end is None:
+        return
+
+    try:
+        json_text = "\n".join(lines[json_start : json_end + 1])
+        obj = json.loads(json_text)
+        if "output" in obj and isinstance(obj["output"], dict):
+            obj["output"].pop("result", None)
+        cleaned_json = json.dumps(obj, indent=2)
+        lines[json_start : json_end + 1] = [cleaned_json]
+        cleaned_stdout = "\n".join(lines)
+        run_result["output"]["stdout"] = cleaned_stdout
+
+        # Overwrite the on-disk .stdout log file.
+        if stdout_log_path and stdout_log_path.exists():
+            old = stdout_log_path.read_text(encoding="utf-8")
+            stdout_log_path.write_text(old.replace(json_text, cleaned_json), encoding="utf-8")
+        # Also fix the combined .log file.
+        if stdout_log_path:
+            combined = stdout_log_path.with_suffix(".log")
+            if combined.exists():
+                old = combined.read_text(encoding="utf-8")
+                if json_text in old:
+                    combined.write_text(old.replace(json_text, cleaned_json), encoding="utf-8")
+    except (json.JSONDecodeError, ValueError):
+        pass  # Non-fatal
+
+
 def run_profile_task(
     *,
     metadata,
@@ -820,6 +875,8 @@ def run_profile_task(
                 str(target_path),
                 "--export-prefix",
                 export_prefix_abs,
+                "--set",
+                "detailed",
             ]
         else:
             reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "reference.py"
@@ -838,6 +895,7 @@ def run_profile_task(
                 sys.executable, str(reference_py),
             ]
 
+        stage_log_rel = _stage_log_rel("profile", attempt, config_slug)
         run_result = run_generic_command(
             kind="profile",
             command=command,
@@ -845,13 +903,33 @@ def run_profile_task(
             env=_config_env(workspace, "profile", attempt, config_slug, config, config_rel),
             timeout_seconds=timeout_seconds,
             return_files=[config_rel, ncu_report_rel],
-            log_file=_stage_log_rel("profile", attempt, config_slug),
+            log_file=stage_log_rel,
         )
 
         ncu_stdout = run_result.get("output", {}).get("stdout", "") or ""
         ncu_profiled = "No kernels were profiled." not in ncu_stdout and "No metrics to collect found in sections." not in ncu_stdout
         ncu_report_abs = Path(workspace["root_path"]) / ncu_report_rel
         ncu_report_exists = ncu_report_abs.exists()
+
+        # --- Post-processing: strip output.result from binary stdout ---
+        stdout_log_path = Path(workspace["root_path"]) / stage_log_rel.replace(".log", ".stdout")
+        _strip_output_result(run_result, stdout_log_path)
+
+        # --- Post-processing: generate curated NCU text report ---
+        ncu_text_rel: str | None = None
+        if ncu_report_exists:
+            ncu_text_rel = _config_artifact_rel("profile", attempt, config_slug, "ncu-report.txt")
+            ncu_text_abs = str((Path(workspace["root_path"]) / ncu_text_rel).resolve())
+            try:
+                subprocess.run(
+                    [sys.executable, str(NCU_REPORT_SCRIPT), "--input", str(ncu_report_abs), "--output", ncu_text_abs],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True,
+                )
+            except Exception:
+                ncu_text_rel = None  # non-fatal — curated report generation failed
 
         ncu_summary: dict[str, Any] = {
             "side": side,
@@ -862,6 +940,8 @@ def run_profile_task(
         }
         if ncu_report_exists:
             ncu_summary["ncu_report_path"] = ncu_report_rel
+        if ncu_text_rel:
+            ncu_summary["ncu_text_report_path"] = ncu_text_rel
         if not ncu_profiled:
             ncu_summary["ncu_warning"] = "ncu reported no profiled kernels or no metrics to collect"
 
@@ -892,6 +972,15 @@ def run_profile_task(
                     description=f"Nsight Compute .ncu-rep report for config {config_slug}",
                 )
             )
+        if ncu_text_rel:
+            config_artifacts.append(
+                _build_artifact(
+                    artifact_id=f"profile:ncu_text:{config_slug}",
+                    kind="ncu_text_report",
+                    path=ncu_text_rel,
+                    description=f"Curated NCU text report for config {config_slug} (device__ deduplicated)",
+                )
+            )
 
         payload = _config_result_payload(
             config_slug=config_slug,
@@ -901,6 +990,8 @@ def run_profile_task(
             summary=ncu_summary,
         )
         payload["files"].append(capture_turn_file(profile_json_rel, str(workspace_path)))
+        if ncu_text_rel:
+            payload["files"].append(capture_turn_file(ncu_text_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
         stage_artifacts.extend(config_artifacts)

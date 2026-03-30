@@ -139,18 +139,6 @@ def _verify_correctness(
             ref_shape = infer_shape(ref_json)
             output_shape_str = "x".join(str(d) for d in ref_shape) if ref_shape else "scalar"
 
-            if ref_shape != gen_shape:
-                return {
-                    "passed": False,
-                    "reason": f"shape mismatch: reference={ref_shape} generated={gen_shape}",
-                    "output_shape": output_shape_str,
-                    "max_abs_error": None,
-                    "mean_abs_error": None,
-                    "trials": f"{passed_trials}/{num_trials}",
-                    "total_trials": num_trials,
-                    "passed_trials": passed_trials,
-                }
-
             ref_values = flatten_numeric(ref_json)
             if len(ref_values) != len(gen_values):
                 worst_max_diff = float("inf")

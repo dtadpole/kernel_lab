@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 import math
 import os
-import time
 from typing import Any
 
+from cuda.bindings import driver as cuda_driver
 import cutlass.cute as cute  # type: ignore
 from cutlass.cute.arch import block_idx, thread_idx  # type: ignore
 import torch
@@ -75,10 +75,19 @@ def _config_from_env() -> dict[str, Any]:
 
 
 class Model(nn.Module):
+    """CuTe DSL vector-add reference kernel.
+
+    Uses cute.compile() to pre-compile the JIT function into a fixed
+    JitExecutor, eliminating per-call MLIR re-verification overhead.
+    The stream is passed explicitly so that PyTorch CUDA events on the
+    same stream accurately capture kernel execution time.
+    """
+
     def __init__(self):
         super().__init__()
         self.elements_per_thread = 4
         self.threads = 256
+        self._compiled = None
 
         elements_per_thread = self.elements_per_thread
         threads = self.threads
@@ -97,13 +106,22 @@ class Model(nn.Module):
         self.kernel = vector_add_kernel
 
         @cute.jit
-        def launch_vector_add(x_ptr, y_ptr, out_ptr, n, blocks, threads_per_block):
+        def launch_vector_add(x_ptr, y_ptr, out_ptr, n, blocks, threads_per_block, stream: cuda_driver.CUstream):
             self.kernel(x_ptr, y_ptr, out_ptr, n).launch(
                 grid=[blocks, 1, 1],
                 block=[threads_per_block, 1, 1],
+                stream=stream,
             )
 
-        self.launch_vector_add = launch_vector_add
+        self._jit_fn = launch_vector_add
+
+    def _ensure_compiled(self, x: torch.Tensor, y: torch.Tensor, out: torch.Tensor, n: int, blocks: int) -> None:
+        if self._compiled is not None:
+            return
+        fake_stream = cute.runtime.make_fake_stream()
+        self._compiled = cute.compile(
+            self._jit_fn, x, y, out, n, blocks, self.threads, fake_stream,
+        )
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         if x.shape != y.shape:
@@ -118,8 +136,9 @@ class Model(nn.Module):
         out = torch.empty_like(x)
         n = x.numel()
         blocks = math.ceil(n / (self.threads * self.elements_per_thread))
-        self.launch_vector_add(x, y, out, n, blocks, self.threads)
-        torch.cuda.synchronize(x.device)
+        self._ensure_compiled(x, y, out, n, blocks)
+        stream = cuda_driver.CUstream(torch.cuda.current_stream(x.device).cuda_stream)
+        self._compiled(x, y, out, n, blocks, self.threads, stream)
         return out
 
 
@@ -151,15 +170,27 @@ def _latency_summary(latencies_ms: list[float]) -> dict[str, float]:
 
 def main() -> int:
     config = _config_from_env()
+    device = torch.device("cuda")
     model = Model(*get_init_inputs())
+    model = model.cuda(device=device)
+    x, y = get_inputs(config)
+
+    # Warmup — 5 runs to JIT-compile and warm GPU caches
+    for _ in range(5):
+        model(x, y)
+    torch.cuda.synchronize(device)
+
+    # Timed runs — 10 trials with CUDA event timing
     latencies_ms: list[float] = []
     result = None
-    for _ in range(5):
-        x, y = get_inputs(config)
-        started = time.perf_counter()
+    for _ in range(10):
+        start_ev = torch.cuda.Event(enable_timing=True)
+        end_ev = torch.cuda.Event(enable_timing=True)
+        start_ev.record()
         result = model(x, y)
-        torch.cuda.synchronize(x.device)
-        latencies_ms.append((time.perf_counter() - started) * 1000.0)
+        end_ev.record()
+        end_ev.synchronize()
+        latencies_ms.append(start_ev.elapsed_time(end_ev))
 
     assert result is not None
     payload = {

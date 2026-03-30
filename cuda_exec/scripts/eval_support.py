@@ -218,23 +218,25 @@ def measure_reference(
             for x in inputs
         ]
 
+        # L2 cache flush buffer (Triton do_bench pattern)
+        l2_size = torch.cuda.get_device_properties(device).L2_cache_size
+        l2_flush = torch.empty(l2_size, dtype=torch.uint8, device=device) if l2_size > 0 else None
+
         for _ in range(num_warmups):
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            start_ev.record()
             model(*inputs)
-            end_ev.record()
-            torch.cuda.synchronize(device=device)
+        torch.cuda.synchronize(device=device)
 
         latencies_ms: list[float] = []
         last_output: Any = None
         for _ in range(num_trials):
+            if l2_flush is not None:
+                l2_flush.zero_()
             start_ev = torch.cuda.Event(enable_timing=True)
             end_ev = torch.cuda.Event(enable_timing=True)
             start_ev.record()
             last_output = model(*inputs)
             end_ev.record()
-            torch.cuda.synchronize(device=device)
+            end_ev.synchronize()
             latencies_ms.append(start_ev.elapsed_time(end_ev))
 
     if last_output is None:

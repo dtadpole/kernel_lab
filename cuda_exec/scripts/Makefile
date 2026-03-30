@@ -8,17 +8,15 @@
 #       logs/
 #       state/
 #
-# Quick smoke test with bundled vector-add fixtures:
+# Quick smoke test (default: vecadd):
 #   make test
+#   make test KERNEL=matmul
 #
-# Manual single-config run (requires REFERENCE_PY and GENERATED_CU):
-#   make compile evaluate \
-#     REFERENCE_PY=/path/to/reference.py GENERATED_CU=/path/to/generated.cu \
-#     DIRECTION_ID=7 DIRECTION_SLUG=my-kernel CONFIG_SLUG=shape-1d-1048576 \
-#     CONFIG_JSON='{"shape":[1048576],"rank":1,"input_size":1048576,"shape_kind":"1d"}'
+# Manual single-config run:
+#   make compile evaluate KERNEL=matmul CONFIG_SLUG=mat-1024x1024
 #
 # Full pipeline:
-#   make clean compile evaluate profile-ncu-generated
+#   make clean compile evaluate profile-ncu-generated KERNEL=matmul
 
 SHELL := /bin/bash
 .ONESHELL:
@@ -38,26 +36,56 @@ FMT_EVAL_PY   := $(SCRIPTS)/fmt_eval.py
 EVAL_HARNESS  := $(SCRIPTS)/eval_harness.cu
 
 # ---------------------------------------------------------------------------
-# Metadata — override on command line as needed
+# Kernel selector — switch everything with one variable
+#   make test KERNEL=vecadd        (default)
+#   make test KERNEL=matmul
+# ---------------------------------------------------------------------------
+KERNEL ?= vecadd
+
+# Per-kernel defaults: DIRECTION_ID, DIRECTION_SLUG, CONFIG_SLUG, CONFIG_JSON
+# These are set via conditional blocks so KERNEL= is the only thing to change.
+ifeq ($(KERNEL),vecadd)
+  _KERNEL_DIRECTION_ID   := 1
+  _KERNEL_DIRECTION_SLUG := vecadd
+  _KERNEL_CONFIG_SLUG    := vec1d-n16777216
+  _KERNEL_CONFIG_JSON    := {"family":"integration-vector-add","rank":1,"shape":[16777216],"input_size":16777216,"shape_kind":"1d"}
+  _KERNEL_NCU_FILTER     := regex:"vector_add"
+else ifeq ($(KERNEL),matmul)
+  _KERNEL_DIRECTION_ID   := 2
+  _KERNEL_DIRECTION_SLUG := matmul
+  _KERNEL_CONFIG_SLUG    := mat-4096x4096
+  _KERNEL_CONFIG_JSON    := {"family":"integration-matrix-multiplication","rank":2,"shape":[4096,4096],"input_size":16777216,"shape_kind":"2d"}
+  _KERNEL_NCU_FILTER     := regex:"matmul_bf16"
+else
+  # Unknown kernel — assume fixtures exist at conf/fixtures/$(KERNEL)/
+  _KERNEL_DIRECTION_ID   := 99
+  _KERNEL_DIRECTION_SLUG := $(KERNEL)
+  _KERNEL_CONFIG_SLUG    := default
+  _KERNEL_CONFIG_JSON    := {}
+  _KERNEL_NCU_FILTER     := regex:".*"
+endif
+
+# ---------------------------------------------------------------------------
+# Metadata — derived from KERNEL, overridable on command line
 # ---------------------------------------------------------------------------
 CUDA_EXEC_ROOT ?= $(HOME)/.cuda_exec
 RUN_TAG        ?= manual-cli
 VERSION        ?= v1
-DIRECTION_ID   ?= 1
-DIRECTION_SLUG ?= vector-add
+DIRECTION_ID   ?= $(_KERNEL_DIRECTION_ID)
+DIRECTION_SLUG ?= $(_KERNEL_DIRECTION_SLUG)
 TURN           ?= 0
-CONFIG_SLUG    ?= vec1d-n65536
+CONFIG_SLUG    ?= $(_KERNEL_CONFIG_SLUG)
+CONFIG_JSON    ?= $(_KERNEL_CONFIG_JSON)
 
 # ---------------------------------------------------------------------------
-# Input files — default to vector-add fixtures
+# Input files — derived from KERNEL
 # ---------------------------------------------------------------------------
-REFERENCE_PY  ?= $(REPO_ROOT)/conf/fixtures/reference/reference.py
-GENERATED_CU  ?= $(REPO_ROOT)/conf/fixtures/generated/generated.cu
+REFERENCE_PY  ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)/reference.py
+GENERATED_CU  ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)/generated.cu
 
 # ---------------------------------------------------------------------------
 # Tuning parameters
 # ---------------------------------------------------------------------------
-CONFIG_JSON            ?= {"family":"integration-vector-add","rank":1,"shape":[65536],"input_size":65536,"shape_kind":"1d"}
 TIMEOUT                ?= 300
 SEED                   ?= 42
 NUM_WARMUPS            ?= 5
@@ -79,17 +107,10 @@ LOGS       = $(TURN_ROOT)/logs
 STATE      = $(TURN_ROOT)/state
 
 # ---------------------------------------------------------------------------
-# Test fixture defaults (vector-add)
+# Test defaults — derived from KERNEL
 # ---------------------------------------------------------------------------
-TEST_FIXTURES     = $(REPO_ROOT)/conf/fixtures
-TEST_REFERENCE_PY = $(TEST_FIXTURES)/reference/reference.py
-TEST_GENERATED_CU = $(TEST_FIXTURES)/generated/generated.cu
-TEST_RUN_TAG      = manual-cli-test
-TEST_DIRECTION_ID = 1
-TEST_DIRECTION_SLUG = vector-add
-TEST_TURN         = 0
-TEST_CONFIG_SLUG  = vec1d-n65536
-TEST_CONFIG_JSON  = {"family":"integration-vector-add","rank":1,"shape":[65536],"input_size":65536,"shape_kind":"1d"}
+TEST_RUN_TAG = manual-cli-test
+TEST_TURN    = 0
 
 # ---------------------------------------------------------------------------
 # Common metadata CLI args
@@ -119,6 +140,7 @@ endef
 help: ## Show available targets
 	@echo "cuda_exec manual CLI"
 	@echo ""
+	@echo "KERNEL=$(KERNEL)  (switch with KERNEL=vecadd or KERNEL=matmul)"
 	@echo "Turn root: \$$(CUDA_EXEC_ROOT)/\$$(RUN_TAG)/\$$(VERSION)/\$$(DIRECTION_ID)_\$$(DIRECTION_SLUG)/turn_\$$(TURN)/"
 	@echo ""
 	@echo "Targets:"
@@ -126,15 +148,17 @@ help: ## Show available targets
 		awk -F ':.*## ' '{printf "  %-24s %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Quick start:"
-	@echo "  make test                              # smoke test with vector-add fixtures"
-	@echo "  make clean-test                        # clean up smoke test output"
+	@echo "  make test                    # smoke test vecadd (default)"
+	@echo "  make test KERNEL=matmul      # smoke test matmul"
+	@echo "  make clean-test              # clean up smoke test output"
 	@echo ""
 	@echo "Custom kernel:"
-	@echo "  make compile REFERENCE_PY=ref.py GENERATED_CU=gen.cu DIRECTION_SLUG=my-kernel"
-	@echo "  make evaluate CONFIG_SLUG=cfg1 CONFIG_JSON='{...}' DIRECTION_SLUG=my-kernel"
+	@echo "  make compile evaluate KERNEL=matmul"
+	@echo "  make compile evaluate KERNEL=matmul CONFIG_SLUG=mat-4096x4096 CONFIG_JSON='{...}'"
 
 .PHONY: show
 show: ## Print resolved turn-root path and key variables
+	@echo "KERNEL         : $(KERNEL)"
 	@echo "CUDA_EXEC_ROOT : $(CUDA_EXEC_ROOT)"
 	@echo "RUN_TAG        : $(RUN_TAG)"
 	@echo "VERSION        : $(VERSION)"
@@ -144,6 +168,8 @@ show: ## Print resolved turn-root path and key variables
 	@echo "TURN_ROOT      : $(TURN_ROOT)"
 	@echo "CONFIG_SLUG    : $(CONFIG_SLUG)"
 	@echo "CONFIG_JSON    : $(CONFIG_JSON)"
+	@echo "REFERENCE_PY   : $(REFERENCE_PY)"
+	@echo "GENERATED_CU   : $(GENERATED_CU)"
 	@echo ""
 	@if [ -d "$(TURN_ROOT)" ]; then \
 		echo "Turn root exists. Contents:"; \
@@ -171,7 +197,7 @@ compile: ## Stage reference + generated files and run the 5-step compile pipelin
 	cp "$(REFERENCE_PY)" "$(WORKSPACE)/inputs/reference/reference.py"
 	cp "$(GENERATED_CU)" "$(WORKSPACE)/inputs/generated/generated.cu"
 	# Run the 5-step compile pipeline
-	echo "--- compile: staging done, running compile.sh ---"
+	echo "--- compile [$(KERNEL)]: staging done, running compile.sh ---"
 	HARNESS_FLAG="" && \
 	if grep -q 'kernel_run' "$(WORKSPACE)/inputs/generated/generated.cu" 2>/dev/null; then \
 		HARNESS_FLAG="--harness $(EVAL_HARNESS)"; \
@@ -198,7 +224,7 @@ compile: ## Stage reference + generated files and run the 5-step compile pipelin
 	  ]
 	}
 	MANIFEST_EOF
-	echo "--- compile: done ---"
+	echo "--- compile [$(KERNEL)]: done ---"
 	echo "Turn root: $(TURN_ROOT)"
 	@ls -lh "$(ARTIFACTS)/"
 
@@ -221,7 +247,7 @@ evaluate: ## Run evaluate (reference vs generated comparison) for one config
 # ---------------------------------------------------------------------------
 # Profile — Nsight Compute hardware-level profiling (requires sudo)
 # ---------------------------------------------------------------------------
-NCU_KERNEL_FILTER ?= regex:"cutlass|vector_add"
+NCU_KERNEL_FILTER ?= $(_KERNEL_NCU_FILTER)
 _NCU_CONFIG_ENV = \
 	CUDA_EXEC_CONFIG_ID="$(CONFIG_SLUG)" \
 	CUDA_EXEC_PARAM_INPUT_SIZE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["input_size"])')" \
@@ -238,7 +264,7 @@ profile-ncu-generated: ## NCU profile the generated CUDA binary for one config
 		exit 1
 	fi
 	NCU_PREFIX="$(ARTIFACTS)/ncu.$(CONFIG_SLUG)"
-	echo "--- profile-ncu-generated: $(CONFIG_SLUG) ---"
+	echo "--- profile-ncu-generated [$(KERNEL)]: $(CONFIG_SLUG) ---"
 	$(_NCU_CONFIG_ENV) \
 	CUDA_EXEC_CONFIG_JSON='$(CONFIG_JSON)' \
 	CUDA_EXEC_NUM_WARMUPS=2 \
@@ -248,7 +274,7 @@ profile-ncu-generated: ## NCU profile the generated CUDA binary for one config
 		--export-prefix "$$NCU_PREFIX" \
 		--set detailed \
 		> "$(LOGS)/ncu.$(CONFIG_SLUG).stdout.log"
-	echo "--- profile-ncu-generated: done ---"
+	echo "--- profile-ncu-generated [$(KERNEL)]: done ---"
 	echo "NCU report: $$NCU_PREFIX.ncu-rep"
 	echo ""
 	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
@@ -262,7 +288,7 @@ profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for o
 		exit 1
 	fi
 	NCU_PREFIX="$(ARTIFACTS)/ncu-reference.$(CONFIG_SLUG)"
-	echo "--- profile-ncu-reference: $(CONFIG_SLUG) ---"
+	echo "--- profile-ncu-reference [$(KERNEL)]: $(CONFIG_SLUG) ---"
 	$(_NCU_CONFIG_ENV) \
 	sudo --preserve-env /usr/local/cuda/bin/ncu \
 		--set detailed \
@@ -272,7 +298,7 @@ profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for o
 		--export "$$NCU_PREFIX" \
 		$(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
 		> "$(LOGS)/ncu-reference.$(CONFIG_SLUG).stdout.log" 2>&1
-	echo "--- profile-ncu-reference: done ---"
+	echo "--- profile-ncu-reference [$(KERNEL)]: done ---"
 	echo "NCU report: $$NCU_PREFIX.ncu-rep"
 	echo ""
 	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
@@ -289,65 +315,53 @@ execute: ## Run a generic command in the workspace (override EXEC_CMD="cmd arg1 
 	echo "Log: $(LOGS)/execute.manual.log"
 
 # ---------------------------------------------------------------------------
-# Smoke test — full pipeline with vector-add fixtures
+# Smoke test — full pipeline (compile → evaluate → profile)
 # ---------------------------------------------------------------------------
 
 .PHONY: test
-test: ## Run full pipeline smoke test with vector-add fixtures (compile → evaluate → profile)
+test: ## Run full pipeline smoke test (default: KERNEL=vecadd, or KERNEL=matmul)
 	@set -euo pipefail
-	echo "=== cuda_exec manual CLI smoke test ==="
+	echo "=== cuda_exec smoke test: KERNEL=$(KERNEL) ==="
 	echo ""
 	echo "--- [1/4] clean ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) clean \
+		KERNEL="$(KERNEL)" \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
 		VERSION="$(VERSION)" \
-		DIRECTION_ID="$(TEST_DIRECTION_ID)" \
-		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
 		TURN="$(TEST_TURN)"
 	echo ""
 	echo "--- [2/4] compile ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) compile \
+		KERNEL="$(KERNEL)" \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
 		VERSION="$(VERSION)" \
-		DIRECTION_ID="$(TEST_DIRECTION_ID)" \
-		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
-		TURN="$(TEST_TURN)" \
-		REFERENCE_PY="$(TEST_REFERENCE_PY)" \
-		GENERATED_CU="$(TEST_GENERATED_CU)"
+		TURN="$(TEST_TURN)"
 	echo ""
 	echo "--- [3/4] evaluate ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) evaluate \
+		KERNEL="$(KERNEL)" \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
 		VERSION="$(VERSION)" \
-		DIRECTION_ID="$(TEST_DIRECTION_ID)" \
-		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
-		TURN="$(TEST_TURN)" \
-		CONFIG_SLUG="$(TEST_CONFIG_SLUG)" \
-		CONFIG_JSON='$(TEST_CONFIG_JSON)'
+		TURN="$(TEST_TURN)"
 	echo ""
 	echo "--- [4/4] profile-ncu-generated ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) profile-ncu-generated \
+		KERNEL="$(KERNEL)" \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
 		VERSION="$(VERSION)" \
-		DIRECTION_ID="$(TEST_DIRECTION_ID)" \
-		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
-		TURN="$(TEST_TURN)" \
-		CONFIG_SLUG="$(TEST_CONFIG_SLUG)" \
-		CONFIG_JSON='$(TEST_CONFIG_JSON)'
+		TURN="$(TEST_TURN)"
 	echo ""
-	echo "=== smoke test passed ==="
-	echo "Turn root: $(CUDA_EXEC_ROOT)/$(TEST_RUN_TAG)/$(VERSION)/$(TEST_DIRECTION_ID)_$(TEST_DIRECTION_SLUG)/turn_$(TEST_TURN)/"
+	echo "=== smoke test [$(KERNEL)] passed ==="
 
 .PHONY: clean-test
 clean-test: ## Clean the smoke test turn root
 	@$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) clean \
+		KERNEL="$(KERNEL)" \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
 		VERSION="$(VERSION)" \
-		DIRECTION_ID="$(TEST_DIRECTION_ID)" \
-		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
 		TURN="$(TEST_TURN)"

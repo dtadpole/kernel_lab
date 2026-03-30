@@ -34,6 +34,13 @@
     "input_size": 1048576,
     "shape_kind": "2d"
   },
+  "vec1d-n16777216": {
+    "family": "integration-vector-add",
+    "rank": 1,
+    "shape": [16777216],
+    "input_size": 16777216,
+    "shape_kind": "1d"
+  },
   "tensor3d-64x64x64": {
     "family": "integration-vector-add",
     "rank": 3,

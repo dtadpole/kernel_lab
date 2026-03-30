@@ -77,17 +77,16 @@ Evaluate a compiled kernel for correctness and performance against the reference
 
 ### cuda_profile
 
-Profile kernel latency with configurable mode and backend.
+NCU-profile a compiled CUDA kernel or reference Python/CuTe DSL kernel using Nsight Compute.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `metadata` | `dict` | (required) | Turn identity (must match compile turn) |
 | `configs` | `dict[str, dict]` | (required) | `{config_slug: config_body}` |
-| `mode` | `str` | `"generated_only"` | `"generated_only"` / `"reference_only"` / `"dual"` |
-| `profiler_backend` | `str` | `"comparison_runtime"` | `"comparison_runtime"` / `"ncu"` (ncu: generated_only only) |
+| `side` | `str` | `"generated"` | `"generated"` (compiled CUDA binary) / `"reference"` (Python/CuTe DSL kernel) |
 | `timeout_seconds` | `int` | 180 | Max wall-clock seconds |
 
-**Returns:** `{all_ok, configs: {slug: {status, summary, reference_summary, generated_summary}}}`
+**Returns:** `{all_ok, configs: {slug: {status, summary: {side, ncu_profiled, ncu_report_exists, ncu_report_path, ...}}}}`
 
 **Workflow:** Requires successful `cuda_compile` on same turn. Use `cuda_read_file` to fetch `.ncu-rep` files for detailed Nsight Compute reports.
 

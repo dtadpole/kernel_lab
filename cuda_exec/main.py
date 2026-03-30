@@ -227,24 +227,19 @@ def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bea
 
 @app.post("/profile", response_model=ProfileResponse, response_model_exclude_none=True)
 def profile_endpoint(request: ProfileRequest, _auth: None = Depends(verify_bearer_token)) -> ProfileResponse:
-    """Profile one compiled artifact against slug-keyed runtime configs."""
+    """NCU-profile a compiled artifact or reference kernel against slug-keyed runtime configs."""
 
     result = run_profile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
-        mode=request.mode,
-        profiler_backend=request.profiler_backend,
+        side=request.side,
     )
     attempt = result["attempt"]
     items = {
         config_slug: ProfileConfigOutput(
             status=item["status"],
             summary=item.get("summary", {}),
-            reference=item.get("reference") or {},
-            generated=item.get("generated") or {},
-            reference_summary=(item.get("reference") or {}).get("summary", {}),
-            generated_summary=(item.get("generated") or {}).get("summary", {}),
             artifacts=_capture_public_files(
                 result["workspace_path"],
                 [artifact["path"] for artifact in item.get("artifacts", [])],

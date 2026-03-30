@@ -303,48 +303,40 @@ async def cuda_evaluate(
 async def cuda_profile(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads")],
-    mode: Annotated[Literal["generated_only", "reference_only", "dual"], Field(description="Which side(s) to profile")] = "generated_only",
-    profiler_backend: Annotated[Literal["comparison_runtime", "ncu"], Field(description="Profile backend; ncu is generated_only only")] = "comparison_runtime",
+    side: Annotated[Literal["generated", "reference"], Field(description="Which side to NCU-profile")] = "generated",
     timeout_seconds: Annotated[int, Field(description="Max seconds for profile")] = _DEFAULT_TOOL_TIMEOUT,
 ) -> str:
-    """Profile a compiled CUDA kernel to collect detailed latency data.
+    """NCU-profile a compiled CUDA kernel or reference Python/CuTe DSL kernel.
 
-    Measures execution latency for the generated kernel, the reference
-    Python module, or both, depending on the selected mode.
+    Runs Nsight Compute (ncu) with ``--set detailed`` to collect hardware-level
+    GPU metrics: roofline, pipe utilization, memory throughput, warp stalls, etc.
 
     Workflow constraints:
-    - Requires a successful cuda_compile on the same turn.
-    - The ncu backend only supports generated_only mode.
-    - comparison_runtime backend supports all three modes.
+    - Requires a successful cuda_compile on the same turn (stages inputs).
+    - For ``side="reference"``, NCU filters by kernel name regex to skip
+      PyTorch JIT overhead kernels and capture only the CuTe DSL kernel.
 
     Parameters:
-        metadata:          Turn identity dict (must match the compile turn).
-        configs:           {config_slug: config_body} map (same as evaluate).
-        mode:              "generated_only" — profile the compiled CUDA kernel.
-                           "reference_only" — profile the reference Python module.
-                           "dual" — profile both sides for direct comparison.
-        profiler_backend:  "comparison_runtime" — built-in timing comparison.
-                           "ncu" — NVIDIA Nsight Compute (generated_only only).
-        timeout_seconds:   Max wall-clock seconds for the full profile pass.
+        metadata:        Turn identity dict (must match the compile turn).
+        configs:         {config_slug: config_body} map (same as evaluate).
+        side:            "generated" — profile the compiled CUDA binary.
+                         "reference" — profile the reference Python/CuTe DSL kernel.
+        timeout_seconds: Max wall-clock seconds for the full profile pass.
 
     Returns JSON with:
         all_ok:  bool — true if profiling succeeded for all configs.
         configs: {config_slug: output} where each output contains:
-            status:            "ok" | "error"
-            summary:           {latency_ms: {min, median, max, mean}, runs}
-            reference_summary: Side-level summary for reference (if applicable).
-            generated_summary: Side-level summary for generated kernel.
+            status:   "ok" | "error"
+            summary:  {side, ncu_profiled, ncu_report_exists, ncu_report_path, ...}
 
-    Note: The MCP server strips large fields (reference, generated, artifacts,
-    logs) from each config output. Use cuda_read_file to fetch full profiling
-    reports (e.g. .ncu-rep files) on demand.
+    Note: The MCP server strips large fields (artifacts, logs) from each config
+    output. Use cuda_read_file to fetch the .ncu-rep binary report on demand.
     """
 
     return await _post("/profile", {
         "metadata": metadata,
         "configs": configs,
-        "mode": mode,
-        "profiler_backend": profiler_backend,
+        "side": side,
         "timeout_seconds": timeout_seconds,
     })
 

@@ -96,9 +96,8 @@ For evaluate/profile specifically, public responses mirror request shape and use
 Top-level public responses use `all_ok` for aggregate success. Per-config outputs use `status` plus structured summaries instead of raw log-only results.
 
 - evaluate config output: `status` + `reference` + `generated` + `correctness` + `performance` + `artifacts` + `logs`
-- profile config output: `status` + `summary` + `reference` + `generated` + `reference_summary` + `generated_summary` + `artifacts` + `logs`
-- profile requests also accept `profiler_backend`, currently `comparison_runtime` or `ncu`
-- supported profile/backend boundary: `comparison_runtime` supports `generated_only`, `reference_only`, and `dual`; `ncu` is intentionally generated-only and should not be treated as a dual/reference comparison backend
+- profile config output: `status` + `summary` + `artifacts` + `logs`
+- profile uses Nsight Compute exclusively; callers specify `side: "generated" | "reference"`
 
 #### Execute boundary
 

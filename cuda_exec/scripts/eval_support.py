@@ -1,8 +1,7 @@
-"""Shared utilities for cuda_exec evaluate and profile scripts.
+"""Shared utilities for cuda_exec evaluate scripts.
 
 Provides device locking, watchdog timeout, GPU cleanup, reference module
-loading/measurement, and correctness helpers.  Both evaluate.py and
-profile.py import from here instead of duplicating these definitions.
+loading/measurement, and correctness helpers.
 """
 from __future__ import annotations
 

@@ -197,19 +197,14 @@ For `evaluate`, the current runtime shape is comparison-first:
 - persist one kept comparison artifact per config under `artifacts/evaluate.attempt_###.config_<slug>.comparison.json`
 - return per-config `reference`, `generated`, `correctness`, `performance`, `artifacts`, and `logs`
 
-For `profile`, the runtime shape is mode-driven and backend-aware:
+For `profile`, the endpoint uses Nsight Compute (`ncu`) exclusively:
 
-- `generated_only`: run only the compiled/generated side and summarize generated performance
-- `reference_only`: run only the reference module side and summarize reference performance
-- `dual`: run both sides and return summary metadata that includes comparison fields such as reference/generated median latency and speedup
-- `profiler_backend="comparison_runtime"` keeps the existing behavior-first runtime and is the supported backend for all three modes above
-- `profiler_backend="ncu"` provides a parallel Nsight Compute capture path intentionally scoped to `generated_only`
-- long-term boundary decision: keep `ncu` as a generated-side profiler backend rather than extending it to `reference_only` or `dual`; side-by-side comparisons remain the responsibility of `comparison_runtime`
-- persist one kept structured profile artifact per config under `artifacts/profile.attempt_###.config_<slug>.summary.json`
+- callers specify `side: "generated" | "reference"` to choose which kernel to profile
+- `generated`: NCU profiles the compiled CUDA binary via `profile.sh`
+- `reference`: NCU profiles the reference Python/CuTe DSL kernel, filtering by kernel name regex to skip PyTorch JIT overhead
+- persist structured profile artifact per config under `artifacts/profile.attempt_###.config_<slug>.summary.json`
 - publish `artifacts/profile.attempt_###.config_<slug>.ncu.ncu-rep` only when the `.ncu-rep` file actually exists
-- if `ncu` runs but reports `No kernels were profiled` / `No metrics to collect`, keep the run result as an `ncu_process_duration_fallback` summary and record that boundary in summary metadata instead of pretending a full NCU report exists
-- return per-config `summary`, `reference`, `generated`, `reference_summary`, `generated_summary`, `artifacts`, and `logs`
-- integration coverage now explicitly exercises `dual`, `reference_only`, `generated_only`, and the `ncu` backend path within that generated-only scope
+- return per-config `summary`, `artifacts`, and `logs`
 
 Example config fields:
 
@@ -778,10 +773,7 @@ Profile supports an explicit mode:
 - `generated_only`
 - `dual`
 
-Profile also supports an explicit backend:
-
-- `comparison_runtime` (default)
-- `ncu` (currently `generated_only` only)
+Profile uses Nsight Compute exclusively. Callers specify `side`:
 
 ```json
 {
@@ -793,8 +785,7 @@ Profile also supports an explicit backend:
     "turn": 4
   },
   "timeout_seconds": 180,
-  "mode": "dual",
-  "profiler_backend": "comparison_runtime",
+  "side": "generated",
   "configs": {
     "shape-1d-1048576": {
       "shape_kind": "1d",
@@ -809,19 +800,9 @@ Profile also supports an explicit backend:
 Response shape per config:
 
 - `status`
-- `reference` (present in `reference_only` and `dual`)
-  - `summary`
-  - `artifacts`
-  - `logs`
-- `generated` (present in `generated_only` and `dual`)
-  - `summary`
-  - `artifacts`
-  - `logs`
-- `comparison` (present in `dual`)
-  - `reference_median_ms`
-  - `generated_median_ms`
-  - `delta_ms`
-  - `speedup`
+- `summary` — `{side, ncu_profiled, ncu_report_exists, ncu_report_path, duration_seconds, metadata}`
+- `artifacts` — includes `.ncu-rep` when report was generated
+- `logs`
 
 ### Evaluate request
 

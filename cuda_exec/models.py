@@ -93,28 +93,20 @@ class EvaluateRequest(RequestBase):
 
 
 class ProfileRequest(RequestBase):
-    """Profile request over slug-keyed runtime configs.
+    """Profile request over slug-keyed runtime configs using Nsight Compute.
 
     `configs` is intentionally flexible:
         config_slug -> arbitrary kernel-specific config payload
 
-    `mode` controls which side to profile:
-    - `generated_only`: profile the compiled/generated side only
-    - `reference_only`: profile the reference module side only
-    - `dual`: run both sides and include comparison metadata
-
-    `profiler_backend` selects the implementation path:
-    - `comparison_runtime`: current behavior-first runtime
-    - `ncu`: generated-side Nsight Compute capture path intentionally scoped to `mode="generated_only"`
+    `side` selects which kernel to NCU-profile:
+    - `generated`: profile the compiled CUDA binary
+    - `reference`: profile the reference Python/CuTe DSL kernel (filters by
+      ``NCU_KERNEL_FILTER`` regex to skip PyTorch JIT overhead kernels)
     """
 
-    mode: Literal["reference_only", "generated_only", "dual"] = Field(
-        default="generated_only",
-        description="Which side(s) to profile for each config",
-    )
-    profiler_backend: Literal["comparison_runtime", "ncu"] = Field(
-        default="comparison_runtime",
-        description="Profile implementation backend",
+    side: Literal["generated", "reference"] = Field(
+        ...,
+        description="Which side to NCU-profile: 'generated' (compiled CUDA binary) or 'reference' (Python/CuTe DSL kernel)",
     )
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,
@@ -240,17 +232,6 @@ class PerformanceSummary(BaseModel):
     comparison: Dict[str, Any] = Field(default_factory=dict)
 
 
-class SideProfileSummary(BaseModel):
-    """Direct side-specific profile summary exposed in the public response.
-
-    Unlike the top-level `summary`, this mirrors the nested side payload and does
-    not synthesize a `comparison` object when the side is absent.
-    """
-
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    latency_ms: LatencySummary = Field(default_factory=LatencySummary)
-    runs: int | None = None
-
 
 class ToolIOPair(BaseModel):
     stdout: FilePayload | None = None
@@ -340,26 +321,18 @@ class EvaluateResponse(ResponseBase):
 
 
 class ProfileConfigOutput(BaseModel):
-    """Public profile output for one config slug.
+    """Public NCU profile output for one config slug.
 
-    `summary` carries the compact top-level profile result.
-    `reference` / `generated` preserve the side-specific raw payloads from the
-    runtime.
-    `reference_summary` / `generated_summary` expose the side-by-side structured
-    summaries directly in the public response model so callers do not need to
-    reach into the nested side payloads for the most common fields.
-    `artifacts` / `logs` carry the raw retained files.
+    `summary` carries the compact top-level profile result (timing metadata,
+    whether NCU collected metrics, and report path).
+    `artifacts` / `logs` carry the raw retained files (including `.ncu-rep`).
     """
 
     status: Literal["ok", "error", "timeout", "skipped"]
-    summary: PerformanceSummary = Field(default_factory=PerformanceSummary)
-    reference: Dict[str, Any] = Field(default_factory=dict)
-    generated: Dict[str, Any] = Field(default_factory=dict)
-    reference_summary: SideProfileSummary = Field(default_factory=SideProfileSummary)
-    generated_summary: SideProfileSummary = Field(default_factory=SideProfileSummary)
+    summary: Dict[str, Any] = Field(default_factory=dict)
     artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
-        description="Relative-path keyed kept profiling outputs for this config",
+        description="Relative-path keyed NCU outputs for this config (including .ncu-rep)",
     )
     logs: Dict[str, FilePayload] = Field(
         default_factory=dict,

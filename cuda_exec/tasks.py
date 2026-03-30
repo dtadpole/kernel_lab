@@ -19,7 +19,6 @@ from cuda_exec.runner import (
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
 EVALUATE_SCRIPT = SCRIPTS_DIR / "evaluate.py"
-PROFILE_SCRIPT = SCRIPTS_DIR / "profile.py"
 PROFILE_NCU_SCRIPT = SCRIPTS_DIR / "profile.sh"
 EVAL_HARNESS = SCRIPTS_DIR / "eval_harness.cu"
 DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
@@ -358,20 +357,6 @@ def _evaluate_performance_summary(run_result: dict, *, config: dict) -> dict:
         return performance
     return _fallback_performance_summary(run_result, source="process_duration_fallback", config=config)
 
-
-def _profile_summary(run_result: dict, *, config: dict) -> dict:
-    payload = _parse_structured_stdout(run_result["output"]["stdout"])
-    if payload and isinstance(payload.get("summary"), dict):
-        summary = payload["summary"]
-        summary.setdefault("metadata", {})
-        summary["metadata"] = {**_config_metadata(config), **summary["metadata"]}
-        return summary
-    if payload and isinstance(payload.get("performance"), dict):
-        summary = payload["performance"]
-        summary.setdefault("metadata", {})
-        summary["metadata"] = {**_config_metadata(config), **summary["metadata"]}
-        return summary
-    return _fallback_performance_summary(run_result, source="process_duration_fallback", config=config)
 
 
 def _summarize_config_outputs(config_results: Dict[str, dict]) -> dict:
@@ -804,90 +789,30 @@ def run_profile_task(
     metadata,
     timeout_seconds: int,
     configs: Dict[str, dict],
-    mode: str = "generated_only",
-    profiler_backend: str = "comparison_runtime",
+    side: str = "generated",
 ) -> dict:
+    """Run Nsight Compute profiling on the generated binary or reference Python kernel."""
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
     workspace_path = Path(workspace["workspace_path"])
     attempt = _next_attempt(workspace, "profile")
     started = time.perf_counter()
 
+    if side not in {"generated", "reference"}:
+        raise HTTPException(status_code=400, detail=f"side must be 'generated' or 'reference', got: {side}")
+
     config_results: Dict[str, dict] = {}
     stage_files: List[dict] = []
     stage_artifacts: List[dict] = []
 
-    if profiler_backend not in {"comparison_runtime", "ncu"}:
-        raise HTTPException(status_code=400, detail=f"unsupported profiler_backend: {profiler_backend}")
-    if profiler_backend == "ncu" and mode != "generated_only":
-        raise HTTPException(
-            status_code=400,
-            detail="profiler_backend=ncu currently supports only mode=generated_only",
-        )
-
     for config_slug, config in configs.items():
         config_rel = _write_config_record(workspace, "profile", attempt, config_slug, config)
         profile_json_rel = _config_artifact_rel("profile", attempt, config_slug, "summary.json")
-        config_artifacts: List[dict] = []
+        export_prefix_rel = _config_artifact_rel("profile", attempt, config_slug, "ncu")
+        export_prefix_abs = str((Path(workspace["root_path"]) / export_prefix_rel).resolve())
+        ncu_report_rel = f"{export_prefix_rel}.ncu-rep"
 
-        if profiler_backend == "comparison_runtime":
-            command = [
-                sys.executable,
-                str(PROFILE_SCRIPT),
-                "--run-tag",
-                metadata.run_tag,
-                "--version",
-                metadata.version,
-                "--direction-id",
-                str(metadata.direction_id),
-                "--direction-slug",
-                metadata.direction_slug,
-                "--turn",
-                str(metadata.turn),
-                "--config-slug",
-                config_slug,
-                "--config-json",
-                json.dumps(config),
-                "--mode",
-                mode,
-                "--timeout",
-                str(timeout_seconds),
-            ]
-            run_result = run_generic_command(
-                kind="profile",
-                command=command,
-                workspace_path=str(workspace_path),
-                env={},
-                timeout_seconds=timeout_seconds,
-                return_files=[config_rel],
-                log_file=_stage_log_rel("profile", attempt, config_slug),
-            )
-            payload_json = _parse_structured_stdout(run_result["output"]["stdout"]) or {}
-            profile_json_path = Path(workspace["root_path"]) / profile_json_rel
-            profile_json_path.parent.mkdir(parents=True, exist_ok=True)
-            profile_json_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")
-            config_artifacts = [
-                _build_artifact(
-                    artifact_id=f"profile:summary:{config_slug}",
-                    kind="profile_summary",
-                    path=profile_json_rel,
-                    description=f"Structured profile payload for config {config_slug}",
-                )
-            ]
-            payload = _config_result_payload(
-                config_slug=config_slug,
-                config=config,
-                run_result=run_result,
-                artifacts=config_artifacts,
-                summary=_profile_summary(run_result, config=config),
-            )
-            payload["mode"] = payload_json.get("mode", mode) if isinstance(payload_json, dict) else mode
-            payload["reference"] = payload_json.get("reference", {}) if isinstance(payload_json, dict) else {}
-            payload["generated"] = payload_json.get("generated", {}) if isinstance(payload_json, dict) else {}
-        else:
-            export_prefix_rel = _config_artifact_rel("profile", attempt, config_slug, "ncu")
-            export_prefix_abs = str((Path(workspace["root_path"]) / export_prefix_rel).resolve())
-            ncu_report_rel = f"{export_prefix_rel}.ncu-rep"
+        if side == "generated":
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
@@ -896,74 +821,85 @@ def run_profile_task(
                 "--export-prefix",
                 export_prefix_abs,
             ]
-            run_result = run_generic_command(
-                kind="profile",
-                command=command,
-                workspace_path=str(workspace_path),
-                env=_config_env(workspace, "profile", attempt, config_slug, config, config_rel),
-                timeout_seconds=timeout_seconds,
-                return_files=[config_rel, ncu_report_rel],
-                log_file=_stage_log_rel("profile", attempt, config_slug),
-            )
-            ncu_stdout = run_result.get("output", {}).get("stdout", "") or ""
-            ncu_profiled = "No kernels were profiled." not in ncu_stdout and "No metrics to collect found in sections." not in ncu_stdout
-            ncu_report_abs = Path(workspace["root_path"]) / ncu_report_rel
-            ncu_report_exists = ncu_report_abs.exists()
-            ncu_summary = _fallback_performance_summary(run_result, source="ncu_process_duration_fallback", config=config)
-            ncu_summary["metadata"] = {
-                **config,
-                **ncu_summary.get("metadata", {}),
-                "profiler_backend": "ncu",
-                "ncu_profiled": ncu_profiled,
-                "ncu_report_exists": ncu_report_exists,
-            }
-            if not ncu_profiled:
-                ncu_summary["metadata"]["ncu_warning"] = "ncu reported no profiled kernels or no metrics to collect"
-            payload_json = {
-                "metadata": metadata.model_dump(),
-                "config_slug": config_slug,
-                "mode": mode,
-                "profiler_backend": profiler_backend,
-                "generated": {
-                    "summary": ncu_summary,
-                },
-                "summary": ncu_summary,
-            }
-            if ncu_report_exists:
-                payload_json["generated"]["ncu_report"] = {"path": ncu_report_rel}
-            profile_json_path = Path(workspace["root_path"]) / profile_json_rel
-            profile_json_path.parent.mkdir(parents=True, exist_ok=True)
-            profile_json_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")
-            config_artifacts = [
-                _build_artifact(
-                    artifact_id=f"profile:summary:{config_slug}",
-                    kind="profile_summary",
-                    path=profile_json_rel,
-                    description=f"Structured profile payload for config {config_slug}",
-                ),
-            ]
-            if ncu_report_exists:
-                config_artifacts.append(
-                    _build_artifact(
-                        artifact_id=f"profile:ncu_report:{config_slug}",
-                        kind="ncu_report",
-                        path=ncu_report_rel,
-                        description=f"Nsight Compute report for config {config_slug}",
-                    )
+        else:
+            reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "reference.py"
+            if not reference_py.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"reference.py not found at {reference_py} — compile first to stage inputs",
                 )
-            payload = _config_result_payload(
-                config_slug=config_slug,
-                config=config,
-                run_result=run_result,
-                artifacts=config_artifacts,
-                summary=payload_json["summary"],
-            )
-            payload["mode"] = mode
-            payload["profiler_backend"] = profiler_backend
-            payload["reference"] = {}
-            payload["generated"] = payload_json.get("generated", {})
+            command = [
+                "/usr/local/cuda/bin/ncu",
+                "--set", "detailed",
+                "--target-processes", "all",
+                "--force-overwrite",
+                "--kernel-name", 'regex:"cutlass|vector_add"',
+                "--export", export_prefix_abs,
+                sys.executable, str(reference_py),
+            ]
 
-        payload["profiler_backend"] = profiler_backend
+        run_result = run_generic_command(
+            kind="profile",
+            command=command,
+            workspace_path=str(workspace_path),
+            env=_config_env(workspace, "profile", attempt, config_slug, config, config_rel),
+            timeout_seconds=timeout_seconds,
+            return_files=[config_rel, ncu_report_rel],
+            log_file=_stage_log_rel("profile", attempt, config_slug),
+        )
+
+        ncu_stdout = run_result.get("output", {}).get("stdout", "") or ""
+        ncu_profiled = "No kernels were profiled." not in ncu_stdout and "No metrics to collect found in sections." not in ncu_stdout
+        ncu_report_abs = Path(workspace["root_path"]) / ncu_report_rel
+        ncu_report_exists = ncu_report_abs.exists()
+
+        ncu_summary: dict[str, Any] = {
+            "side": side,
+            "ncu_profiled": ncu_profiled,
+            "ncu_report_exists": ncu_report_exists,
+            "duration_seconds": run_result["duration_seconds"],
+            "metadata": _config_metadata(config),
+        }
+        if ncu_report_exists:
+            ncu_summary["ncu_report_path"] = ncu_report_rel
+        if not ncu_profiled:
+            ncu_summary["ncu_warning"] = "ncu reported no profiled kernels or no metrics to collect"
+
+        payload_json = {
+            "metadata": metadata.model_dump(),
+            "config_slug": config_slug,
+            "side": side,
+            "summary": ncu_summary,
+        }
+        profile_json_path = Path(workspace["root_path"]) / profile_json_rel
+        profile_json_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_json_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")
+
+        config_artifacts = [
+            _build_artifact(
+                artifact_id=f"profile:summary:{config_slug}",
+                kind="profile_summary",
+                path=profile_json_rel,
+                description=f"NCU profile summary for config {config_slug}",
+            ),
+        ]
+        if ncu_report_exists:
+            config_artifacts.append(
+                _build_artifact(
+                    artifact_id=f"profile:ncu_report:{config_slug}",
+                    kind="ncu_report",
+                    path=ncu_report_rel,
+                    description=f"Nsight Compute .ncu-rep report for config {config_slug}",
+                )
+            )
+
+        payload = _config_result_payload(
+            config_slug=config_slug,
+            config=config,
+            run_result=run_result,
+            artifacts=config_artifacts,
+            summary=ncu_summary,
+        )
         payload["files"].append(capture_turn_file(profile_json_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
@@ -979,8 +915,7 @@ def run_profile_task(
         {
             "input_artifact_id": target_artifact["artifact_id"],
             "input_path": target_artifact["path"],
-            "profiler": profiler_backend,
-            "mode": mode,
+            "side": side,
             "configs": {config_slug: _config_payload(config_slug, config) for config_slug, config in configs.items()},
             "config_results": {
                 config_slug: {

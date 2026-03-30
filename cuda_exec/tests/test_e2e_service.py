@@ -666,7 +666,7 @@ class CudaExecE2ETest(unittest.TestCase):
         else:
             self.assertIn("detail", body)
 
-    def test_profile_endpoint_supports_reference_only_mode(self) -> None:
+    def test_profile_endpoint_ncu_generated(self) -> None:
         compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=119))
         self.assertEqual(compile_status, 200)
 
@@ -674,8 +674,8 @@ class CudaExecE2ETest(unittest.TestCase):
             "/profile",
             {
                 "metadata": self._metadata(119),
-                "timeout_seconds": 5,
-                "mode": "reference_only",
+                "timeout_seconds": 20,
+                "side": "generated",
                 "configs": self._config_map(),
             },
         )
@@ -684,34 +684,20 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertTrue(body["configs"])
             first_slug, first = next(iter(body["configs"].items()))
             self.assertIn("summary", first)
-            self.assertIn("reference", first)
-            self.assertIn("generated", first)
-            self.assertIn("reference_summary", first)
-            self.assertIn("generated_summary", first)
             self.assertIn("artifacts", first)
             self.assertIn("logs", first)
-            self.assertEqual(first["generated"], {})
-            self.assertEqual(first["generated_summary"].get("metadata"), {})
-            self.assertEqual(first["generated_summary"].get("runs"), None)
-            self.assertIn("summary", first["reference"])
-            self.assertIn("output", first["reference"])
-            self.assertEqual(first["summary"]["metadata"]["rank"], self._config_map()[first_slug]["rank"])
-            self.assertEqual(first["reference"]["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
-            self.assertEqual(first["reference_summary"].get("metadata"), first["reference"]["summary"].get("metadata"))
-            self.assertEqual(first["reference_summary"].get("latency_ms"), first["reference"]["summary"].get("latency_ms"))
-            self.assertEqual(first["reference_summary"].get("runs"), first["reference"]["summary"].get("runs"))
+            summary = first["summary"]
+            self.assertEqual(summary.get("side"), "generated")
+            self.assertIn("ncu_profiled", summary)
+            self.assertIn("ncu_report_exists", summary)
             artifact_paths = list(first["artifacts"].keys())
-            self.assertTrue(any(path.endswith(f"config_{first_slug}.summary.json") for path in artifact_paths))
-            expected_log_prefix = f"logs/profile.attempt_{body['attempt']:03d}.config_{first_slug}"
-            for suffix in ["log", "stdout", "stderr"]:
-                key = f"{expected_log_prefix}.{suffix}"
-                self.assertIn(key, first["logs"])
-                self.assertTrue(first["logs"][key]["inline"])
-            self.assertIn('"mode": "reference_only"', first["logs"][f"{expected_log_prefix}.stdout"]["content"])
+            self.assertTrue(any(path.endswith("summary.json") for path in artifact_paths))
+            has_report = any(path.endswith(".ncu-rep") for path in artifact_paths)
+            self.assertEqual(has_report, bool(summary.get("ncu_report_exists")))
         else:
             self.assertIn("detail", body)
 
-    def test_profile_endpoint_supports_generated_only_mode(self) -> None:
+    def test_profile_endpoint_ncu_reference(self) -> None:
         compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=120))
         self.assertEqual(compile_status, 200)
 
@@ -719,8 +705,8 @@ class CudaExecE2ETest(unittest.TestCase):
             "/profile",
             {
                 "metadata": self._metadata(120),
-                "timeout_seconds": 5,
-                "mode": "generated_only",
+                "timeout_seconds": 60,
+                "side": "reference",
                 "configs": self._config_map(),
             },
         )
@@ -729,34 +715,16 @@ class CudaExecE2ETest(unittest.TestCase):
             self.assertTrue(body["configs"])
             first_slug, first = next(iter(body["configs"].items()))
             self.assertIn("summary", first)
-            self.assertIn("reference", first)
-            self.assertIn("generated", first)
-            self.assertIn("reference_summary", first)
-            self.assertIn("generated_summary", first)
             self.assertIn("artifacts", first)
             self.assertIn("logs", first)
-            self.assertEqual(first["reference"], {})
-            self.assertEqual(first["reference_summary"].get("metadata"), {})
-            self.assertEqual(first["reference_summary"].get("runs"), None)
-            self.assertIn("summary", first["generated"])
-            self.assertIn("output", first["generated"])
-            self.assertEqual(first["summary"]["metadata"]["shape_kind"], self._config_map()[first_slug]["shape_kind"])
-            self.assertEqual(first["generated"]["summary"]["metadata"]["input_size"], self._config_map()[first_slug]["input_size"])
-            self.assertEqual(first["generated_summary"].get("metadata"), first["generated"]["summary"].get("metadata"))
-            self.assertEqual(first["generated_summary"].get("latency_ms"), first["generated"]["summary"].get("latency_ms"))
-            self.assertEqual(first["generated_summary"].get("runs"), first["generated"]["summary"].get("runs"))
-            artifact_paths = list(first["artifacts"].keys())
-            self.assertTrue(any(path.endswith(f"config_{first_slug}.summary.json") for path in artifact_paths))
-            expected_log_prefix = f"logs/profile.attempt_{body['attempt']:03d}.config_{first_slug}"
-            for suffix in ["log", "stdout", "stderr"]:
-                key = f"{expected_log_prefix}.{suffix}"
-                self.assertIn(key, first["logs"])
-                self.assertTrue(first["logs"][key]["inline"])
-            self.assertIn('"mode": "generated_only"', first["logs"][f"{expected_log_prefix}.stdout"]["content"])
+            summary = first["summary"]
+            self.assertEqual(summary.get("side"), "reference")
+            self.assertIn("ncu_profiled", summary)
+            self.assertIn("ncu_report_exists", summary)
         else:
             self.assertIn("detail", body)
 
-    def test_profile_endpoint_supports_ncu_backend_for_generated_only(self) -> None:
+    def test_profile_endpoint_rejects_invalid_side(self) -> None:
         compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=121))
         self.assertEqual(compile_status, 200)
 
@@ -765,116 +733,11 @@ class CudaExecE2ETest(unittest.TestCase):
             {
                 "metadata": self._metadata(121),
                 "timeout_seconds": 5,
-                "mode": "generated_only",
-                "profiler_backend": "ncu",
+                "side": "dual",
                 "configs": self._config_map(),
             },
         )
-        self.assertIn(status, {200, 400, 408})
-        if status == 200:
-            self.assertTrue(body["configs"])
-            first_slug, first = next(iter(body["configs"].items()))
-            self.assertIn("summary", first)
-            self.assertIn("generated", first)
-            self.assertIn("generated_summary", first)
-            self.assertIn("artifacts", first)
-            self.assertIn("logs", first)
-            artifact_paths = list(first["artifacts"].keys())
-            self.assertTrue(any(path.endswith("summary.json") for path in artifact_paths))
-            self.assertEqual(first["reference"], {})
-            self.assertEqual(first["reference_summary"].get("metadata"), {})
-            self.assertEqual(first["generated_summary"].get("rank"), None)
-            self.assertEqual(first["generated_summary"].get("metadata", {}).get("rank"), self._config_map()[first_slug]["rank"])
-            self.assertEqual(first["summary"].get("metadata", {}).get("profiler_backend"), "ncu")
-            self.assertIn("ncu_profiled", first["summary"].get("metadata", {}))
-            self.assertIn("ncu_report_exists", first["summary"].get("metadata", {}))
-            has_report_artifact = any(path.endswith(".ncu-rep") for path in artifact_paths)
-            self.assertEqual(has_report_artifact, bool(first["summary"].get("metadata", {}).get("ncu_report_exists")))
-            if has_report_artifact:
-                self.assertIn("ncu_report", first["generated"])
-            else:
-                self.assertNotIn("ncu_report", first["generated"])
-        else:
-            self.assertIn("detail", body)
-
-    def test_profile_endpoint_can_materialize_ncu_report_with_runtime_launch_fixture(self) -> None:
-        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=124))
-        self.assertEqual(compile_status, 200)
-
-        status, body = self.service.post_json(
-            "/profile",
-            {
-                "metadata": self._metadata(124),
-                "timeout_seconds": 20,
-                "mode": "generated_only",
-                "profiler_backend": "ncu",
-                "configs": self._config_map(),
-            },
-        )
-        self.assertIn(status, {200, 400, 408})
-        if status == 200:
-            self.assertTrue(body["configs"])
-            first_slug, first = next(iter(body["configs"].items()))
-            meta = first["summary"].get("metadata", {})
-            self.assertEqual(meta.get("profiler_backend"), "ncu")
-            artifact_paths = list(first["artifacts"].keys())
-            has_report_artifact = any(path.endswith(".ncu-rep") for path in artifact_paths)
-            if has_report_artifact:
-                self.assertTrue(meta.get("ncu_report_exists"))
-                self.assertIn("ncu_report", first["generated"])
-            else:
-                self.assertFalse(meta.get("ncu_report_exists"))
-
-    def test_profile_endpoint_ncu_fallback_does_not_publish_missing_report(self) -> None:
-        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=125))
-        self.assertEqual(compile_status, 200)
-
-        status, body = self.service.post_json(
-            "/profile",
-            {
-                "metadata": self._metadata(125),
-                "timeout_seconds": 20,
-                "mode": "generated_only",
-                "profiler_backend": "ncu",
-                "configs": self._config_map(),
-            },
-        )
-        self.assertIn(status, {200, 400, 408})
-        if status == 200:
-            first_slug, first = next(iter(body["configs"].items()))
-            meta = first["summary"].get("metadata", {})
-            self.assertEqual(meta.get("profiler_backend"), "ncu")
-            self.assertFalse(meta.get("ncu_profiled"))
-            self.assertFalse(meta.get("ncu_report_exists"))
-            self.assertEqual(meta.get("source"), "ncu_process_duration_fallback")
-            self.assertIn("ncu_warning", meta)
-            artifact_paths = list(first["artifacts"].keys())
-            self.assertFalse(any(path.endswith(".ncu-rep") for path in artifact_paths))
-            self.assertNotIn("ncu_report", first["generated"])
-            expected_log_prefix = f"logs/profile.attempt_{body['attempt']:03d}.config_{first_slug}"
-            self.assertIn(f"{expected_log_prefix}.stdout", first["logs"])
-            self.assertIn("No kernels were profiled", first["logs"][f"{expected_log_prefix}.stdout"]["content"])
-        else:
-            self.assertIn("detail", body)
-
-    def test_profile_endpoint_rejects_ncu_backend_for_non_generated_modes(self) -> None:
-        compile_status, _ = self.service.post_json("/compile", self._compile_payload(turn=122))
-        self.assertEqual(compile_status, 200)
-
-        for mode in ["reference_only", "dual"]:
-            status, body = self.service.post_json(
-                "/profile",
-                {
-                    "metadata": self._metadata(122),
-                    "timeout_seconds": 5,
-                    "mode": mode,
-                    "profiler_backend": "ncu",
-                    "configs": self._config_map(),
-                },
-            )
-            self.assertEqual(status, 400)
-            self.assertIn("detail", body)
-            self.assertIn('profiler_backend=ncu currently supports only mode=generated_only', body["detail"])
+        self.assertEqual(status, 422)
 
     def test_execute_endpoint_calls_public_interface(self) -> None:
         status, body = self.service.post_json(

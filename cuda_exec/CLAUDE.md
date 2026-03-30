@@ -50,8 +50,7 @@ The service enforces a strict stage order per turn: **compile -> evaluate -> pro
 - **`scripts/eval_support.py`** — Shared Python utilities for evaluate and profile: device locking, watchdog, GPU cleanup, reference loading/measurement, correctness checking.
 - **`scripts/evaluate.py`** — Comparison runner aligned with `kbEvalCli.py`. CUDA event timing, `allclose` verification (atol/rtol=1e-02), multi-trial correctness (3 trials, seed rotation), warmup=5, timing trials=10, per-GPU device lock, SIGALRM watchdog, GPU cleanup. Loads reference Python module (must export `Model(nn.Module)`, `get_inputs(config)`, `get_init_inputs()`), runs the generated compiled binary, compares outputs.
 - **`scripts/fmt_eval.py`** — Formats evaluate.py JSON output as a compact terminal summary (correctness + latency + speedup).
-- **`scripts/profile.py`** — Profile runner supporting three modes (`generated_only`, `reference_only`, `dual`) under the `comparison_runtime` backend.
-- **`scripts/profile.sh`** — Nsight Compute (`ncu`) capture wrapper, scoped to `generated_only` mode only.
+- **`scripts/profile.sh`** — Nsight Compute (`ncu`) capture wrapper. Used by the `/profile` endpoint and Makefile `profile-ncu-generated` / `profile-ncu-reference` targets.
 
 ### Turn-root disk layout
 
@@ -71,7 +70,7 @@ Override with `CUDA_EXEC_ROOT` env var for tests/isolation.
 - **Config payloads are intentionally flexible** — the service owns transport shape, the kernel owns semantic shape.
 - **Public responses use `all_ok`** at the top level and per-config `status` fields. Internal `state/` is not exposed in default responses.
 - **Files in responses** are relative-path-keyed dicts of `FilePayload` with `encoding` (utf8/base64) and `truncated` metadata.
-- **`profiler_backend="ncu"`** is a parallel path to `comparison_runtime`, intentionally limited to `generated_only` mode.
+- **Profile is NCU-only.** The `/profile` endpoint runs Nsight Compute with `--set detailed`. Callers specify `side: "generated" | "reference"` to choose which kernel to profile.
 - **Bearer token authentication** gates all endpoints except `/healthz`. Key file at `~/.keys/cuda_exec.key`, overridable via `CUDA_EXEC_KEY_PATH` env var. Service refuses to start without a valid key.
 - **Fixed entry file names** — reference entry must be `reference.py`, generated entry must be `generated.cu`. Additional helper files may use any name.
 - **BF16-only kernel interface** — All inputs/outputs use `__nv_bfloat16` (CUDA) / `torch.bfloat16` (Python). Generated kernels export `extern "C" int kernel_run(__nv_bfloat16**, int, __nv_bfloat16**, int, int, cudaStream_t)`. No custom headers needed — only `#include <cuda_bf16.h>`.

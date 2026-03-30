@@ -45,11 +45,9 @@ That file now contains the authoritative request/response JSON examples for:
 
 Current profile note:
 
-- `profiler_backend="comparison_runtime"` is the default behavior-first runtime
-- supported mode coverage under `comparison_runtime`: `generated_only`, `reference_only`, and `dual`
-- `profiler_backend="ncu"` is available in parallel and is intentionally scoped to `mode="generated_only"`
-- `ncu` is **not** a dual/reference comparison backend; cross-side comparison remains under `comparison_runtime`
-- current verified boundary: `ncu` may execute successfully while still reporting `No kernels were profiled`, in which case `cuda_exec` falls back to process-duration summary metadata and only publishes `.ncu-rep` when that artifact actually exists
+- profile uses Nsight Compute (`ncu`) exclusively with `--set detailed`
+- callers specify `side: "generated" | "reference"` to choose which kernel to profile
+- for `side=reference`, NCU filters by kernel name regex to skip PyTorch JIT overhead kernels
 
 Current evaluate alignment note:
 

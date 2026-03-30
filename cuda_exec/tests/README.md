@@ -58,9 +58,8 @@ Current suite coverage already includes:
 - file-read success/error behavior and max-bytes truncation
 - evaluate endpoint shape plus standalone `scripts/evaluate.py` CLI execution after compile
 - reference fixture contract enforcement (`Model(nn.Module)`, `get_init_inputs()`, `get_inputs(config)`) and fixture execution from config env
-- profile behavior for `comparison_runtime` across `generated_only`, `reference_only`, and `dual`
-- profile behavior for `ncu` on `generated_only`, including rejection of unsupported non-generated modes
-- a real-kernel generated fixture proving that `ncu` can materialize a report when the binary actually launches CUDA work
+- NCU profile for `side=generated` and `side=reference`
+- rejection of invalid `side` values
 - execute endpoint logs-first public contract
 - temporary runtime-root preservation and temp-venv harness behavior
 

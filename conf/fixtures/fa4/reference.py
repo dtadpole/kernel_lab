@@ -154,7 +154,8 @@ def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
     Q = torch.randn(B, S, H, D, dtype=torch.bfloat16, device=device)
     K = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
     V = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
-    return [Q, K, V]
+    causal = cfg.get("causal", False)
+    return [Q, K, V, causal]
 
 
 # ---------------------------------------------------------------------------

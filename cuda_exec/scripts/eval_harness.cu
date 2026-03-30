@@ -200,8 +200,10 @@ int main() {
      * Inputs:  num_inputs  buffers, each input_size BF16 elements.
      * Outputs: num_outputs buffers, each input_size BF16 elements.
      * Override counts via env vars if needed. */
-    const int num_inputs  = env_int("CUDA_EXEC_HARNESS_NUM_INPUTS", 2);
-    const int num_outputs = env_int("CUDA_EXEC_HARNESS_NUM_OUTPUTS", 1);
+    const int num_inputs  = env_int("CUDA_EXEC_PARAM_NUM_INPUTS",
+                           env_int("CUDA_EXEC_HARNESS_NUM_INPUTS", 2));
+    const int num_outputs = env_int("CUDA_EXEC_PARAM_NUM_OUTPUTS",
+                           env_int("CUDA_EXEC_HARNESS_NUM_OUTPUTS", 1));
     const size_t elem_bytes = static_cast<size_t>(cfg.input_size) * sizeof(__nv_bfloat16);
 
     /* Allocate and fill host inputs (BF16 arange) */

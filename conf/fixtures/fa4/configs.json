@@ -7,7 +7,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-causal-b4-s8192": {
     "family": "fa4-mha",
@@ -17,7 +20,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-causal-b2-s16384": {
     "family": "fa4-mha",
@@ -27,7 +33,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-causal-b1-s32768": {
     "family": "fa4-mha",
@@ -37,7 +46,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": true,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-noncausal-b8-s4096": {
     "family": "fa4-mha",
@@ -47,7 +59,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-noncausal-b4-s8192": {
     "family": "fa4-mha",
@@ -57,7 +72,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-noncausal-b2-s16384": {
     "family": "fa4-mha",
@@ -67,7 +85,10 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   },
   "mha-noncausal-b1-s32768": {
     "family": "fa4-mha",
@@ -77,6 +98,9 @@
     "num_kv_heads": 16,
     "head_dim": 128,
     "causal": false,
-    "total_tokens": 32768
+    "total_tokens": 32768,
+    "input_size": 67108864,
+    "num_inputs": 3,
+    "num_outputs": 1
   }
 }

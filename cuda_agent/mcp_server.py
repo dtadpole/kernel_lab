@@ -857,5 +857,55 @@ async def cuda_lookup_doc_section(
     )
 
 
+@mcp.tool()
+async def cuda_browse_toc(
+    doc_id: Annotated[str, Field(description=(
+        "Document slug, e.g. 'cuda-c-programming-guide', 'parallel-thread-execution'"
+    ))],
+    section_id: Annotated[str | None, Field(description=(
+        "Section anchor ID to expand. Omit for top-level chapters."
+    ))] = None,
+    depth: Annotated[int, Field(description="Expansion depth", ge=1, le=5)] = 2,
+) -> str:
+    """Browse the table of contents of a CUDA documentation page.
+
+    Use without section_id to see top-level chapters.
+    Use with section_id to expand a specific section and see its children.
+    """
+    searcher, err = _get_doc_searcher()
+    if err:
+        return err
+    result = searcher.browse_toc(doc_id=doc_id, section_id=section_id, depth=depth)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def cuda_read_section(
+    doc_id: Annotated[str, Field(description=(
+        "Document slug, e.g. 'cuda-c-programming-guide', 'parallel-thread-execution'"
+    ))],
+    section_id: Annotated[str, Field(description=(
+        "Section anchor ID from TOC or search result, e.g. 'thread-hierarchy'"
+    ))],
+) -> str:
+    """Read the full content of a specific documentation section.
+
+    Returns the section content as lightweight HTML with navigation context
+    (parent section, previous/next siblings) for further browsing.
+
+    Use after cuda_search_docs to read the full context of a search result,
+    or after cuda_browse_toc to read a section you found in the TOC.
+    """
+    searcher, err = _get_doc_searcher()
+    if err:
+        return err
+    result = searcher.read_section(doc_id=doc_id, section_id=section_id)
+    if result is None:
+        return json.dumps({"error": f"Section '{section_id}' not found in '{doc_id}'"})
+    if len(result.get("content", "")) > 8000:
+        result["content"] = result["content"][:8000] + "\n... [truncated]"
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -66,6 +66,14 @@ else
 endif
 
 # ---------------------------------------------------------------------------
+# Config selector — pick a config slug from conf/fixtures/$(KERNEL)/configs.json
+#   make evaluate KERNEL=matmul CONFIG=mat-1024x1024
+#   make evaluate KERNEL=fa4 CONFIG=mha-causal-b2-s16384
+# If CONFIG is not set, uses the per-kernel default from _KERNEL_CONFIG_SLUG.
+# ---------------------------------------------------------------------------
+_CONFIG_FILE = $(REPO_ROOT)/conf/fixtures/$(KERNEL)/configs.json
+
+# ---------------------------------------------------------------------------
 # Metadata — derived from KERNEL, overridable on command line
 # ---------------------------------------------------------------------------
 CUDA_EXEC_ROOT ?= $(HOME)/.cuda_exec
@@ -74,8 +82,8 @@ VERSION        ?= v1
 DIRECTION_ID   ?= $(_KERNEL_DIRECTION_ID)
 DIRECTION_SLUG ?= $(_KERNEL_DIRECTION_SLUG)
 TURN           ?= 0
-CONFIG_SLUG    ?= $(_KERNEL_CONFIG_SLUG)
-CONFIG_JSON    ?= $(_KERNEL_CONFIG_JSON)
+CONFIG_SLUG    ?= $(if $(CONFIG),$(CONFIG),$(_KERNEL_CONFIG_SLUG))
+CONFIG_JSON    ?= $(if $(CONFIG),$(shell $(VENV_PYTHON) -c "import json,sys;d=json.load(open('$(_CONFIG_FILE)'));print(json.dumps(d['$(CONFIG)']))" 2>/dev/null),$(_KERNEL_CONFIG_JSON))
 
 # ---------------------------------------------------------------------------
 # Input files — derived from KERNEL
@@ -140,7 +148,7 @@ endef
 help: ## Show available targets
 	@echo "cuda_exec manual CLI"
 	@echo ""
-	@echo "KERNEL=$(KERNEL)  (switch with KERNEL=vecadd or KERNEL=matmul)"
+	@echo "KERNEL=$(KERNEL)  CONFIG=$(if $(CONFIG),$(CONFIG),<default>)"
 	@echo "Turn root: \$$(CUDA_EXEC_ROOT)/\$$(RUN_TAG)/\$$(VERSION)/\$$(DIRECTION_ID)_\$$(DIRECTION_SLUG)/turn_\$$(TURN)/"
 	@echo ""
 	@echo "Targets:"
@@ -148,13 +156,13 @@ help: ## Show available targets
 		awk -F ':.*## ' '{printf "  %-24s %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Quick start:"
-	@echo "  make test                    # smoke test vecadd (default)"
-	@echo "  make test KERNEL=matmul      # smoke test matmul"
-	@echo "  make clean-test              # clean up smoke test output"
+	@echo "  make test                                    # smoke test vecadd (default)"
+	@echo "  make test KERNEL=matmul                      # smoke test matmul"
+	@echo "  make test KERNEL=matmul CONFIG=mat-1024x1024 # matmul with specific config"
+	@echo "  make clean-test                              # clean up smoke test output"
 	@echo ""
-	@echo "Custom kernel:"
-	@echo "  make compile evaluate KERNEL=matmul"
-	@echo "  make compile evaluate KERNEL=matmul CONFIG_SLUG=mat-4096x4096 CONFIG_JSON='{...}'"
+	@echo "CONFIG= picks a slug from conf/fixtures/\$$(KERNEL)/configs.json."
+	@echo "If omitted, uses the per-kernel default."
 
 .PHONY: show
 show: ## Print resolved turn-root path and key variables

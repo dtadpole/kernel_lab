@@ -13,6 +13,7 @@ def cmd_download(args: argparse.Namespace) -> None:
         tier=args.tier,
         pdf_only=args.pdf_only,
         html_only=args.html_only,
+        migrate=args.migrate,
     )
 
 
@@ -41,6 +42,34 @@ def cmd_search(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_browse(args: argparse.Namespace) -> None:
+    from doc_retrieval.searcher import DocSearcher
+    import json
+
+    searcher = DocSearcher()
+    result = searcher.browse_toc(
+        doc_id=args.doc_id,
+        section_id=args.section_id,
+        depth=args.depth,
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_read(args: argparse.Namespace) -> None:
+    from doc_retrieval.searcher import DocSearcher
+    import json
+
+    searcher = DocSearcher()
+    result = searcher.read_section(
+        doc_id=args.doc_id,
+        section_id=args.section_id,
+    )
+    if result is None:
+        print(f"Section '{args.section_id}' not found in '{args.doc_id}'")
+        return
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="doc_retrieval",
@@ -58,6 +87,10 @@ def main() -> None:
     )
     dl.add_argument("--pdf-only", action="store_true", help="Skip HTML crawling")
     dl.add_argument("--html-only", action="store_true", help="Skip PDF downloads")
+    dl.add_argument(
+        "--migrate", action="store_true",
+        help="Migrate legacy flat .html/.json files to folder structure",
+    )
     dl.set_defaults(func=cmd_download)
 
     # --- parse ---
@@ -98,6 +131,19 @@ def main() -> None:
         help="Number of results (default: 5)",
     )
     sr.set_defaults(func=cmd_search)
+
+    # --- browse ---
+    br = sub.add_parser("browse", help="Browse document table of contents")
+    br.add_argument("doc_id", help="Document ID (slug)")
+    br.add_argument("--section-id", default=None, help="Section to expand")
+    br.add_argument("--depth", type=int, default=2, help="Expansion depth (default: 2)")
+    br.set_defaults(func=cmd_browse)
+
+    # --- read ---
+    rd = sub.add_parser("read", help="Read a document section")
+    rd.add_argument("doc_id", help="Document ID (slug)")
+    rd.add_argument("section_id", help="Section ID (anchor)")
+    rd.set_defaults(func=cmd_read)
 
     args = parser.parse_args()
     args.func(args)

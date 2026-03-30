@@ -34,5 +34,6 @@ dist/
 *.qdrep
 *.sqlite
 
-# Doc retrieval data (downloaded docs, parsed chunks, search indices)
-doc_retrieval/data/
+# Doc retrieval generated data (chunks, indices) — raw/ is tracked
+doc_retrieval/data/chunks/
+doc_retrieval/data/index/

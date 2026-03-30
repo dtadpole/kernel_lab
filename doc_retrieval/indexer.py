@@ -15,14 +15,14 @@ from doc_retrieval.config import load_config
 logger = logging.getLogger(__name__)
 
 
-def _storage_root() -> Path:
+def _runtime_root() -> Path:
     cfg = load_config()
-    return Path(cfg.doc_retrieval.storage.root).expanduser()
+    return Path(cfg.doc_retrieval.storage.runtime_root).expanduser()
 
 
 def _load_chunks() -> list[dict]:
     """Load all chunks from the JSONL file."""
-    chunks_path = _storage_root() / "chunks" / "all_chunks.jsonl"
+    chunks_path = _runtime_root() / "chunks" / "all_chunks.jsonl"
     if not chunks_path.exists():
         raise FileNotFoundError(
             f"Chunks file not found: {chunks_path}. Run 'parse' first."
@@ -56,7 +56,7 @@ def _build_bm25(chunks: list[dict]) -> None:
     """Build and save a BM25 index."""
     from rank_bm25 import BM25Okapi
 
-    index_dir = _storage_root() / "index"
+    index_dir = _runtime_root() / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Tokenizing %d chunks for BM25...", len(chunks))
@@ -77,7 +77,7 @@ def _build_dense(chunks: list[dict]) -> None:
 
     from doc_retrieval.embeddings import EmbeddingCache, create_client
 
-    index_dir = _storage_root() / "index"
+    index_dir = _runtime_root() / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
 
     client = create_client()

@@ -755,15 +755,28 @@ async def cuda_search_docs(
     """Search NVIDIA CUDA Toolkit documentation.
 
     Searches the indexed CUDA documentation corpus using the specified
-    retrieval mode.  Useful for looking up API details, best practices,
-    optimization techniques, PTX ISA specifics, or memory model semantics.
+    retrieval mode.  Returns matching chunks with section metadata.
 
-    Examples of good queries:
+    Example queries:
         - "shared memory bank conflicts"
         - "warp divergence impact on performance"
         - "atomicCAS signature and semantics"
         - "cudaMemcpyAsync stream synchronization"
         - "PTX ld.global instruction"
+
+    Each result includes a ``url`` field with an anchor (e.g.
+    ``...index.html#thread-hierarchy``).  Extract the doc slug and
+    anchor to follow up:
+
+        result = cuda_search_docs("shared memory bank conflicts")
+        # Found section_path "Performance Guidelines > Device Memory Accesses"
+        # url ends with .../cuda-c-programming-guide/index.html#device-memory-accesses
+
+        # Read the full section for more context:
+        cuda_read_section("cuda-c-programming-guide", "device-memory-accesses")
+
+        # Or browse the parent chapter's TOC:
+        cuda_browse_toc("cuda-c-programming-guide", "performance-guidelines")
     """
     searcher, err = _get_doc_searcher()
     if searcher is None:
@@ -806,7 +819,11 @@ async def cuda_lookup_doc_section(
 
     Given a URL from a prior cuda_search_docs result, retrieves all
     chunks from that page.  Optionally filter to a specific section.
-    Use this to get deeper context after identifying a relevant page.
+
+    Prefer ``cuda_read_section`` for HTML docs — it returns structured
+    content with navigation context (parent, siblings).  Use this tool
+    when you have a URL but not a doc_id/section_id, or for PDF docs
+    which don't have anchor-based navigation.
     """
     searcher, err = _get_doc_searcher()
     if searcher is None:
@@ -842,6 +859,88 @@ async def cuda_lookup_doc_section(
         },
         indent=2,
     )
+
+
+@mcp.tool()
+async def cuda_browse_toc(
+    doc_id: Annotated[str, Field(description=(
+        "Document slug, e.g. 'cuda-c-programming-guide', 'parallel-thread-execution'"
+    ))],
+    section_id: Annotated[str | None, Field(description=(
+        "Section anchor ID to expand. Omit for top-level chapters."
+    ))] = None,
+    depth: Annotated[int, Field(description="Expansion depth", ge=1, le=5)] = 2,
+) -> str:
+    """Browse the table of contents of a CUDA documentation page.
+
+    Available doc_ids:
+        cuda-c-programming-guide, parallel-thread-execution,
+        cuda-c-best-practices-guide, inline-ptx-assembly,
+        blackwell-tuning-guide, blackwell-compatibility-guide
+
+    Usage patterns:
+
+        # List top-level chapters:
+        cuda_browse_toc("cuda-c-programming-guide")
+
+        # Expand a chapter to see its sub-sections:
+        cuda_browse_toc("cuda-c-programming-guide", "performance-guidelines")
+
+        # Deep expand (3 levels):
+        cuda_browse_toc("cuda-c-programming-guide", "programming-model", depth=3)
+
+        # Then read a specific section:
+        cuda_read_section("cuda-c-programming-guide", "device-memory-accesses")
+    """
+    searcher, err = _get_doc_searcher()
+    if err:
+        return err
+    result = searcher.browse_toc(doc_id=doc_id, section_id=section_id, depth=depth)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def cuda_read_section(
+    doc_id: Annotated[str, Field(description=(
+        "Document slug, e.g. 'cuda-c-programming-guide', 'parallel-thread-execution'"
+    ))],
+    section_id: Annotated[str, Field(description=(
+        "Section anchor ID from TOC or search result, e.g. 'thread-hierarchy'"
+    ))],
+) -> str:
+    """Read the full content of a specific documentation section.
+
+    Returns the section content as lightweight HTML with navigation
+    context.  The response includes a ``nav`` object with
+    ``parent``, ``prev_sibling``, and ``next_sibling`` section IDs
+    for continued browsing.
+
+    Usage patterns:
+
+        # After searching — expand a result to full section:
+        results = cuda_search_docs("shared memory bank conflicts")
+        # url = ".../cuda-c-programming-guide/index.html#shared-memory"
+        section = cuda_read_section("cuda-c-programming-guide", "shared-memory")
+
+        # Read the next section using nav context:
+        cuda_read_section("cuda-c-programming-guide", section.nav.next_sibling)
+
+        # Go up to the parent chapter:
+        cuda_browse_toc("cuda-c-programming-guide", section.nav.parent)
+
+        # After browsing TOC — read a section you picked:
+        toc = cuda_browse_toc("parallel-thread-execution", "instruction-set")
+        cuda_read_section("parallel-thread-execution", "data-movement-and-conversion-instructions-ld")
+    """
+    searcher, err = _get_doc_searcher()
+    if err:
+        return err
+    result = searcher.read_section(doc_id=doc_id, section_id=section_id)
+    if result is None:
+        return json.dumps({"error": f"Section '{section_id}' not found in '{doc_id}'"})
+    if len(result.get("content", "")) > 8000:
+        result["content"] = result["content"][:8000] + "\n... [truncated]"
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":

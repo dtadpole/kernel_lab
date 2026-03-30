@@ -1,0 +1,82 @@
+{
+  "mha-causal-b8-s4096": {
+    "family": "fa4-mha",
+    "batch_size": 8,
+    "seq_len": 4096,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": true,
+    "total_tokens": 32768
+  },
+  "mha-causal-b4-s8192": {
+    "family": "fa4-mha",
+    "batch_size": 4,
+    "seq_len": 8192,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": true,
+    "total_tokens": 32768
+  },
+  "mha-causal-b2-s16384": {
+    "family": "fa4-mha",
+    "batch_size": 2,
+    "seq_len": 16384,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": true,
+    "total_tokens": 32768
+  },
+  "mha-causal-b1-s32768": {
+    "family": "fa4-mha",
+    "batch_size": 1,
+    "seq_len": 32768,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": true,
+    "total_tokens": 32768
+  },
+  "mha-noncausal-b8-s4096": {
+    "family": "fa4-mha",
+    "batch_size": 8,
+    "seq_len": 4096,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": false,
+    "total_tokens": 32768
+  },
+  "mha-noncausal-b4-s8192": {
+    "family": "fa4-mha",
+    "batch_size": 4,
+    "seq_len": 8192,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": false,
+    "total_tokens": 32768
+  },
+  "mha-noncausal-b2-s16384": {
+    "family": "fa4-mha",
+    "batch_size": 2,
+    "seq_len": 16384,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": false,
+    "total_tokens": 32768
+  },
+  "mha-noncausal-b1-s32768": {
+    "family": "fa4-mha",
+    "batch_size": 1,
+    "seq_len": 32768,
+    "num_heads": 16,
+    "num_kv_heads": 16,
+    "head_dim": 128,
+    "causal": false,
+    "total_tokens": 32768
+  }
+}

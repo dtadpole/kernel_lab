@@ -180,16 +180,10 @@ def main() -> int:
         model(x, y)
     torch.cuda.synchronize(device)
 
-    # L2 cache flush buffer (Triton do_bench / NVBench pattern)
-    l2_size = torch.cuda.get_device_properties(device).L2_cache_size
-    l2_flush = torch.empty(l2_size, dtype=torch.uint8, device=device) if l2_size > 0 else None
-
     # Timed runs — 10 trials with CUDA event timing
     latencies_ms: list[float] = []
     result = None
     for _ in range(10):
-        if l2_flush is not None:
-            l2_flush.zero_()
         start_ev = torch.cuda.Event(enable_timing=True)
         end_ev = torch.cuda.Event(enable_timing=True)
         start_ev.record()

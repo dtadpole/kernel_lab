@@ -32,6 +32,7 @@ VENV_PYTHON   := $(REPO_ROOT)/cuda_exec/.venv/bin/python
 COMPILE_SH    := $(SCRIPTS)/compile.sh
 EVALUATE_PY   := $(SCRIPTS)/evaluate.py
 PROFILE_SH    := $(SCRIPTS)/profile.sh
+PROFILE_REF   := $(SCRIPTS)/profile_reference.py
 FMT_EVAL_PY   := $(SCRIPTS)/fmt_eval.py
 EVAL_HARNESS  := $(SCRIPTS)/eval_harness.cu
 
@@ -301,7 +302,7 @@ profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for o
 	CUDA_EXEC_NUM_WARMUPS=2 \
 	CUDA_EXEC_NUM_TRIALS=1 \
 	sudo --preserve-env bash "$(PROFILE_SH)" \
-		--target $(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
+		--target $(VENV_PYTHON) "$(PROFILE_REF)" "$$REFERENCE_PY_FILE" \
 		--export-prefix "$$NCU_PREFIX" \
 		--set detailed \
 		--kernel-name $(NCU_KERNEL_FILTER) \

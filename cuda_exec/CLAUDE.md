@@ -75,7 +75,13 @@ Override with `CUDA_EXEC_ROOT` env var for tests/isolation.
 - **Fixed entry file names** — reference entry must be `reference.py`, generated entry must be `generated.cu`. Additional helper files may use any name.
 - **BF16-only kernel interface** — All inputs/outputs use `__nv_bfloat16` (CUDA) / `torch.bfloat16` (Python). Generated kernels export `extern "C" int kernel_run(__nv_bfloat16**, int, __nv_bfloat16**, int, int, cudaStream_t)`. No custom headers needed — only `#include <cuda_bf16.h>`.
 - **Evaluate pipeline aligned with kbEvalCli.py** — CUDA event timing, `allclose` with atol/rtol=1e-02, multi-trial correctness (3 trials with seed rotation), warmup=5, timing trials=10. System-level: per-GPU `fcntl` device lock, `signal.alarm` watchdog, GPU cleanup in `finally`. Only intentional divergence: generated side runs as compiled binary subprocess (not in-process Python).
-- **L2 cache flush before every timed trial** — All measurement paths (eval_harness.cu, eval_support.py, reference.py standalone main) must flush the L2 cache before each timed trial using the Triton do_bench / NVBench pattern: allocate a buffer equal to L2 cache size, `memset`/`zero_()` it before each trial. This prevents warm-L2 artifacts from inflating performance numbers. Applies to evaluate AND NCU profiling.
+- **L2 cache flush before every timed trial** — The harness/support layer (NOT fixture files) flushes L2 cache before each timed trial using the Triton do_bench / NVBench pattern: allocate a buffer equal to L2 cache size, `memset`/`zero_()` it before each trial. This prevents warm-L2 artifacts from inflating performance numbers.
+- **Measurement environment is the harness's responsibility** — Fixture files (`reference.py`, `generated.cu`) implement only the kernel logic. The measurement environment (L2 flush, warmup count, trial count, timing, device locking) is set by the outer harness layer:
+  - **Generated evaluate**: `eval_harness.cu` controls warmup, L2 flush, CUDA event timing
+  - **Reference evaluate**: `eval_support.py` controls warmup, L2 flush, CUDA event timing
+  - **Reference NCU profiling**: `profile_reference.py` wraps `reference.py` with L2 flush + controlled warmup/trials
+  - **Generated NCU profiling**: `eval_harness.cu` (same binary, NCU captures kernel invocations)
+  - Fixture files must NOT set their own L2 flush, warmup counts, or timing. Their `main()` is for standalone smoke testing only.
 
 ### DESIGN.md
 

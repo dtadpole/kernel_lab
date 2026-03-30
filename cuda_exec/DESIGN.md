@@ -1168,6 +1168,31 @@ def get_init_inputs() -> list:
 
 `compile.sh` and `tasks.py` auto-detect harness mode by checking whether the source file contains `kernel_run`.  Symbol validation after linking checks for the `kernel_run` symbol in the binary.
 
+### Measurement environment contract
+
+**The harness/support layer owns the measurement environment.  Fixture files must not.**
+
+Fixture files (`reference.py`, `generated.cu`) implement only kernel logic:
+- `kernel_run()` — launch kernel(s) on the given stream, return immediately.
+- `Model.forward()` — run the kernel, return output tensor.  Must not synchronize.
+
+The following are **harness responsibilities**, never fixture responsibilities:
+- **L2 cache flush** before each timed trial (Triton do_bench / NVBench pattern: `memset` a buffer equal to `cudaDevAttrL2CacheSize`).
+- **Warmup** count and iteration control.
+- **CUDA event timing** (start/end events, synchronization).
+- **Trial count** and statistical aggregation.
+- **Device locking** and GPU cleanup.
+
+Harness files that implement this contract:
+
+| Path | Role | L2 flush | Warmup | Timing |
+|------|------|:---:|:---:|:---:|
+| `eval_harness.cu` | Generated evaluate + NCU profile | Yes | Yes | CUDA events |
+| `eval_support.py` | Reference evaluate | Yes | Yes | CUDA events |
+| `profile_reference.py` | Reference NCU profile | Yes | Yes | — (NCU captures) |
+
+Fixture `main()` functions exist for standalone smoke testing only.  They do not flush L2, and their timing numbers are not authoritative.
+
 ## 15. Documentation split
 
 - `DESIGN.md` = detailed source of truth

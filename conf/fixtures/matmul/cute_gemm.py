@@ -1,9 +1,11 @@
-"""CuTe DSL BF16 GEMM for SM120 — TMA G2S + warp-specialised mma.sync kernel.
+"""CuTe DSL BF16 GEMM for SM120 — persistent TMA G2S + warp-specialised mma.sync.
 
 Zero-copy from row-major PyTorch tensors.
 Uses TMA for global->SMEM, warp specialization (1 DMA warp + 4 MMA warps),
 ldmatrix S2R, and mma.sync compute.  Multi-stage SMEM pipeline with
-PipelineTmaAsync barriers.
+PipelineTmaAsync barriers.  StaticPersistentTileScheduler drives a work loop
+so each CTA processes multiple output tiles, improving occupancy for small
+matrices and reducing launch overhead.
 
 Convention (CuTe):
     A: (M, K), K-major (stride K,1) -- row-major PyTorch tensor
@@ -30,6 +32,8 @@ class Sm120Gemm:
 
     Warp-specialised: 1 DMA warp (TMA producer) + 4 MMA warps (consumer).
     Multi-stage SMEM pipeline with PipelineTmaAsync barriers.
+    Persistent kernel: StaticPersistentTileScheduler assigns multiple output
+    tiles to each CTA via a work loop.
     """
 
     def __init__(
@@ -136,8 +140,16 @@ class Sm120Gemm:
 
         self._shared_storage = SharedStorage
 
-        # ---- Grid: one CTA per (m_tile, n_tile) ----
-        grid = (M // self.bM, N // self.bN, 1)
+        # ---- Persistent tile scheduler ----
+        num_ctas_mnl = (M // self.bM, N // self.bN, 1)
+        cluster_shape_mnl = (1, 1, 1)
+        tile_sched_params = utils.PersistentTileSchedulerParams(
+            num_ctas_mnl, cluster_shape_mnl,
+        )
+        max_active = cutlass.const_expr(170)  # RTX 5090: 170 SMs
+        grid = utils.StaticPersistentTileScheduler.get_grid_shape(
+            tile_sched_params, max_active,
+        )
 
         # ---- CTA layout for cluster (trivial: 1x1x1) ----
         cta_layout_mnk = cute.make_layout((1, 1, 1))
@@ -154,6 +166,7 @@ class Sm120Gemm:
             sB_layout_staged,
             smem_copy_A,
             smem_copy_B,
+            tile_sched_params,
         ).launch(
             grid=grid,
             block=[self.num_threads, 1, 1],
@@ -175,9 +188,9 @@ class Sm120Gemm:
         sB_layout_staged: cute.ComposedLayout,
         smem_copy_A: cute.TiledCopy,
         smem_copy_B: cute.TiledCopy,
+        tile_sched_params: utils.PersistentTileSchedulerParams,
     ):
         tidx, _, _ = cute.arch.thread_idx()
-        bx, by, _ = cute.arch.block_idx()
         warp_idx = cute.arch.warp_idx()
         warp_idx = cute.arch.make_warp_uniform(warp_idx)
 
@@ -240,8 +253,6 @@ class Sm120Gemm:
             cute.slice_(self.tile_shape_mnk, (0, None, None)),
             (None, None),
         )
-        # C: original global tensor
-        gC = cute.local_tile(mC, (self.bM, self.bN), (bx, by))
 
         k_tile_count = cute.size(gA_mk, mode=[3])
 
@@ -294,6 +305,12 @@ class Sm120Gemm:
             pipeline.PipelineUserType.Consumer, num_stages,
         )
 
+        # ---- Persistent tile scheduler ----
+        tile_sched = utils.StaticPersistentTileScheduler.create(
+            tile_sched_params, cute.arch.block_idx(), cute.arch.grid_dim(),
+        )
+        work_tile = tile_sched.initial_work_tile_info()
+
         # Barrier sync before entering warp-specialized regions
         pipeline.sync(barrier_id=1)
 
@@ -303,97 +320,111 @@ class Sm120Gemm:
         if warp_idx < num_mma_warps:
             cute.arch.setmaxregister_increase(232)
 
-            acc.fill(0.0)
+            while work_tile.is_valid_tile:
+                tile_m, tile_n, _ = work_tile.tile_idx
 
-            # Pre-wait for first tile
-            peek_status = cutlass.Boolean(1)
-            if cons_state.count < k_tile_count:
-                peek_status = pipe.consumer_try_wait(cons_state)
+                # Clear accumulator for this output tile
+                acc.fill(0.0)
 
-            pipe.consumer_wait(cons_state, peek_status)
-            tCsA_p = tCsA_copy_view[None, None, None, cons_state.index]
-            tCsB_p = tCsB_copy_view[None, None, None, cons_state.index]
-            cute.copy(
-                smem_copy_A,
-                tCsA_p[None, None, 0],
-                tCrA_copy_view[None, None, 0],
-            )
-            cute.copy(
-                smem_copy_B,
-                tCsB_p[None, None, 0],
-                tCrB_copy_view[None, None, 0],
-            )
+                # Compute C tile for this work tile
+                gC = cute.local_tile(mC, (self.bM, self.bN), (tile_m, tile_n))
 
-            # Main loop over K tiles (all but last)
-            for kt in range(0, k_tile_count - 1, 1, unroll=1):
+                # Reset consumer pipeline count for new tile
+                cons_state.reset_count()
+
+                # Pre-wait for first K tile
+                peek_status = cutlass.Boolean(1)
+                if cons_state.count < k_tile_count:
+                    peek_status = pipe.consumer_try_wait(cons_state)
+
+                pipe.consumer_wait(cons_state, peek_status)
+                tCsA_p = tCsA_copy_view[None, None, None, cons_state.index]
+                tCsB_p = tCsB_copy_view[None, None, None, cons_state.index]
+                cute.copy(
+                    smem_copy_A,
+                    tCsA_p[None, None, 0],
+                    tCrA_copy_view[None, None, 0],
+                )
+                cute.copy(
+                    smem_copy_B,
+                    tCsB_p[None, None, 0],
+                    tCrB_copy_view[None, None, 0],
+                )
+
+                # Main loop over K tiles (all but last)
+                for kt in range(0, k_tile_count - 1, 1, unroll=1):
+                    for k in cutlass.range_constexpr(num_k_mma):
+                        k_next = 0 if k + 1 == num_k_mma else k + 1
+
+                        if k == num_k_mma - 1:
+                            # Release current stage, advance to next
+                            pipe.consumer_release(cons_state)
+                            cons_state.advance()
+
+                            peek_status = cutlass.Boolean(1)
+                            peek_status = pipe.consumer_try_wait(cons_state)
+
+                            tCsA_p = tCsA_copy_view[
+                                None, None, None, cons_state.index
+                            ]
+                            tCsB_p = tCsB_copy_view[
+                                None, None, None, cons_state.index
+                            ]
+                            pipe.consumer_wait(cons_state, peek_status)
+
+                        # Prefetch next k-block from SMEM to registers
+                        cute.copy(
+                            smem_copy_A,
+                            tCsA_p[None, None, k_next],
+                            tCrA_copy_view[None, None, k_next],
+                        )
+                        cute.copy(
+                            smem_copy_B,
+                            tCsB_p[None, None, k_next],
+                            tCrB_copy_view[None, None, k_next],
+                        )
+
+                        # MMA for current k-block
+                        cute.gemm(
+                            tiled_mma, acc,
+                            tCrA[None, None, k], tCrB[None, None, k], acc,
+                        )
+
+                # Last K tile (hoisted out of loop)
                 for k in cutlass.range_constexpr(num_k_mma):
                     k_next = 0 if k + 1 == num_k_mma else k + 1
 
                     if k == num_k_mma - 1:
-                        # Release current stage, advance to next
                         pipe.consumer_release(cons_state)
                         cons_state.advance()
 
-                        peek_status = cutlass.Boolean(1)
-                        peek_status = pipe.consumer_try_wait(cons_state)
+                    if k_next > 0:
+                        cute.copy(
+                            smem_copy_A,
+                            tCsA_p[None, None, k_next],
+                            tCrA_copy_view[None, None, k_next],
+                        )
+                        cute.copy(
+                            smem_copy_B,
+                            tCsB_p[None, None, k_next],
+                            tCrB_copy_view[None, None, k_next],
+                        )
 
-                        tCsA_p = tCsA_copy_view[
-                            None, None, None, cons_state.index
-                        ]
-                        tCsB_p = tCsB_copy_view[
-                            None, None, None, cons_state.index
-                        ]
-                        pipe.consumer_wait(cons_state, peek_status)
-
-                    # Prefetch next k-block from SMEM to registers
-                    cute.copy(
-                        smem_copy_A,
-                        tCsA_p[None, None, k_next],
-                        tCrA_copy_view[None, None, k_next],
-                    )
-                    cute.copy(
-                        smem_copy_B,
-                        tCsB_p[None, None, k_next],
-                        tCrB_copy_view[None, None, k_next],
-                    )
-
-                    # MMA for current k-block
                     cute.gemm(
                         tiled_mma, acc,
                         tCrA[None, None, k], tCrB[None, None, k], acc,
                     )
 
-            # Last K tile (hoisted out of loop)
-            for k in cutlass.range_constexpr(num_k_mma):
-                k_next = 0 if k + 1 == num_k_mma else k + 1
-
-                if k == num_k_mma - 1:
-                    pipe.consumer_release(cons_state)
-                    cons_state.advance()
-
-                if k_next > 0:
-                    cute.copy(
-                        smem_copy_A,
-                        tCsA_p[None, None, k_next],
-                        tCrA_copy_view[None, None, k_next],
-                    )
-                    cute.copy(
-                        smem_copy_B,
-                        tCsB_p[None, None, k_next],
-                        tCrB_copy_view[None, None, k_next],
-                    )
-
-                cute.gemm(
-                    tiled_mma, acc,
-                    tCrA[None, None, k], tCrB[None, None, k], acc,
+                # ---- Store accumulator to global memory ----
+                tCgC = thr_mma.partition_C(gC)
+                st_atom = cute.make_copy_atom(
+                    cute.nvgpu.CopyUniversalOp(), self.acc_dtype
                 )
+                cute.copy(st_atom, acc, tCgC)
 
-            # ---- Store accumulator to global memory ----
-            tCgC = thr_mma.partition_C(gC)
-            st_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(), self.acc_dtype
-            )
-            cute.copy(st_atom, acc, tCgC)
+                # Advance to next work tile
+                tile_sched.advance_to_next_work()
+                work_tile = tile_sched.get_current_work()
 
         # ================================================================
         # DMA warp (producer): TMA loads
@@ -401,34 +432,44 @@ class Sm120Gemm:
         elif warp_idx == num_mma_warps:
             cute.arch.setmaxregister_decrease(40)
 
-            # Select global tile slices for this CTA
-            # tAgA shape: (tma, M_tiles, K_tiles)
-            tAgA_mk = tAgA[(None, bx, None)]
-            # tBgB shape: (tma, N_tiles, K_tiles)
-            tBgB_nk = tBgB[(None, by, None)]
+            while work_tile.is_valid_tile:
+                tile_m, tile_n, _ = work_tile.tile_idx
 
-            for kt in range(0, k_tile_count, 1, unroll=1):
-                pipe.producer_acquire(prod_state)
+                # Select global tile slices for this work tile
+                # tAgA shape: (tma, M_tiles, K_tiles)
+                tAgA_mk = tAgA[(None, tile_m, None)]
+                # tBgB shape: (tma, N_tiles, K_tiles)
+                tBgB_nk = tBgB[(None, tile_n, None)]
 
-                tAgA_k = tAgA_mk[(None, prod_state.count)]
-                tAsA_pipe = tAsA[(None, prod_state.index)]
+                # Reset producer pipeline count for new tile
+                prod_state.reset_count()
 
-                tBgB_k = tBgB_nk[(None, prod_state.count)]
-                tBsB_pipe = tBsB[(None, prod_state.index)]
+                for kt in range(0, k_tile_count, 1, unroll=1):
+                    pipe.producer_acquire(prod_state)
 
-                cute.copy(
-                    tma_atom_a, tAgA_k, tAsA_pipe,
-                    tma_bar_ptr=pipe.producer_get_barrier(prod_state),
-                    mcast_mask=0,
-                )
-                cute.copy(
-                    tma_atom_b, tBgB_k, tBsB_pipe,
-                    tma_bar_ptr=pipe.producer_get_barrier(prod_state),
-                    mcast_mask=0,
-                )
+                    tAgA_k = tAgA_mk[(None, prod_state.count)]
+                    tAsA_pipe = tAsA[(None, prod_state.index)]
 
-                pipe.producer_commit(prod_state)
-                prod_state.advance()
+                    tBgB_k = tBgB_nk[(None, prod_state.count)]
+                    tBsB_pipe = tBsB[(None, prod_state.index)]
+
+                    cute.copy(
+                        tma_atom_a, tAgA_k, tAsA_pipe,
+                        tma_bar_ptr=pipe.producer_get_barrier(prod_state),
+                        mcast_mask=0,
+                    )
+                    cute.copy(
+                        tma_atom_b, tBgB_k, tBsB_pipe,
+                        tma_bar_ptr=pipe.producer_get_barrier(prod_state),
+                        mcast_mask=0,
+                    )
+
+                    pipe.producer_commit(prod_state)
+                    prod_state.advance()
+
+                # Advance to next work tile
+                tile_sched.advance_to_next_work()
+                work_tile = tile_sched.get_current_work()
 
             # Drain: wait for all consumer releases
             pipe.producer_tail(prod_state)
@@ -479,8 +520,9 @@ def test():
     if not passed:
         return False
 
-    # Benchmark larger sizes (each needs its own compilation)
-    for sz in [1024, 4096]:
+    # Benchmark various sizes (each needs its own compilation)
+    # Small sizes (256, 512) benefit from persistent scheduling
+    for sz in [256, 512, 1024, 4096]:
         A2 = torch.randn(sz, sz, dtype=torch.bfloat16, device="cuda")
         B2 = torch.randn(sz, sz, dtype=torch.bfloat16, device="cuda")
         C2 = torch.zeros(sz, sz, dtype=torch.float32, device="cuda")

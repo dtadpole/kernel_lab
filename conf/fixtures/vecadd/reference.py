@@ -85,7 +85,7 @@ class Model(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.elements_per_thread = 4
+        self.elements_per_thread = 1
         self.threads = 256
         self._compiled = None
 

@@ -290,14 +290,14 @@ profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for o
 	NCU_PREFIX="$(ARTIFACTS)/ncu-reference.$(CONFIG_SLUG)"
 	echo "--- profile-ncu-reference [$(KERNEL)]: $(CONFIG_SLUG) ---"
 	$(_NCU_CONFIG_ENV) \
-	sudo --preserve-env /usr/local/cuda/bin/ncu \
+	CUDA_EXEC_NUM_WARMUPS=2 \
+	CUDA_EXEC_NUM_TRIALS=1 \
+	sudo --preserve-env bash "$(PROFILE_SH)" \
+		--target $(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
+		--export-prefix "$$NCU_PREFIX" \
 		--set detailed \
-		--target-processes all \
-		--force-overwrite \
 		--kernel-name $(NCU_KERNEL_FILTER) \
-		--export "$$NCU_PREFIX" \
-		$(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
-		> "$(LOGS)/ncu-reference.$(CONFIG_SLUG).stdout.log" 2>&1
+		> "$(LOGS)/ncu-reference.$(CONFIG_SLUG).stdout.log"
 	echo "--- profile-ncu-reference [$(KERNEL)]: done ---"
 	echo "NCU report: $$NCU_PREFIX.ncu-rep"
 	echo ""

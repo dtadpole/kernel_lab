@@ -871,12 +871,9 @@ def run_profile_task(
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
-                "--target",
-                str(target_path),
-                "--export-prefix",
-                export_prefix_abs,
-                "--set",
-                "detailed",
+                "--target", str(target_path),
+                "--export-prefix", export_prefix_abs,
+                "--set", "detailed",
             ]
         else:
             reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "reference.py"
@@ -886,13 +883,12 @@ def run_profile_task(
                     detail=f"reference.py not found at {reference_py} — compile first to stage inputs",
                 )
             command = [
-                "/usr/local/cuda/bin/ncu",
+                "bash",
+                str(PROFILE_NCU_SCRIPT),
+                "--target", sys.executable, str(reference_py),
+                "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
-                "--target-processes", "all",
-                "--force-overwrite",
                 "--kernel-name", 'regex:"cutlass|vector_add"',
-                "--export", export_prefix_abs,
-                sys.executable, str(reference_py),
             ]
 
         stage_log_rel = _stage_log_rel("profile", attempt, config_slug)

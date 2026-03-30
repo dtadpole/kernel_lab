@@ -175,7 +175,7 @@ class ServiceProcess:
             body = exc.read().decode("utf-8")
             return exc.code, json.loads(body)
 
-    def post_json(self, path: str, payload: dict) -> tuple[int, dict]:
+    def post_json(self, path: str, payload: dict, *, timeout: int = 30) -> tuple[int, dict]:
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(
             f"{self.base_url}{path}",
@@ -185,7 +185,7 @@ class ServiceProcess:
         )
         req.add_header("Authorization", f"Bearer {TEST_BEARER_TOKEN}")
         try:
-            with request.urlopen(req, timeout=30) as resp:
+            with request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8")
@@ -662,6 +662,7 @@ class CudaExecE2ETest(unittest.TestCase):
                 "side": "reference",
                 "configs": self._config_map(),
             },
+            timeout=90,
         )
         self.assertIn(status, {200, 400, 408})
         if status == 200:

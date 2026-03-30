@@ -18,7 +18,7 @@
 #     CONFIG_JSON='{"shape":[1048576],"rank":1,"input_size":1048576,"shape_kind":"1d"}'
 #
 # Full pipeline:
-#   make clean compile evaluate profile-reference profile-generated
+#   make clean compile evaluate profile
 
 SHELL := /bin/bash
 .ONESHELL:
@@ -219,8 +219,13 @@ evaluate: ## Run evaluate (reference vs generated comparison) for one config
 		--num-correctness-trials $(NUM_CORRECTNESS_TRIALS) \
 	| $(VENV_PYTHON) "$(FMT_EVAL_PY)"
 
-.PHONY: profile-reference
-profile-reference: ## Profile reference side only for one config
+# ---------------------------------------------------------------------------
+# Profile — comparison_runtime wall-clock timing via profile.py
+# ---------------------------------------------------------------------------
+PROFILE_MODE ?= dual  # dual | reference_only | generated_only
+
+.PHONY: profile
+profile: ## Wall-clock profile (PROFILE_MODE=dual|reference_only|generated_only)
 	@set -euo pipefail
 	cd "$(SCRIPTS)" && \
 	CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
@@ -228,85 +233,63 @@ profile-reference: ## Profile reference side only for one config
 		$(_META_ARGS) \
 		--config-slug "$(CONFIG_SLUG)" \
 		--config-json '$(CONFIG_JSON)' \
-		--mode reference_only \
+		--mode $(PROFILE_MODE) \
 		--timeout $(TIMEOUT)
 
-.PHONY: profile-generated
-profile-generated: ## Profile generated side only for one config
-	@set -euo pipefail
-	cd "$(SCRIPTS)" && \
-	CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
-	$(VENV_PYTHON) "$(PROFILE_PY)" \
-		$(_META_ARGS) \
-		--config-slug "$(CONFIG_SLUG)" \
-		--config-json '$(CONFIG_JSON)' \
-		--mode generated_only \
-		--timeout $(TIMEOUT)
-
-.PHONY: profile-dual
-profile-dual: ## Profile both sides with speedup comparison for one config
-	@set -euo pipefail
-	cd "$(SCRIPTS)" && \
-	CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
-	$(VENV_PYTHON) "$(PROFILE_PY)" \
-		$(_META_ARGS) \
-		--config-slug "$(CONFIG_SLUG)" \
-		--config-json '$(CONFIG_JSON)' \
-		--mode dual \
-		--timeout $(TIMEOUT)
-
-.PHONY: profile-ncu
-profile-ncu: ## Profile generated binary with NCU (Nsight Compute) for one config
-	@set -euo pipefail
-	BINARY="$(ARTIFACTS)/compile.attempt_001.generated.bin"
-	if [[ ! -x "$$BINARY" ]]; then
-		echo "ERROR: binary not found at $$BINARY — run compile first" >&2
-		exit 1
-	fi
-	NCU_PREFIX="$(ARTIFACTS)/ncu.$(CONFIG_SLUG)"
-	echo "--- profile-ncu: $(CONFIG_SLUG) ---"
-	CUDA_EXEC_CONFIG_ID="$(CONFIG_SLUG)" \
-	CUDA_EXEC_CONFIG_JSON='$(CONFIG_JSON)' \
-	CUDA_EXEC_PARAM_INPUT_SIZE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["input_size"])')" \
-	CUDA_EXEC_PARAM_RANK="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["rank"])')" \
-	CUDA_EXEC_PARAM_SHAPE_KIND="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["shape_kind"])')" \
-	CUDA_EXEC_PARAM_SHAPE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["shape"]))')" \
-	CUDA_EXEC_NUM_WARMUPS=2 \
-	CUDA_EXEC_NUM_TRIALS=1 \
-	sudo --preserve-env bash "$(PROFILE_SH)" \
-		--target "$$BINARY" \
-		--export-prefix "$$NCU_PREFIX" \
-		--set detailed \
-		> "$(LOGS)/ncu.$(CONFIG_SLUG).stdout.log"
-	echo "--- profile-ncu: done ---"
-	echo "NCU report: $$NCU_PREFIX.ncu-rep"
-	echo ""
-	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
-
-.PHONY: profile-ncu-reference
-profile-ncu-reference: ## Profile reference Python kernel with NCU (Nsight Compute) for one config
-	@set -euo pipefail
-	REFERENCE_PY_FILE="$(WORKSPACE)/inputs/reference/reference.py"
-	if [[ ! -f "$$REFERENCE_PY_FILE" ]]; then
-		echo "ERROR: reference.py not found at $$REFERENCE_PY_FILE — run compile first (it stages inputs)" >&2
-		exit 1
-	fi
-	NCU_PREFIX="$(ARTIFACTS)/ncu-reference.$(CONFIG_SLUG)"
-	echo "--- profile-ncu-reference: $(CONFIG_SLUG) ---"
+# ---------------------------------------------------------------------------
+# NCU — Nsight Compute hardware-level profiling (requires sudo)
+# ---------------------------------------------------------------------------
+NCU_SIDE          ?= generated  # generated | reference
+NCU_KERNEL_FILTER ?= regex:"cutlass|vector_add"
+_NCU_CONFIG_ENV = \
 	CUDA_EXEC_CONFIG_ID="$(CONFIG_SLUG)" \
 	CUDA_EXEC_PARAM_INPUT_SIZE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["input_size"])')" \
 	CUDA_EXEC_PARAM_RANK="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["rank"])')" \
 	CUDA_EXEC_PARAM_SHAPE_KIND="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["shape_kind"])')" \
-	CUDA_EXEC_PARAM_SHAPE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["shape"]))')" \
-	sudo --preserve-env /usr/local/cuda/bin/ncu \
-		--set detailed \
-		--target-processes all \
-		--force-overwrite \
-		--kernel-name regex:"cutlass|vector_add" \
-		--export "$$NCU_PREFIX" \
-		$(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
-		> "$(LOGS)/ncu-reference.$(CONFIG_SLUG).stdout.log" 2>&1
-	echo "--- profile-ncu-reference: done ---"
+	CUDA_EXEC_PARAM_SHAPE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["shape"]))')"
+
+.PHONY: ncu
+ncu: ## NCU hardware profile (NCU_SIDE=generated|reference)
+	@set -euo pipefail
+	if [[ "$(NCU_SIDE)" == "generated" ]]; then
+		BINARY="$(ARTIFACTS)/compile.attempt_001.generated.bin"
+		if [[ ! -x "$$BINARY" ]]; then
+			echo "ERROR: binary not found at $$BINARY — run compile first" >&2
+			exit 1
+		fi
+		NCU_PREFIX="$(ARTIFACTS)/ncu.$(CONFIG_SLUG)"
+		echo "--- ncu generated: $(CONFIG_SLUG) ---"
+		$(_NCU_CONFIG_ENV) \
+		CUDA_EXEC_CONFIG_JSON='$(CONFIG_JSON)' \
+		CUDA_EXEC_NUM_WARMUPS=2 \
+		CUDA_EXEC_NUM_TRIALS=1 \
+		sudo --preserve-env bash "$(PROFILE_SH)" \
+			--target "$$BINARY" \
+			--export-prefix "$$NCU_PREFIX" \
+			--set detailed \
+			> "$(LOGS)/ncu.$(CONFIG_SLUG).stdout.log"
+	elif [[ "$(NCU_SIDE)" == "reference" ]]; then
+		REFERENCE_PY_FILE="$(WORKSPACE)/inputs/reference/reference.py"
+		if [[ ! -f "$$REFERENCE_PY_FILE" ]]; then
+			echo "ERROR: reference.py not found at $$REFERENCE_PY_FILE — run compile first (it stages inputs)" >&2
+			exit 1
+		fi
+		NCU_PREFIX="$(ARTIFACTS)/ncu-reference.$(CONFIG_SLUG)"
+		echo "--- ncu reference: $(CONFIG_SLUG) ---"
+		$(_NCU_CONFIG_ENV) \
+		sudo --preserve-env /usr/local/cuda/bin/ncu \
+			--set detailed \
+			--target-processes all \
+			--force-overwrite \
+			--kernel-name $(NCU_KERNEL_FILTER) \
+			--export "$$NCU_PREFIX" \
+			$(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
+			> "$(LOGS)/ncu-reference.$(CONFIG_SLUG).stdout.log" 2>&1
+	else
+		echo "ERROR: NCU_SIDE must be 'generated' or 'reference', got '$(NCU_SIDE)'" >&2
+		exit 1
+	fi
+	echo "--- ncu $(NCU_SIDE): done ---"
 	echo "NCU report: $$NCU_PREFIX.ncu-rep"
 	echo ""
 	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
@@ -331,7 +314,7 @@ test: ## Run full pipeline smoke test with vector-add fixtures (compile → eval
 	@set -euo pipefail
 	echo "=== cuda_exec manual CLI smoke test ==="
 	echo ""
-	echo "--- [1/5] clean ---"
+	echo "--- [1/4] clean ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) clean \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
@@ -340,7 +323,7 @@ test: ## Run full pipeline smoke test with vector-add fixtures (compile → eval
 		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
 		TURN="$(TEST_TURN)"
 	echo ""
-	echo "--- [2/5] compile ---"
+	echo "--- [2/4] compile ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) compile \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
@@ -351,7 +334,7 @@ test: ## Run full pipeline smoke test with vector-add fixtures (compile → eval
 		REFERENCE_PY="$(TEST_REFERENCE_PY)" \
 		GENERATED_CU="$(TEST_GENERATED_CU)"
 	echo ""
-	echo "--- [3/5] evaluate ---"
+	echo "--- [3/4] evaluate ---"
 	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) evaluate \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
@@ -362,8 +345,8 @@ test: ## Run full pipeline smoke test with vector-add fixtures (compile → eval
 		CONFIG_SLUG="$(TEST_CONFIG_SLUG)" \
 		CONFIG_JSON='$(TEST_CONFIG_JSON)'
 	echo ""
-	echo "--- [4/5] profile-reference ---"
-	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) profile-reference \
+	echo "--- [4/4] profile (dual) ---"
+	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) profile \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		RUN_TAG="$(TEST_RUN_TAG)" \
 		VERSION="$(VERSION)" \
@@ -371,18 +354,8 @@ test: ## Run full pipeline smoke test with vector-add fixtures (compile → eval
 		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
 		TURN="$(TEST_TURN)" \
 		CONFIG_SLUG="$(TEST_CONFIG_SLUG)" \
-		CONFIG_JSON='$(TEST_CONFIG_JSON)'
-	echo ""
-	echo "--- [5/5] profile-generated ---"
-	$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) profile-generated \
-		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
-		RUN_TAG="$(TEST_RUN_TAG)" \
-		VERSION="$(VERSION)" \
-		DIRECTION_ID="$(TEST_DIRECTION_ID)" \
-		DIRECTION_SLUG="$(TEST_DIRECTION_SLUG)" \
-		TURN="$(TEST_TURN)" \
-		CONFIG_SLUG="$(TEST_CONFIG_SLUG)" \
-		CONFIG_JSON='$(TEST_CONFIG_JSON)'
+		CONFIG_JSON='$(TEST_CONFIG_JSON)' \
+		PROFILE_MODE=dual
 	echo ""
 	echo "=== smoke test passed ==="
 	echo "Turn root: $(CUDA_EXEC_ROOT)/$(TEST_RUN_TAG)/$(VERSION)/$(TEST_DIRECTION_ID)_$(TEST_DIRECTION_SLUG)/turn_$(TEST_TURN)/"

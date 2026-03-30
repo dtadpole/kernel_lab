@@ -84,19 +84,38 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
 }
 
 /* -------------------------------------------------------------------------
- * Simple transpose kernel: B_out[n][k] = B_in[k][n]
- *   B_in  is K×N row-major
- *   B_out is N×K row-major
- * Each thread transposes one element.
+ * Tiled transpose kernel with shared memory (coalesced reads + writes).
+ *   B_out[n][k] = B_in[k][n]
+ *   B_in  is rows×cols row-major (K×N)
+ *   B_out is cols×rows row-major (N×K)
+ * Uses 32×32 tiles with +1 padding to avoid bank conflicts.
  * ------------------------------------------------------------------------- */
+#define TILE_DIM 32
+#define BLOCK_ROWS 8
+
 __global__ void transpose_bf16(const __nv_bfloat16 * __restrict__ in,
                                __nv_bfloat16 * __restrict__ out,
                                int rows, int cols) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < rows * cols) {
-        int r = idx / cols;
-        int c = idx % cols;
-        out[c * rows + r] = in[r * cols + c];
+    __shared__ __nv_bfloat16 tile[TILE_DIM][TILE_DIM + 1];
+
+    int xIdx = blockIdx.x * TILE_DIM + threadIdx.x;
+    int yIdx = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    /* Coalesced read: each thread reads along cols (contiguous) */
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((yIdx + j) < rows && xIdx < cols)
+            tile[threadIdx.y + j][threadIdx.x] = in[(yIdx + j) * cols + xIdx];
+    }
+
+    __syncthreads();
+
+    /* Coalesced write: swap x/y block indices, read transposed from SMEM */
+    xIdx = blockIdx.y * TILE_DIM + threadIdx.x;
+    yIdx = blockIdx.x * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((yIdx + j) < cols && xIdx < rows)
+            out[(yIdx + j) * rows + xIdx] = tile[threadIdx.x][threadIdx.y + j];
     }
 }
 
@@ -247,6 +266,11 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
  * The optimized MMA kernel expects B in N×K row-major layout (transposed).
  * We allocate a temporary buffer and transpose B before launching.
  * ------------------------------------------------------------------------- */
+/* Static transpose buffer — allocated once, reused across calls.
+ * Avoids cudaMalloc/cudaFree overhead on every kernel_run invocation. */
+static __nv_bfloat16 *s_Bt = nullptr;
+static size_t s_Bt_bytes = 0;
+
 extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
                           __nv_bfloat16 **outputs, int num_outputs,
                           int n, cudaStream_t stream) {
@@ -275,23 +299,23 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
         K = M;
     }
 
-    /* --- Transpose B from K×N to N×K --- */
-    __nv_bfloat16 *Bt = nullptr;
-    cudaMalloc(&Bt, (size_t)K * N * sizeof(__nv_bfloat16));
+    /* --- Ensure static transpose buffer is large enough --- */
+    size_t need = (size_t)K * N * sizeof(__nv_bfloat16);
+    if (need > s_Bt_bytes) {
+        if (s_Bt) cudaFree(s_Bt);
+        cudaMalloc(&s_Bt, need);
+        s_Bt_bytes = need;
+    }
 
-    int total = K * N;
-    int tpb = 256;
-    int blks = (total + tpb - 1) / tpb;
-    transpose_bf16<<<blks, tpb, 0, stream>>>(B, Bt, K, N);
+    /* --- Tiled transpose B from K×N to N×K (2D grid, shared memory) --- */
+    dim3 tpDim(TILE_DIM, BLOCK_ROWS);
+    dim3 tpGrid((N + TILE_DIM - 1) / TILE_DIM, (K + TILE_DIM - 1) / TILE_DIM);
+    transpose_bf16<<<tpGrid, tpDim, 0, stream>>>(B, s_Bt, K, N);
 
     /* --- Launch the MMA matmul kernel --- */
     dim3 threads(16, 16);                        /* 256 threads = 8 warps */
     dim3 grid(N / 128, M / 128);
-    mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, Bt, C, M, N, K);
-
-    /* --- Free the transpose buffer --- */
-    cudaStreamSynchronize(stream);
-    cudaFree(Bt);
+    mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, s_Bt, C, M, N, K);
 
     return 0;
 }

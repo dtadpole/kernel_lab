@@ -482,29 +482,21 @@ class Sm120Gemm:
 
 
 def test():
-    """Verify correctness at 256x256 and benchmark larger sizes."""
+    """Verify correctness at 256x256 and benchmark larger sizes vs cuBLAS."""
     M, K, N = 256, 256, 256
 
     A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
     B = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
-    C = torch.zeros(M, N, dtype=torch.float32, device="cuda")
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
     # Zero-copy CuTe tensors
     a_cute = from_dlpack(A, assumed_align=16)  # (M, K) K-major
     b_cute = from_dlpack(B.t(), assumed_align=16)  # (N, K) N-major
     c_cute = from_dlpack(C, assumed_align=16)  # (M, N) N-major
 
-    print(
-        f"A cute: shape={a_cute.shape}, "
-        f"layout={utils.LayoutEnum.from_tensor(a_cute)}"
+    gemm = Sm120Gemm(
+        bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=2, output_bf16=True,
     )
-    print(
-        f"B cute: shape={b_cute.shape}, "
-        f"layout={utils.LayoutEnum.from_tensor(b_cute)}"
-    )
-    print(f"C cute: shape={c_cute.shape}")
-
-    gemm = Sm120Gemm(bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=2)
     stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
 
     print("Compiling (MLIR JIT)...")
@@ -518,7 +510,7 @@ def test():
     torch.cuda.synchronize()
 
     ref = A.float() @ B.float()
-    diff = (C - ref).abs().max().item()
+    diff = (C.float() - ref).abs().max().item()
     print(f"max_diff = {diff:.6f}")
     passed = diff < 1.0
     print(f"Correctness: {'PASSED' if passed else 'FAILED'}")
@@ -526,39 +518,61 @@ def test():
     if not passed:
         return False
 
-    # Benchmark various sizes (each needs its own compilation)
-    # Small sizes (256, 512) benefit from persistent scheduling
-    for sz in [256, 512, 1024, 4096]:
+    # Benchmark various sizes vs cuBLAS (each needs its own compilation)
+    print(f"\n{'Size':>10s}  {'CuTe(ms)':>9s}  {'cuBLAS(ms)':>10s}  "
+          f"{'CuTe TFLOPS':>11s}  {'cuBLAS TFLOPS':>13s}  {'Ratio':>6s}  {'Check':>5s}")
+    print("-" * 78)
+
+    for sz in [256, 512, 1024, 2048, 4096, 8192]:
         A2 = torch.randn(sz, sz, dtype=torch.bfloat16, device="cuda")
         B2 = torch.randn(sz, sz, dtype=torch.bfloat16, device="cuda")
-        C2 = torch.zeros(sz, sz, dtype=torch.float32, device="cuda")
+        C2 = torch.zeros(sz, sz, dtype=torch.bfloat16, device="cuda")
         a2 = from_dlpack(A2, assumed_align=16)
         b2 = from_dlpack(B2.t(), assumed_align=16)
         c2 = from_dlpack(C2, assumed_align=16)
 
-        gemm2 = Sm120Gemm(bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=2)
+        gemm2 = Sm120Gemm(
+            bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=2,
+            output_bf16=True,
+        )
         compiled2 = cute.compile(gemm2, a2, b2, c2, stream=stream)
 
         # Warmup
         compiled2(a2, b2, c2, stream)
         torch.cuda.synchronize()
 
-        # Timed runs
+        # Timed runs — CuTe kernel
         n_iter = 20
         torch.cuda.synchronize()
         t0 = time.time()
         for _ in range(n_iter):
             compiled2(a2, b2, c2, stream)
         torch.cuda.synchronize()
-        elapsed = (time.time() - t0) / n_iter * 1000  # ms
+        cute_ms = (time.time() - t0) / n_iter * 1000
+
+        # Timed runs — cuBLAS (torch.mm)
+        for _ in range(5):
+            torch.mm(A2, B2)
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for _ in range(n_iter):
+            torch.mm(A2, B2)
+        torch.cuda.synchronize()
+        cublas_ms = (time.time() - t0) / n_iter * 1000
 
         ref2 = A2.float() @ B2.float()
-        diff2 = (C2 - ref2).abs().max().item()
-        ok = diff2 < 1.0
-        flops = 2 * sz * sz * sz / (elapsed / 1000) / 1e12
+        ok = torch.allclose(C2.float(), ref2, atol=1e-1, rtol=1e-2)
+        diff2 = (C2.float() - ref2).abs().max().item()
+
+        flop = 2 * sz * sz * sz
+        cute_tflops = flop / (cute_ms / 1000) / 1e12
+        cublas_tflops = flop / (cublas_ms / 1000) / 1e12
+        ratio = cute_tflops / cublas_tflops
+
         print(
-            f"{sz}x{sz}: {elapsed:.3f} ms, {flops:.2f} TFLOPS, "
-            f"diff={diff2:.4f}, {'PASSED' if ok else 'FAILED'}"
+            f"{sz:5d}x{sz:<5d}  {cute_ms:9.3f}  {cublas_ms:10.3f}  "
+            f"{cute_tflops:11.2f}  {cublas_tflops:13.2f}  {ratio:5.0%}  "
+            f"{'PASS' if ok else 'FAIL'}"
         )
         if not ok:
             passed = False

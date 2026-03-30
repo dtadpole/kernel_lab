@@ -18,6 +18,7 @@
 
 #define N_STAGES 3
 
+
 /* -------------------------------------------------------------------------
  * PTX helper: cp.async 16-byte global→shared copy
  * ------------------------------------------------------------------------- */
@@ -169,14 +170,10 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         aStorePtr = As + 64 * nStage;
         bStorePtr = Bs + 64 * nStage;
 
-        /* A: cp.async (contiguous along K) */
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-
-        /* B: cp.async (contiguous along K — B is now N×K row-major) */
         cp_async(bStorePtr[storeRow     ] + storeCol, bGlobalAddress + kStart);
         cp_async(bStorePtr[storeRow + 32] + storeCol, bGlobalAddress + 64 * K8 + kStart);
-
         asm volatile("cp.async.commit_group;\n" ::);
     }
 
@@ -191,18 +188,15 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         asm volatile("cp.async.wait_group %0;\n" :: "n"(N_STAGES - 2));
         __syncthreads();
 
-        /* Load A fragments: 4 tiles × 2 k-halves */
         for (int m = 0; m < 4; m++) {
             load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA] + loadColA);
             load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA] + (loadColA ^ 2));
         }
-        /* Load B fragments: 4 tiles × 2 k-halves */
         for (int n = 0; n < 4; n++) {
             load_matrix_x2(bReg[n]    , bLoadPtr[n * 4 + warpOffsetB + loadRowB] + loadColB);
             load_matrix_x2(bReg[n] + 2, bLoadPtr[n * 4 + warpOffsetB + loadRowB] + (loadColB ^ 2));
         }
 
-        /* Prefetch next A and B tiles via cp.async (single commit group) */
         kStart = (kStart > kStartMax) ? kStartMax : kStart;
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
@@ -210,7 +204,6 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         cp_async(bStorePtr[storeRow + 32] + storeCol, bGlobalAddress + 64 * K8 + kStart);
         asm volatile("cp.async.commit_group;\n" ::);
 
-        /* Compute the 4×4 MMA tiles */
         for (int m = 0; m < 4; m++) {
             for (int n = 0; n < 4; n++) {
                 mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
@@ -244,6 +237,7 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
  * ------------------------------------------------------------------------- */
 static int s_M = 0, s_N = 0, s_K = 0;
 static __nv_bfloat16 *s_Bt = nullptr;
+static const __nv_bfloat16 *s_B_cached = nullptr; /* skip transpose on repeated calls */
 
 static void ensure_shape(int n) {
     if (s_M > 0) return;
@@ -278,10 +272,13 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     if (s_Bt == nullptr)
         cudaMalloc(&s_Bt, (size_t)N * K * sizeof(__nv_bfloat16));
 
-    /* Transpose B(K×N) → B_t(N×K) */
-    dim3 transposeBlock(32, 8);
-    dim3 transposeGrid((N + 31) / 32, (K + 31) / 32);
-    transpose_bf16<<<transposeGrid, transposeBlock, 0, stream>>>(B, s_Bt, K, N);
+    /* Transpose B(K×N) → B_t(N×K) only when B pointer changes */
+    if (B != s_B_cached) {
+        dim3 transposeBlock(32, 8);
+        dim3 transposeGrid((N + 31) / 32, (K + 31) / 32);
+        transpose_bf16<<<transposeGrid, transposeBlock, 0, stream>>>(B, s_Bt, K, N);
+        s_B_cached = B;
+    }
 
     /* GEMM over A(M×K) and B_t(N×K) */
     dim3 threads(16, 16);

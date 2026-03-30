@@ -283,6 +283,34 @@ profile-ncu: ## Profile generated binary with NCU (Nsight Compute) for one confi
 	echo ""
 	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
 
+.PHONY: profile-ncu-reference
+profile-ncu-reference: ## Profile reference Python kernel with NCU (Nsight Compute) for one config
+	@set -euo pipefail
+	REFERENCE_PY_FILE="$(WORKSPACE)/inputs/reference/reference.py"
+	if [[ ! -f "$$REFERENCE_PY_FILE" ]]; then
+		echo "ERROR: reference.py not found at $$REFERENCE_PY_FILE — run compile first (it stages inputs)" >&2
+		exit 1
+	fi
+	NCU_PREFIX="$(ARTIFACTS)/ncu-reference.$(CONFIG_SLUG)"
+	echo "--- profile-ncu-reference: $(CONFIG_SLUG) ---"
+	CUDA_EXEC_CONFIG_ID="$(CONFIG_SLUG)" \
+	CUDA_EXEC_PARAM_INPUT_SIZE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["input_size"])')" \
+	CUDA_EXEC_PARAM_RANK="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["rank"])')" \
+	CUDA_EXEC_PARAM_SHAPE_KIND="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.load(sys.stdin)["shape_kind"])')" \
+	CUDA_EXEC_PARAM_SHAPE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["shape"]))')" \
+	sudo --preserve-env /usr/local/cuda/bin/ncu \
+		--set detailed \
+		--target-processes all \
+		--force-overwrite \
+		--kernel-name regex:"cutlass|vector_add" \
+		--export "$$NCU_PREFIX" \
+		$(VENV_PYTHON) "$$REFERENCE_PY_FILE" \
+		> "$(LOGS)/ncu-reference.$(CONFIG_SLUG).stdout.log" 2>&1
+	echo "--- profile-ncu-reference: done ---"
+	echo "NCU report: $$NCU_PREFIX.ncu-rep"
+	echo ""
+	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
+
 .PHONY: execute
 execute: ## Run a generic command in the workspace (override EXEC_CMD="cmd arg1 arg2")
 	@set -euo pipefail

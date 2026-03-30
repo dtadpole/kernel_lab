@@ -77,7 +77,7 @@ _CONFIG_FILE = $(REPO_ROOT)/conf/fixtures/$(KERNEL)/configs.json
 # Metadata — derived from KERNEL, overridable on command line
 # ---------------------------------------------------------------------------
 CUDA_EXEC_ROOT ?= $(HOME)/.cuda_exec
-RUN_TAG        ?= manual-cli
+RUN_TAG        ?= manual-cli-$(KERNEL)
 VERSION        ?= v1
 DIRECTION_ID   ?= $(_KERNEL_DIRECTION_ID)
 DIRECTION_SLUG ?= $(_KERNEL_DIRECTION_SLUG)
@@ -117,7 +117,7 @@ STATE      = $(TURN_ROOT)/state
 # ---------------------------------------------------------------------------
 # Test defaults — derived from KERNEL
 # ---------------------------------------------------------------------------
-TEST_RUN_TAG = manual-cli-test
+TEST_RUN_TAG = manual-cli-test-$(KERNEL)
 TEST_TURN    = 0
 
 # ---------------------------------------------------------------------------

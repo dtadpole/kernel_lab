@@ -6,6 +6,7 @@ A repository for kernel optimization experiments and related tooling.
 
 - `cuda_exec/` — FastAPI-based remote CUDA execution service
 - `cuda_agent/` — MCP-based CUDA kernel optimization agent (uses cuda_exec via MCP tools)
+- `doc_retrieval/` — NVIDIA CUDA Toolkit document retrieval system (BM25 + dense search)
 
 ## Repo-level conventions
 

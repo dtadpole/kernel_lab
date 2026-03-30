@@ -168,6 +168,18 @@ async def run_optimization(
     if key_path:
         mcp_env["CUDA_EXEC_KEY_PATH"] = str(Path(key_path).expanduser())
 
+    # Doc retrieval: add repo root to PYTHONPATH so the MCP subprocess
+    # can import doc_retrieval, and pass storage root + API key.
+    repo_root = str(Path(__file__).resolve().parents[1])
+    existing_path = os.environ.get("PYTHONPATH", "")
+    mcp_env["PYTHONPATH"] = f"{repo_root}:{existing_path}" if existing_path else repo_root
+    doc_root = os.environ.get("DOC_RETRIEVAL_ROOT")
+    if doc_root:
+        mcp_env["DOC_RETRIEVAL_ROOT"] = doc_root
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        mcp_env["OPENAI_API_KEY"] = openai_key
+
     log_dir = _log_dir_for_task(task)
     mcp_env["CUDA_AGENT_DATA_DIR"] = str(log_dir)
     log_tool_use = _make_log_tool_use(log_dir, cfg.agent.log_truncation_chars)

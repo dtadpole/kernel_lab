@@ -2,4 +2,5 @@ defaults:
   - agent: default
   - mcp: default
   - service: default
+  - doc_retrieval: default
   - _self_

@@ -33,3 +33,6 @@ dist/
 *.nsys-rep
 *.qdrep
 *.sqlite
+
+# Doc retrieval data (downloaded docs, parsed chunks, search indices)
+doc_retrieval/data/

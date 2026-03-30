@@ -1,0 +1,98 @@
+# NVIDIA CUDA Toolkit Document Retrieval configuration
+
+# --- Download settings ---
+download:
+  pdf_base_url: "https://docs.nvidia.com/cuda/pdf/"
+  tier1:
+    - "CUDA_C_Programming_Guide.pdf"
+    - "CUDA_C_Best_Practices_Guide.pdf"
+    - "ptx_isa_9.2.pdf"
+    - "CUDA_Runtime_API.pdf"
+    - "CUDA_Driver_API.pdf"
+    - "CUDA_Math_API.pdf"
+    - "CUDA_Compiler_Driver_NVCC.pdf"
+  tier2:
+    - "CUBLAS_Library.pdf"
+    - "CUSPARSE_Library.pdf"
+    - "CUSOLVER_Library.pdf"
+    - "CUDA_Binary_Utilities.pdf"
+    - "Inline_PTX_Assembly.pdf"
+    - "PTX_Writers_Guide_To_Interoperability.pdf"
+    - "Blackwell_Tuning_Guide.pdf"
+    - "Blackwell_Compatibility_Guide.pdf"
+    - "Hopper_Tuning_Guide.pdf"
+    - "Hopper_Compatibility_Guide.pdf"
+    - "Ada_Tuning_Guide.pdf"
+    - "Ada_Compatibility_Guide.pdf"
+  tier3:
+    - "CUFFT_Library.pdf"
+    - "CURAND_Library.pdf"
+    - "NPP_Library.pdf"
+    - "NVBLAS_Library.pdf"
+    - "nvjpeg.pdf"
+    - "nvjitlink.pdf"
+    - "nvfatbin.pdf"
+    - "cuDLA_API.pdf"
+    - "NVVM_IR_Spec.pdf"
+    - "libdevice-users-guide.pdf"
+    - "libNVVM_API.pdf"
+    - "cuda-gdb.pdf"
+    - "ctadvisor.pdf"
+    - "Turing_Tuning_Guide.pdf"
+    - "Turing_Compatibility_Guide.pdf"
+    - "CUDA_Quick_Start_Guide.pdf"
+    - "CUDA_Installation_Guide_Linux.pdf"
+    - "CUDA_Installation_Guide_Windows.pdf"
+    - "CUDA_Toolkit_Release_Notes.pdf"
+    - "CUDA_Debugger_API.pdf"
+    - "CUDA_on_WSL_User_Guide.pdf"
+    - "GPUDirect_RDMA.pdf"
+    - "eflow-users-guide.pdf"
+    - "Floating_Point_on_NVIDIA_GPU.pdf"
+    - "Incomplete_LU_Cholesky.pdf"
+    - "CUDA-For-Tegra-AppNote.pdf"
+    - "Demo_Suite.pdf"
+  html_pages:
+    - url: "https://docs.nvidia.com/cuda/nvrtc/index.html"
+      slug: "nvrtc"
+    - url: "https://docs.nvidia.com/cuda/ptx-compiler-api/index.html"
+      slug: "ptx-compiler-api"
+    - url: "https://docs.nvidia.com/cuda/ampere-compatibility-guide/index.html"
+      slug: "ampere-compatibility-guide"
+    - url: "https://docs.nvidia.com/cuda/ampere-tuning-guide/index.html"
+      slug: "ampere-tuning-guide"
+    - url: "https://docs.nvidia.com/cuda/cutile-python/index.html"
+      slug: "cutile-python"
+    - url: "https://docs.nvidia.com/cuda/tile-ir/index.html"
+      slug: "tile-ir"
+  request_delay: 1.0
+  max_connections: 5
+
+# --- Chunking settings ---
+chunking:
+  max_chunk_tokens: 512
+  min_chunk_tokens: 128
+  overlap_tokens: 64
+  tokenizer: "cl100k_base"
+
+# --- Embedding settings ---
+embedding:
+  provider: "local"
+  base_url: "http://localhost:46982/v1"
+  model: "Qwen/Qwen3-Embedding-4B"
+  batch_size: 32  # TEI max_client_batch_size is 32
+  dimensions: 2560
+
+# --- Search defaults ---
+search:
+  default_mode: "hybrid"
+  default_top_k: 5
+  max_top_k: 20
+  bm25_weight: 0.3
+  rrf_k: 60
+
+# --- Storage paths ---
+# Default storage root is doc_retrieval/data/ in the repo.
+# Override via DOC_RETRIEVAL_ROOT env var.
+storage:
+  root: "${oc.env:DOC_RETRIEVAL_ROOT,${oc.env:HOME}/.doc_retrieval}"

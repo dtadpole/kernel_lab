@@ -9,6 +9,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import sys
 import signal
 import statistics
 from pathlib import Path
@@ -105,7 +106,16 @@ def load_reference_module(reference_path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"failed to load reference module from {reference_path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Add the reference directory to sys.path so sibling imports (e.g. cute_gemm) work
+    ref_dir = str(reference_path.parent)
+    path_added = ref_dir not in sys.path
+    if path_added:
+        sys.path.insert(0, ref_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if path_added and ref_dir in sys.path:
+            sys.path.remove(ref_dir)
     return module
 
 

@@ -7,11 +7,22 @@
  * Layout:
  *   Q, K, V, O  : [B, S, H, D]  (row-major __nv_bfloat16)
  *
- * Strategy: transpose to [B, H, S, D] so each (batch, head) pair is a
- * contiguous [S, D] attention instance — identical to the single-head v5
- * kernel. After attention, transpose O back to [B, S, H, D].
+ * Strategy: work directly on [B, S, H, D] layout using strided
+ * global-to-shared copies. Each (batch, head) pair addresses its
+ * slice via seq_stride = H * D, eliminating the transpose kernel
+ * and its temporary buffer allocations.
  *
- * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, NUM_WARPS=4.
+ * Constants: BLOCK_Q=128, BLOCK_KV=64, DIM=128, NUM_WARPS=4.
+ *
+ * Register strategy: on-the-fly SMEM→register loading for K and V fragments
+ * to stay within 255 registers at BLOCK_Q=128. K_rmem and V_rmem are
+ * eliminated; instead, 2-register fragments are loaded and consumed
+ * immediately inside the MMA inner loops.
+ *
+ * MMA/ldmatrix pipelining: in the QK d-loop, the Q fragment for the
+ * NEXT d-step is prefetched via ldmatrix while the CURRENT d-step's
+ * MMA instructions execute, overlapping SMEM reads with tensor core
+ * computation. Same pattern for V fragments in the PV accumulation.
  *
  * kernel_run contract:
  *   extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
@@ -89,6 +100,14 @@ void ldmatrix_x4(uint32_t regs[4], uint32_t addr) {
 }
 
 __device__ inline
+void ldmatrix_x2_trans(uint32_t regs[2], uint32_t addr) {
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];"
+        : "=r"(regs[0]), "=r"(regs[1])
+        : "r"(addr));
+}
+
+__device__ inline
 void ldmatrix_x4_trans(uint32_t regs[4], uint32_t addr) {
     asm volatile(
         "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];"
@@ -113,56 +132,22 @@ void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float D[4]) {
 }
 
 /* ======================================================================
- *  Transpose kernel:  [B, S, H, D] <-> [B, H, S, D]
+ *  Flash Attention kernel — works directly on [B, S, H, D] layout
  *
- *  forward  = true  → BSHD -> BHSD
- *  forward  = false → BHSD -> BSHD
- * ====================================================================== */
-
-__global__ void transpose_bshd_bhsd(
-    const __nv_bfloat16 * __restrict__ in,
-    __nv_bfloat16 * __restrict__ out,
-    int B, int S, int H, int D, int forward)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * S * H * D;
-    if (idx >= total) return;
-
-    /* Decompose linear index into (b, s, h, d) or (b, h, s, d) */
-    int d = idx % D;
-    int tmp = idx / D;
-
-    if (forward) {
-        /* in  layout: [B, S, H, D]  → out layout: [B, H, S, D] */
-        int h = tmp % H;   tmp /= H;
-        int s = tmp % S;   tmp /= S;
-        int b = tmp;
-        out[((b * H + h) * S + s) * D + d] = in[idx];
-    } else {
-        /* in  layout: [B, H, S, D]  → out layout: [B, S, H, D] */
-        int s = tmp % S;   tmp /= S;
-        int h = tmp % H;   tmp /= H;
-        int b = tmp;
-        out[((b * S + s) * H + h) * D + d] = in[idx];
-    }
-}
-
-/* ======================================================================
- *  Flash Attention v5 kernel (adapted with causal mask support)
- *
- *  Q, K, V, O are already in [effective_bs, S, D] contiguous layout
- *  (after BSHD -> BHSD transpose, effective_bs = B * H).
+ *  Each thread-block handles one BLOCK_Q chunk of one (batch, head).
+ *  Strided global loads skip over H*D between consecutive sequence
+ *  positions to avoid a transpose pass.
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM, int NUM_WARPS>
 __launch_bounds__(NUM_WARPS * WARP_SIZE)
 __global__
 void flash_attention_kernel(
-    const nv_bfloat16 *Q,   /* [effective_bs, len_q, DIM]  */
-    const nv_bfloat16 *K,   /* [effective_bs, len_kv, DIM] */
-    const nv_bfloat16 *V,   /* [effective_bs, len_kv, DIM] */
-    nv_bfloat16 *O,         /* [effective_bs, len_q, DIM]  */
-    int effective_bs,
+    const nv_bfloat16 *Q,   /* [B, S, H, D] */
+    const nv_bfloat16 *K,   /* [B, S, H, D] */
+    const nv_bfloat16 *V,   /* [B, S, H, D] */
+    nv_bfloat16 *O,         /* [B, S, H, D] */
+    int B, int S, int H,
     int len_q,
     int len_kv,
     int is_causal)
@@ -179,16 +164,35 @@ void flash_attention_kernel(
     const int bs_id       = bid / num_q_blocks;
     const int q_block_id  = bid % num_q_blocks;
 
-    Q += (bs_id * num_q_blocks + q_block_id) * BLOCK_Q * DIM;
-    K += bs_id * len_kv * DIM;
-    V += bs_id * len_kv * DIM;
-    O += (bs_id * num_q_blocks + q_block_id) * BLOCK_Q * DIM;
+    /* Decompose bs_id into batch and head indices */
+    const int batch_id = bs_id / H;
+    const int head_id  = bs_id % H;
 
-    /* Shared memory: overlap Q_smem with (K double-buffer + V single-buffer) */
+    /* seq_stride: number of bf16 elements between consecutive sequence
+     * positions for the same (batch, head) in [B, S, H, D] layout. */
+    const int seq_stride = H * DIM;
+
+    /* Base pointers with stride */
+    const nv_bfloat16 *Q_base = Q + batch_id * S * seq_stride + head_id * DIM
+                                   + q_block_id * BLOCK_Q * seq_stride;
+    const nv_bfloat16 *K_base_ptr = K + batch_id * S * seq_stride + head_id * DIM;
+    const nv_bfloat16 *V_base_ptr = V + batch_id * S * seq_stride + head_id * DIM;
+    nv_bfloat16       *O_base = O + batch_id * S * seq_stride + head_id * DIM
+                                  + q_block_id * BLOCK_Q * seq_stride;
+
+    /* Shared memory layout:
+     *   Q region:  [BLOCK_Q, DIM] — persistent, Q loaded on-the-fly from SMEM
+     *   KV region: K double-buffer [2, BLOCK_KV, DIM] + V single-buffer [BLOCK_KV, DIM]
+     * The two regions do NOT overlap so Q stays resident while K/V rotate.
+     * Total SMEM: max(Q_bytes, KV_bytes) when laid out sequentially:
+     *   Q: 128*128*2 = 32KB,  KV: 3*64*128*2 = 48KB  → 80KB total
+     */
     extern __shared__ nv_bfloat16 smem[];
-    const uint32_t Q_smem = __cvta_generic_to_shared(smem);
-    const uint32_t K_smem = Q_smem;          /* reuse after Q loaded to regs */
-    const uint32_t V_smem = K_smem + 2 * BLOCK_KV * DIM * sizeof(nv_bfloat16);
+    const uint32_t smem_base = __cvta_generic_to_shared(smem);
+    const uint32_t Q_smem = smem_base;
+    const uint32_t KV_base = smem_base + BLOCK_Q * DIM * sizeof(nv_bfloat16);
+    const uint32_t K_smem = KV_base;
+    const uint32_t V_smem = KV_base + 2 * BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
     /* FA2-style: shard BLOCK_Q rows among warps */
     constexpr int WARP_Q = BLOCK_Q / NUM_WARPS;
@@ -197,31 +201,29 @@ void flash_attention_kernel(
     constexpr int MMA_N = 8;
     constexpr int MMA_K = 16;
 
-    /* Register tiles */
-    uint32_t Q_rmem[WARP_Q / MMA_M][DIM / MMA_K][4];
-    uint32_t K_rmem[BLOCK_KV / MMA_N][DIM / MMA_K][2];
-    uint32_t P_rmem[WARP_Q / MMA_M][BLOCK_KV / MMA_K][4];
-    uint32_t V_rmem[BLOCK_KV / MMA_K][DIM / MMA_N][2];
+    /* Register tiles — Q, K and V are ALL loaded on-the-fly from SMEM.
+     * Only O accumulator lives persistently in registers.
+     * S and P are scoped per mma_id_q inside the main loop. */
     float    O_rmem[WARP_Q / MMA_M][DIM / MMA_N][4] = {};
 
     /* Pre-compute swizzled SMEM addresses for ldmatrix */
     uint32_t Q_smem_thread, K_smem_thread, V_smem_thread;
     {
-        /* A tile (Q) */
+        /* A tile (Q) — ldmatrix x4 for m16n8k16 A operand */
         const int row_off = warp_id * WARP_Q + (lane_id % 16);
         const int col_off = lane_id / 16 * 8;
         Q_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(
             Q_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
     }
     {
-        /* B tile (K — transposed via ldmatrix) */
+        /* B tile (K — non-transposed ldmatrix) */
         const int row_off = lane_id % 8;
         const int col_off = lane_id / 8 * 8;
         K_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(
             K_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
     }
     {
-        /* B tile trans (V) */
+        /* B tile trans (V — transposed ldmatrix) */
         const int row_off = lane_id % 16;
         const int col_off = lane_id / 16 * 8;
         V_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(
@@ -237,20 +239,11 @@ void flash_attention_kernel(
         rowmax[mma_id_q][1] = -FLT_MAX;
     }
 
-    /* Load Q [BLOCK_Q, DIM] from global -> shared */
-    global_to_shared_swizzle<BLOCK_Q, DIM, TB_SIZE>(Q_smem, Q, DIM, tid);
+    /* Load Q [BLOCK_Q, DIM] from global -> shared (persistent for all KV iters)
+     * Uses seq_stride so rows are gathered from [B,S,H,D] layout. */
+    global_to_shared_swizzle<BLOCK_Q, DIM, TB_SIZE>(Q_smem, Q_base, seq_stride, tid);
     asm volatile("cp.async.commit_group;");
     asm volatile("cp.async.wait_all;");
-    __syncthreads();
-
-    /* Q shared -> registers */
-    for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
-        for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
-            uint32_t addr = Q_smem_thread;
-            addr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);
-            addr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
-            ldmatrix_x4(Q_rmem[mma_id_q][mma_id_d], addr);
-        }
     __syncthreads();
 
     const int num_kv_iter = cdiv(len_kv, BLOCK_KV);
@@ -261,78 +254,101 @@ void flash_attention_kernel(
         : num_kv_iter;
 
     /* Local copy of K/V pointers (advanced by load lambdas) */
-    const nv_bfloat16 *K_ptr = K;
-    const nv_bfloat16 *V_ptr = V;
-
-    auto load_K = [&](int kv_id) {
-        if (kv_id < max_kv_iter) {
-            const uint32_t dst = K_smem +
-                (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
-            global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
-                dst, K_ptr, DIM, tid);
-            K_ptr += BLOCK_KV * DIM;
-        }
-        asm volatile("cp.async.commit_group;");
-    };
-    auto load_V = [&](int kv_id) {
-        const uint32_t dst = V_smem;
-        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
-            dst, V_ptr, DIM, tid);
-        V_ptr += BLOCK_KV * DIM;
-        asm volatile("cp.async.commit_group;");
-    };
+    const nv_bfloat16 *K_ptr = K_base_ptr;
+    const nv_bfloat16 *V_ptr = V_base_ptr;
 
     /* Prefetch first K block */
-    load_K(0);
+    if (0 < max_kv_iter) {
+        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+            K_smem, K_ptr, seq_stride, tid);
+        K_ptr += BLOCK_KV * seq_stride;
+    }
+    asm volatile("cp.async.commit_group;");
 
     for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
-        float S_rmem[WARP_Q / MMA_M][BLOCK_KV / MMA_N][4] = {};
 
         /* Prefetch V (need sync to ensure previous V_smem is consumed) */
         __syncthreads();
-        load_V(kv_id);
+        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+            V_smem, V_ptr, seq_stride, tid);
+        V_ptr += BLOCK_KV * seq_stride;
+        asm volatile("cp.async.commit_group;");
 
-        /* K shared -> registers */
+        /* Wait for K to arrive in SMEM */
         asm volatile("cp.async.wait_group 1;");
         __syncthreads();
-        for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
-            for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d += 2) {
-                uint32_t addr = K_smem_thread +
-                    (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
-                addr += mma_id_kv * MMA_N * DIM * sizeof(nv_bfloat16);
-                addr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
-                ldmatrix_x4(K_rmem[mma_id_kv][mma_id_d], addr);
+
+        const uint32_t K_cur = K_smem_thread +
+            (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
+
+        /* Process each mma_id_q slice independently: QK → scale → mask →
+         * softmax → pack P.  S_local is [8][4] = 32 regs instead of
+         * [2][8][4] = 64, halving peak pressure during softmax. */
+        uint32_t P_rmem[WARP_Q / MMA_M][BLOCK_KV / MMA_K][4];
+
+        for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
+
+            /* ---- QK: S = Q[mma_id_q] @ K^T ---- */
+            float S_local[BLOCK_KV / MMA_N][4] = {};
+
+            /* Iterate over d-dimension first, loading Q once per d-step
+             * and reusing it across all mma_id_kv. This reduces Q ldmatrix
+             * count from (BLOCK_KV/MMA_N * DIM/MMA_K) to (DIM/MMA_K).
+             *
+             * Pipelining: prefetch Q fragment for the NEXT d-step while
+             * MMA instructions for the CURRENT d-step execute, overlapping
+             * SMEM ldmatrix reads with tensor core computation. */
+
+            /* Prefetch Q for d=0 */
+            uint32_t Q_cur[4];
+            {
+                uint32_t qaddr = Q_smem_thread;
+                qaddr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);
+                /* d=0: no XOR offset needed (0 * MMA_K * sizeof = 0) */
+                ldmatrix_x4(Q_cur, qaddr);
             }
 
-        /* S = Q @ K^T  [BLOCK_Q, BLOCK_KV] */
-        for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
-            for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
-                for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++)
-                    mma_m16n8k16(Q_rmem[mma_id_q][mma_id_d],
-                                 K_rmem[mma_id_kv][mma_id_d],
-                                 S_rmem[mma_id_q][mma_id_kv]);
-
-        /* Prefetch next K block */
-        load_K(kv_id + 1);
-
-        /* ---- Softmax scale ---- */
-        for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
-            for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
-                for (int reg_id = 0; reg_id < 4; reg_id++)
-                    S_rmem[mma_id_q][mma_id_kv][reg_id] *= softmax_scale;
-
-        /* ---- Causal mask ---- */
-        if (is_causal) {
-            int q_start = q_block_id * BLOCK_Q;
-            int kv_start = kv_id * BLOCK_KV;
-
-            for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
+            #pragma unroll
+            for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
+                /* Prefetch Q for next d-step (if not last) */
+                uint32_t Q_next[4];
+                if (mma_id_d + 1 < DIM / MMA_K) {
+                    uint32_t qaddr = Q_smem_thread;
+                    qaddr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);
+                    qaddr ^= (mma_id_d + 1) * MMA_K * sizeof(nv_bfloat16);
+                    ldmatrix_x4(Q_next, qaddr);
+                }
+                #pragma unroll
                 for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-                    /* MMA m16n8k16 output fragment layout:
-                     *   row group 0: lanes 0-3 hold row (lane_id/4),       cols (lane_id%4)*2 + {0,1}
-                     *   row group 1: lanes 0-3 hold row (lane_id/4) + 8,   same cols
-                     *   Fragment regs: [0]=r0c0, [1]=r0c1, [2]=r1c0, [3]=r1c1
-                     */
+                    uint32_t K_frag[2];
+                    {
+                        uint32_t kaddr = K_cur;
+                        kaddr += mma_id_kv * MMA_N * DIM * sizeof(nv_bfloat16);
+                        kaddr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
+                        ldmatrix_x2(K_frag, kaddr);
+                    }
+                    mma_m16n8k16(Q_cur, K_frag, S_local[mma_id_kv]);
+                }
+                /* Swap current and next */
+                if (mma_id_d + 1 < DIM / MMA_K) {
+                    Q_cur[0] = Q_next[0]; Q_cur[1] = Q_next[1];
+                    Q_cur[2] = Q_next[2]; Q_cur[3] = Q_next[3];
+                }
+            }
+
+            /* ---- Softmax scale ---- */
+            #pragma unroll
+            for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
+                #pragma unroll
+                for (int reg_id = 0; reg_id < 4; reg_id++)
+                    S_local[mma_id_kv][reg_id] *= softmax_scale;
+
+            /* ---- Causal mask ---- */
+            if (is_causal) {
+                const int q_start = q_block_id * BLOCK_Q;
+                const int kv_start = kv_id * BLOCK_KV;
+
+                for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
                     int q_pos_0 = q_start + warp_id * WARP_Q +
                                   mma_id_q * MMA_M + (lane_id / 4);
                     int q_pos_1 = q_pos_0 + 8;
@@ -341,23 +357,20 @@ void flash_attention_kernel(
                     int kv_pos_1 = kv_pos_0 + 1;
 
                     if (kv_pos_0 > q_pos_0)
-                        S_rmem[mma_id_q][mma_id_kv][0] = -FLT_MAX;
+                        S_local[mma_id_kv][0] = -FLT_MAX;
                     if (kv_pos_1 > q_pos_0)
-                        S_rmem[mma_id_q][mma_id_kv][1] = -FLT_MAX;
+                        S_local[mma_id_kv][1] = -FLT_MAX;
                     if (kv_pos_0 > q_pos_1)
-                        S_rmem[mma_id_q][mma_id_kv][2] = -FLT_MAX;
+                        S_local[mma_id_kv][2] = -FLT_MAX;
                     if (kv_pos_1 > q_pos_1)
-                        S_rmem[mma_id_q][mma_id_kv][3] = -FLT_MAX;
+                        S_local[mma_id_kv][3] = -FLT_MAX;
                 }
             }
-        }
 
-        /* ---- Online softmax + rescaling ---- */
-        for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
-            /* Row max for this KV block */
+            /* ---- Online softmax + rescaling ---- */
             float this_rowmax[2];
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-                float *regs = S_rmem[mma_id_q][mma_id_kv];
+                float *regs = S_local[mma_id_kv];
                 if (mma_id_kv == 0) {
                     this_rowmax[0] = max(regs[0], regs[1]);
                     this_rowmax[1] = max(regs[2], regs[3]);
@@ -367,7 +380,7 @@ void flash_attention_kernel(
                 }
             }
 
-            /* Butterfly reduction within 4 threads (columns packed across lanes) */
+            /* Butterfly reduction within 4 threads */
             this_rowmax[0] = max(this_rowmax[0],
                 __shfl_xor_sync(0xFFFFFFFF, this_rowmax[0], 1));
             this_rowmax[0] = max(this_rowmax[0],
@@ -377,7 +390,6 @@ void flash_attention_kernel(
             this_rowmax[1] = max(this_rowmax[1],
                 __shfl_xor_sync(0xFFFFFFFF, this_rowmax[1], 2));
 
-            /* New global row max */
             this_rowmax[0] = max(this_rowmax[0], rowmax[mma_id_q][0]);
             this_rowmax[1] = max(this_rowmax[1], rowmax[mma_id_q][1]);
 
@@ -385,6 +397,7 @@ void flash_attention_kernel(
             float rescale[2];
             rescale[0] = __expf(rowmax[mma_id_q][0] - this_rowmax[0]);
             rescale[1] = __expf(rowmax[mma_id_q][1] - this_rowmax[1]);
+            #pragma unroll
             for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
                 O_rmem[mma_id_q][mma_id_d][0] *= rescale[0];
                 O_rmem[mma_id_q][mma_id_d][1] *= rescale[0];
@@ -395,10 +408,11 @@ void flash_attention_kernel(
             rowmax[mma_id_q][0] = this_rowmax[0];
             rowmax[mma_id_q][1] = this_rowmax[1];
 
-            /* Row sum-exp + pack S -> P for next MMA */
+            /* Row sum-exp + pack S -> P */
             float this_rowsumexp[2];
+            #pragma unroll
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-                float *regs = S_rmem[mma_id_q][mma_id_kv];
+                float *regs = S_local[mma_id_kv];
                 regs[0] = __expf(regs[0] - rowmax[mma_id_q][0]);
                 regs[1] = __expf(regs[1] - rowmax[mma_id_q][0]);
                 regs[2] = __expf(regs[2] - rowmax[mma_id_q][1]);
@@ -436,31 +450,81 @@ void flash_attention_kernel(
                 rowsumexp[mma_id_q][0] * rescale[0] + this_rowsumexp[0];
             rowsumexp[mma_id_q][1] =
                 rowsumexp[mma_id_q][1] * rescale[1] + this_rowsumexp[1];
-        }
 
-        /* V shared -> registers */
+        } /* end per-mma_id_q QK+softmax */
+
+        /* Prefetch next K block (after QK is done, K_smem[kv_id%2] is free) */
+        if (kv_id + 1 < max_kv_iter) {
+            const uint32_t K_dst = K_smem +
+                ((kv_id + 1) % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
+            global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+                K_dst, K_ptr, seq_stride, tid);
+            K_ptr += BLOCK_KV * seq_stride;
+        }
+        asm volatile("cp.async.commit_group;");
+
+        /* Wait for V to arrive in SMEM */
         asm volatile("cp.async.wait_group 1;");
         __syncthreads();
-        for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
-            for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d += 2) {
+
+        /* O += P @ V  [BLOCK_Q, DIM]
+         * Load V once per (mma_kv, mma_d) step, reuse across mma_id_q.
+         * Loop order: mma_kv outer (P changes), mma_d middle (V changes),
+         * mma_id_q inner (reuses both V_frag and P_rmem[mma_id_q]).
+         *
+         * Pipelining: prefetch the V fragment for the next (kv,d) step
+         * while MMA instructions for the current step execute, overlapping
+         * SMEM ldmatrix reads with tensor core computation.  A single
+         * V_cur/V_next pair spans the entire double-nested loop. */
+        {
+            /* Prefetch V for the very first step (kv=0, d=0) */
+            uint32_t V_cur[2];
+            {
                 uint32_t addr = V_smem_thread;
-                addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);
-                addr ^= mma_id_d * MMA_N * sizeof(nv_bfloat16);
-                ldmatrix_x4_trans(V_rmem[mma_id_kv][mma_id_d], addr);
+                /* kv=0, d=0: no offsets */
+                ldmatrix_x2_trans(V_cur, addr);
             }
 
-        /* O += P @ V  [BLOCK_Q, DIM] */
-        for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
-            for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++)
-                for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K;
-                     mma_id_kv++)
-                    mma_m16n8k16(P_rmem[mma_id_q][mma_id_kv],
-                                 V_rmem[mma_id_kv][mma_id_d],
-                                 O_rmem[mma_id_q][mma_id_d]);
+            #pragma unroll
+            for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++) {
+                #pragma unroll
+                for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
+                    /* Prefetch V for next step */
+                    uint32_t V_next[2];
+                    const bool has_next_d = (mma_id_d + 1 < DIM / MMA_N);
+                    const bool has_next_kv = (mma_id_kv + 1 < BLOCK_KV / MMA_K);
+                    if (has_next_d) {
+                        /* Next d within same mma_id_kv */
+                        uint32_t addr = V_smem_thread;
+                        addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);
+                        addr ^= (mma_id_d + 1) * MMA_N * sizeof(nv_bfloat16);
+                        ldmatrix_x2_trans(V_next, addr);
+                    } else if (has_next_kv) {
+                        /* First d of next mma_id_kv */
+                        uint32_t addr = V_smem_thread;
+                        addr += (mma_id_kv + 1) * MMA_K * DIM * sizeof(nv_bfloat16);
+                        /* d=0: no XOR offset */
+                        ldmatrix_x2_trans(V_next, addr);
+                    }
+                    #pragma unroll
+                    for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
+                        mma_m16n8k16(P_rmem[mma_id_q][mma_id_kv],
+                                     V_cur,
+                                     O_rmem[mma_id_q][mma_id_d]);
+                    /* Swap current and next */
+                    if (has_next_d || has_next_kv) {
+                        V_cur[0] = V_next[0]; V_cur[1] = V_next[1];
+                    }
+                }
+            }
+        }
     }
 
-    /* ---- Write O to global memory (divide by softmax denominator) ---- */
+    /* ---- Write O to global memory (divide by softmax denominator) ----
+     * Output uses strided stores back to [B, S, H, D] layout. */
+    #pragma unroll
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
+        #pragma unroll
         for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
             const int row = warp_id * WARP_Q + mma_id_q * MMA_M + (lane_id / 4);
             const int col = mma_id_d * MMA_N + (lane_id % 4) * 2;
@@ -471,9 +535,9 @@ void flash_attention_kernel(
             regs[2] /= rowsumexp[mma_id_q][1];
             regs[3] /= rowsumexp[mma_id_q][1];
 
-            reinterpret_cast<nv_bfloat162 *>(O + (row + 0) * DIM + col)[0] =
+            reinterpret_cast<nv_bfloat162 *>(O_base + (row + 0) * seq_stride + col)[0] =
                 __float22bfloat162_rn({regs[0], regs[1]});
-            reinterpret_cast<nv_bfloat162 *>(O + (row + 8) * DIM + col)[0] =
+            reinterpret_cast<nv_bfloat162 *>(O_base + (row + 8) * seq_stride + col)[0] =
                 __float22bfloat162_rn({regs[2], regs[3]});
         }
 }
@@ -569,29 +633,9 @@ extern "C" int kernel_run(
     /* Sanity check */
     if (D != 128) return -2;    /* kernel only supports DIM=128 */
 
-    /* ---- Allocate transposed buffers [B, H, S, D] ---- */
-    size_t buf_bytes = (size_t)n * sizeof(__nv_bfloat16);
-    __nv_bfloat16 *Qt = nullptr, *Kt = nullptr, *Vt = nullptr, *Ot = nullptr;
-    cudaMalloc(&Qt, buf_bytes);
-    cudaMalloc(&Kt, buf_bytes);
-    cudaMalloc(&Vt, buf_bytes);
-    cudaMalloc(&Ot, buf_bytes);
-
-    /* ---- Transpose Q, K, V: [B, S, H, D] -> [B, H, S, D] ---- */
+    /* ---- Launch Flash Attention directly on [B,S,H,D] layout ---- */
     {
-        int tpb = 256;
-        int blks = (n + tpb - 1) / tpb;
-        transpose_bshd_bhsd<<<blks, tpb, 0, stream>>>(
-            inputs[0], Qt, B, S, H, D, /*forward=*/1);
-        transpose_bshd_bhsd<<<blks, tpb, 0, stream>>>(
-            inputs[1], Kt, B, S, H, D, /*forward=*/1);
-        transpose_bshd_bhsd<<<blks, tpb, 0, stream>>>(
-            inputs[2], Vt, B, S, H, D, /*forward=*/1);
-    }
-
-    /* ---- Launch Flash Attention ---- */
-    {
-        const int BLOCK_Q   = 64;
+        const int BLOCK_Q   = 128;
         const int BLOCK_KV  = 64;
         const int DIM_CONST = 128;
         const int NUM_WARPS = 4;
@@ -599,9 +643,15 @@ extern "C" int kernel_run(
 
         int effective_bs = B * H;
         int num_blocks = effective_bs * cdiv(S, BLOCK_Q);
-        int smem_max_dim = (BLOCK_Q > BLOCK_KV * 3) ? BLOCK_Q : BLOCK_KV * 3;
-        int smem_size  = smem_max_dim * DIM_CONST *
-                         (int)sizeof(nv_bfloat16);
+
+        /* SMEM budget: Q region (persistent) + KV region (rotated)
+         *   Q:  BLOCK_Q * DIM * 2 = 128*128*2 = 32768
+         *   KV: (2*BLOCK_KV + BLOCK_KV)*DIM*2 = 3*64*128*2 = 49152
+         *   Total: 32768 + 49152 = 81920 (80KB, within 99KB limit)
+         */
+        int smem_q   = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16);
+        int smem_kv  = 3 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);
+        int smem_size = smem_q + smem_kv;
 
         auto kernel = flash_attention_kernel<BLOCK_Q, BLOCK_KV,
                                              DIM_CONST, NUM_WARPS>;
@@ -610,23 +660,9 @@ extern "C" int kernel_run(
                 cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
         kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
-            Qt, Kt, Vt, Ot, effective_bs, S, S, causal ? 1 : 0);
+            inputs[0], inputs[1], inputs[2], outputs[0],
+            B, S, H, S, S, causal ? 1 : 0);
     }
-
-    /* ---- Transpose O back: [B, H, S, D] -> [B, S, H, D] ---- */
-    {
-        int tpb = 256;
-        int blks = (n + tpb - 1) / tpb;
-        transpose_bshd_bhsd<<<blks, tpb, 0, stream>>>(
-            Ot, outputs[0], B, S, H, D, /*forward=*/0);
-    }
-
-    /* ---- Cleanup ---- */
-    cudaStreamSynchronize(stream);
-    cudaFree(Qt);
-    cudaFree(Kt);
-    cudaFree(Vt);
-    cudaFree(Ot);
 
     return 0;
 }

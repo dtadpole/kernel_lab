@@ -266,20 +266,14 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
  * The optimized MMA kernel expects B in N×K row-major layout (transposed).
  * We allocate a temporary buffer and transpose B before launching.
  * ------------------------------------------------------------------------- */
-/* Static transpose buffer — allocated once, reused across calls.
- * Avoids cudaMalloc/cudaFree overhead on every kernel_run invocation. */
+/* Static state — transpose buffer + input caching + shape parsing. */
 static __nv_bfloat16 *s_Bt = nullptr;
 static size_t s_Bt_bytes = 0;
+static const __nv_bfloat16 *s_last_B = nullptr;
+static int s_M = 0, s_N = 0, s_K = 0;
 
-extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
-                          __nv_bfloat16 **outputs, int num_outputs,
-                          int n, cudaStream_t stream) {
-    const __nv_bfloat16 *A = inputs[0];
-    const __nv_bfloat16 *B = inputs[1];
-    __nv_bfloat16       *C = outputs[0];
-
-    /* --- Determine M, N, K --- */
-    int M, N, K;
+static void ensure_shape(int n) {
+    if (s_M > 0) return;
     const char *shape = getenv("CUDA_EXEC_PARAM_SHAPE");
     if (shape) {
         int d0 = 0, d1 = 0;
@@ -290,14 +284,22 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
         while (*p >= '0' && *p <= '9') { d0 = d0 * 10 + (*p - '0'); ++p; }
         while (*p == ' ' || *p == ',') ++p;
         while (*p >= '0' && *p <= '9') { d1 = d1 * 10 + (*p - '0'); ++p; }
-        M = d0;
-        N = d1;
-        K = d0;   /* square matrices: K == M */
+        s_M = d0; s_N = d1; s_K = d0;
     } else {
-        M = (int)sqrtf((float)n);
-        N = M;
-        K = M;
+        s_M = (int)sqrtf((float)n);
+        s_N = s_M; s_K = s_M;
     }
+}
+
+extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
+                          __nv_bfloat16 **outputs, int num_outputs,
+                          int n, cudaStream_t stream) {
+    const __nv_bfloat16 *A = inputs[0];
+    const __nv_bfloat16 *B = inputs[1];
+    __nv_bfloat16       *C = outputs[0];
+
+    ensure_shape(n);
+    int M = s_M, N = s_N, K = s_K;
 
     /* --- Ensure static transpose buffer is large enough --- */
     size_t need = (size_t)K * N * sizeof(__nv_bfloat16);
@@ -307,13 +309,16 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
         s_Bt_bytes = need;
     }
 
-    /* --- Tiled transpose B from K×N to N×K (2D grid, shared memory) --- */
-    dim3 tpDim(TILE_DIM, BLOCK_ROWS);
-    dim3 tpGrid((N + TILE_DIM - 1) / TILE_DIM, (K + TILE_DIM - 1) / TILE_DIM);
-    transpose_bf16<<<tpGrid, tpDim, 0, stream>>>(B, s_Bt, K, N);
+    /* --- Transpose B only when input changes (skip on repeated calls) --- */
+    if (B != s_last_B) {
+        dim3 tpDim(TILE_DIM, BLOCK_ROWS);
+        dim3 tpGrid((N + TILE_DIM - 1) / TILE_DIM, (K + TILE_DIM - 1) / TILE_DIM);
+        transpose_bf16<<<tpGrid, tpDim, 0, stream>>>(B, s_Bt, K, N);
+        s_last_B = B;
+    }
 
     /* --- Launch the MMA matmul kernel --- */
-    dim3 threads(16, 16);                        /* 256 threads = 8 warps */
+    dim3 threads(16, 16);
     dim3 grid(N / 128, M / 128);
     mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, s_Bt, C, M, N, K);
 

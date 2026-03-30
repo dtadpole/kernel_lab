@@ -38,7 +38,7 @@ The server uses stdio transport. It reads `CUDA_EXEC_URL` and `CUDA_EXEC_KEY_PAT
 
 ### Module responsibilities
 
-- **`mcp_server.py`** — FastMCP stdio server. Wraps 5 cuda_exec HTTP endpoints as action tools (`cuda_compile`, `cuda_evaluate`, `cuda_profile`, `cuda_execute`, `cuda_read_file`) plus 4 local data retrieval tools (`cuda_get_compile_data`, `cuda_get_evaluate_data`, `cuda_get_profile_data`, `cuda_get_data_point`). Strips base64 binary content from responses to avoid context bloat. Persists raw request/response for every tool call to a local data store. Handles bearer token auth.
+- **`mcp_server.py`** — FastMCP stdio server. Wraps 5 cuda_exec HTTP endpoints as action tools (`cuda_compile`, `cuda_evaluate`, `cuda_profile`, `cuda_execute`, `cuda_read_file`), 4 local data retrieval tools (`cuda_get_compile_data`, `cuda_get_evaluate_data`, `cuda_get_profile_data`, `cuda_get_data_point`), and 2 document search tools (`cuda_search_docs`, `cuda_lookup_doc_section`) for querying indexed NVIDIA CUDA Toolkit documentation. Strips base64 binary content from responses to avoid context bloat. Persists raw request/response for every tool call to a local data store. Handles bearer token auth.
 - **`agent.py`** — Agent orchestration. Creates a `claude-agent-sdk` session with the MCP server and runs the optimization loop. Claude manages iteration internally.
 - **`prompts.py`** — System prompt encoding workflow rules, convergence criteria, and CUDA optimization techniques. Initial prompt template formatting.
 - **`task.py`** — `OptimizationTask` dataclass holding all inputs for an optimization run.

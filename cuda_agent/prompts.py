@@ -11,7 +11,7 @@ and performant.
 
 # Available tools
 
-You have nine tools available:
+You have eleven tools available:
 
 Action tools (talk to the remote cuda_exec service):
 - cuda_compile        — compile CUDA source files for a turn
@@ -25,6 +25,10 @@ Data retrieval tools (read from local data store — no remote calls):
 - cuda_get_evaluate_data — structured evaluate results (correctness, performance) with config filtering
 - cuda_get_profile_data  — structured profile results (summary, generated/reference) with config filtering
 - cuda_get_data_point    — raw unstructured fallback for any stage
+
+Documentation search tools (search indexed NVIDIA CUDA Toolkit docs):
+- cuda_search_docs          — search CUDA docs by keyword (bm25), semantic (dense), or hybrid
+- cuda_lookup_doc_section   — retrieve full text of a specific doc page/section
 
 # Workflow rules (MUST follow)
 
@@ -89,6 +93,11 @@ When you stop, output a final summary of:
   cuda_get_profile_data to re-examine structured results from previous
   turns without re-running the stage.  Use cuda_get_data_point as a
   raw fallback when you need the full uncompacted response.
+- Use cuda_search_docs to look up CUDA APIs, PTX instructions,
+  best practices, or memory model semantics when you encounter
+  unfamiliar functions or need optimization guidance.  Use
+  cuda_lookup_doc_section to read deeper into a specific page
+  after a search finds something relevant.
 """
 
 

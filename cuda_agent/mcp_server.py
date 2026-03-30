@@ -1,9 +1,11 @@
 """FastMCP stdio server wrapping the cuda_exec HTTP API as MCP tools.
 
 Exposes 5 action tools (compile, evaluate, profile, execute, read_file)
-that proxy to the cuda_exec HTTP service, plus 4 data retrieval tools
+that proxy to the cuda_exec HTTP service, 4 data retrieval tools
 (get_compile_data, get_evaluate_data, get_profile_data, get_data_point)
-that read from a local data store of raw request/response JSON.
+that read from a local data store of raw request/response JSON, and
+2 document search tools (search_docs, lookup_doc_section) for querying
+indexed NVIDIA CUDA Toolkit documentation.
 
 Every action tool call (except read_file) is persisted to the local
 data store before response compaction, so the full unmodified data
@@ -713,6 +715,133 @@ async def cuda_get_profile_data(
     }
 
     return json.dumps({"all_ok": all_ok, "configs": result_configs}, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Document retrieval tools
+# ---------------------------------------------------------------------------
+
+_doc_searcher = None
+
+
+def _get_doc_searcher():
+    """Lazy-load the document searcher singleton."""
+    global _doc_searcher
+    if _doc_searcher is None:
+        try:
+            from doc_retrieval.searcher import DocSearcher
+
+            _doc_searcher = DocSearcher()
+        except Exception as exc:
+            return None, str(exc)
+    return _doc_searcher, None
+
+
+@mcp.tool()
+async def cuda_search_docs(
+    query: Annotated[
+        str,
+        Field(description="Natural language search query about CUDA programming"),
+    ],
+    mode: Annotated[
+        Literal["bm25", "dense", "hybrid"],
+        Field(description="Search mode: bm25 (keyword), dense (semantic), hybrid (combined)"),
+    ] = "hybrid",
+    top_k: Annotated[
+        int,
+        Field(description="Number of results to return (1-20)", ge=1, le=20),
+    ] = 5,
+) -> str:
+    """Search NVIDIA CUDA Toolkit documentation.
+
+    Searches the indexed CUDA documentation corpus using the specified
+    retrieval mode.  Useful for looking up API details, best practices,
+    optimization techniques, PTX ISA specifics, or memory model semantics.
+
+    Examples of good queries:
+        - "shared memory bank conflicts"
+        - "warp divergence impact on performance"
+        - "atomicCAS signature and semantics"
+        - "cudaMemcpyAsync stream synchronization"
+        - "PTX ld.global instruction"
+    """
+    searcher, err = _get_doc_searcher()
+    if searcher is None:
+        return json.dumps({"error": f"Doc searcher unavailable: {err}"})
+
+    if mode == "bm25":
+        results = searcher.search_bm25(query, top_k)
+    elif mode == "dense":
+        results = searcher.search_dense(query, top_k)
+    else:
+        results = searcher.search_hybrid(query, top_k)
+
+    return json.dumps(
+        [
+            {
+                "title": r.title,
+                "section_path": r.section_path,
+                "url": r.source_url,
+                "text": r.text[:2000],  # truncate for context limits
+                "score": round(r.score, 4),
+            }
+            for r in results
+        ],
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def cuda_lookup_doc_section(
+    url: Annotated[
+        str,
+        Field(description="URL of the CUDA documentation page (from a prior search result)"),
+    ],
+    section: Annotated[
+        str | None,
+        Field(description="Section heading to filter to (optional)"),
+    ] = None,
+) -> str:
+    """Retrieve full text from a specific CUDA documentation page or section.
+
+    Given a URL from a prior cuda_search_docs result, retrieves all
+    chunks from that page.  Optionally filter to a specific section.
+    Use this to get deeper context after identifying a relevant page.
+    """
+    searcher, err = _get_doc_searcher()
+    if searcher is None:
+        return json.dumps({"error": f"Doc searcher unavailable: {err}"})
+
+    chunks = searcher._load_chunks()
+    matching = [c for c in chunks if c["source_url"] == url]
+
+    if section:
+        section_lower = section.lower()
+        matching = [
+            c for c in matching
+            if section_lower in c["section_path"].lower()
+        ]
+
+    if not matching:
+        return json.dumps({"error": f"No chunks found for url={url}, section={section}"})
+
+    # Concatenate chunk texts in order
+    matching.sort(key=lambda c: c["chunk_index"])
+    text = "\n\n".join(c["text"] for c in matching)
+
+    # Truncate to ~8000 chars to stay within context limits
+    if len(text) > 8000:
+        text = text[:8000] + "\n\n[... truncated ...]"
+
+    return json.dumps(
+        {
+            "url": url,
+            "section": section,
+            "num_chunks": len(matching),
+            "text": text,
+        },
+        indent=2,
+    )
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import tiktoken
 
 from doc_retrieval.config import load_config
@@ -44,7 +43,7 @@ class DocSearcher:
         cfg = load_config()
         if index_dir is None:
             index_dir = (
-                Path(cfg.doc_retrieval.storage.root).expanduser() / "index"
+                Path(cfg.doc_retrieval.storage.runtime_root).expanduser() / "index"
             )
         self._index_dir = index_dir
         self._embedding_client = embedding_client
@@ -57,6 +56,11 @@ class DocSearcher:
         self._faiss_index = None
         self._chunk_ids: list[str] | None = None
         self._enc: tiktoken.Encoding | None = None
+
+        # Navigation data (lazy-loaded)
+        self._toc: list[dict] | None = None
+        self._sections_data: list[dict] | None = None
+        self._runtime_root: Path | None = None
 
     def _load_chunks(self) -> list[dict]:
         if self._chunks is None:
@@ -156,6 +160,8 @@ class DocSearcher:
         """BM25 keyword search."""
         import re
 
+        import numpy as np
+
         chunks = self._load_chunks()
         bm25 = self._load_bm25()
 
@@ -174,6 +180,8 @@ class DocSearcher:
 
     def search_dense(self, query: str, top_k: int = 10) -> list[SearchResult]:
         """Dense vector search via FAISS."""
+        import numpy as np
+
         chunks = self._load_chunks()
         faiss_index = self._load_faiss()
         client = self._get_embedding_client()
@@ -242,6 +250,135 @@ class DocSearcher:
                 )
             )
         return results
+
+    def _get_runtime_root(self) -> Path:
+        if self._runtime_root is not None:
+            return self._runtime_root
+        cfg = load_config()
+        return Path(cfg.doc_retrieval.storage.runtime_root).expanduser()
+
+    def _load_toc(self) -> list[dict]:
+        if self._toc is not None:
+            return self._toc
+        toc_path = self._get_runtime_root() / "chunks" / "toc.jsonl"
+        if not toc_path.exists():
+            self._toc = []
+            return self._toc
+        self._toc = []
+        with open(toc_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    self._toc.append(json.loads(line))
+        return self._toc
+
+    def _load_sections_data(self) -> list[dict]:
+        if self._sections_data is not None:
+            return self._sections_data
+        sec_path = self._get_runtime_root() / "chunks" / "sections.jsonl"
+        if not sec_path.exists():
+            self._sections_data = []
+            return self._sections_data
+        self._sections_data = []
+        with open(sec_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    self._sections_data.append(json.loads(line))
+        return self._sections_data
+
+    def browse_toc(
+        self,
+        doc_id: str,
+        section_id: str | None = None,
+        depth: int = 2,
+    ) -> list[dict] | dict:
+        """Browse the document TOC tree."""
+        toc = self._load_toc()
+        doc_toc = [t for t in toc if t["doc_id"] == doc_id]
+
+        if not doc_toc:
+            return []
+
+        by_id = {t["section_id"]: t for t in doc_toc}
+
+        def _node_summary(entry: dict, remaining_depth: int) -> dict:
+            node = {
+                "section_id": entry["section_id"],
+                "title": entry["title"],
+                "heading_level": entry["heading_level"],
+                "children_count": len(entry.get("children", [])),
+            }
+            if remaining_depth > 1 and entry.get("children"):
+                node["children"] = [
+                    _node_summary(by_id[cid], remaining_depth - 1)
+                    for cid in entry["children"]
+                    if cid in by_id
+                ]
+            return node
+
+        if section_id is None:
+            top_level = [t for t in doc_toc if t["parent_section_id"] is None]
+            return [_node_summary(t, depth) for t in top_level]
+
+        if section_id not in by_id:
+            return []
+
+        return _node_summary(by_id[section_id], depth)
+
+    def read_section(
+        self,
+        doc_id: str,
+        section_id: str,
+    ) -> dict | None:
+        """Read full section content with navigation context."""
+        sections = self._load_sections_data()
+        toc = self._load_toc()
+
+        sec = next(
+            (s for s in sections if s["doc_id"] == doc_id and s["section_id"] == section_id),
+            None,
+        )
+        if sec is None:
+            return None
+
+        toc_entry = next(
+            (t for t in toc if t["doc_id"] == doc_id and t["section_id"] == section_id),
+            None,
+        )
+
+        parent_id = toc_entry["parent_section_id"] if toc_entry else None
+
+        prev_sibling = None
+        next_sibling = None
+        if toc_entry and parent_id:
+            parent = next(
+                (t for t in toc if t["doc_id"] == doc_id and t["section_id"] == parent_id),
+                None,
+            )
+            if parent and parent.get("children"):
+                siblings = parent["children"]
+                try:
+                    idx = siblings.index(section_id)
+                    if idx > 0:
+                        prev_sibling = siblings[idx - 1]
+                    if idx < len(siblings) - 1:
+                        next_sibling = siblings[idx + 1]
+                except ValueError:
+                    pass
+
+        return {
+            "content": sec["content"],
+            "title": sec["title"],
+            "heading_path": sec["heading_path"],
+            "token_count": sec["token_count"],
+            "nav": {
+                "parent": parent_id,
+                "prev_sibling": prev_sibling,
+                "next_sibling": next_sibling,
+            },
+            "deep_link": sec["deep_link"],
+        }
 
 
 def cli_search(

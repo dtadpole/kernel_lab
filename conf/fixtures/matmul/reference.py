@@ -973,9 +973,6 @@ class Model(nn.Module):
         self._c_gpu = None
         self._stream = None
         self._cached_shape = None
-        # Input caching — skip copy when same tensors are passed again
-        self._cached_A_ptr = None
-        self._cached_B_ptr = None
 
     def _ensure_compiled(self, M: int, K: int, N: int) -> None:
         """Allocate CUTLASS buffers and JIT-compile on first call or shape change."""
@@ -1027,16 +1024,10 @@ class Model(nn.Module):
 
         self._ensure_compiled(M, K, N)
 
-        # Copy inputs only when data changes (same tensors reused across
-        # warmup + timing runs in the evaluate harness)
-        a_ptr = A.data_ptr()
-        b_ptr = B.data_ptr()
-        if a_ptr != self._cached_A_ptr:
-            self._a_gpu.view(M, K).copy_(A)
-            self._cached_A_ptr = a_ptr
-        if b_ptr != self._cached_B_ptr:
-            self._b_gpu.view(N, K).copy_(B.t())
-            self._cached_B_ptr = b_ptr
+        # Copy A (same layout, memcpy)
+        self._a_gpu.view(M, K).copy_(A)
+        # Transpose B into CUTLASS buffer (single strided copy kernel)
+        self._b_gpu.view(N, K).copy_(B.t())
 
         self._compiled(
             self._a_cute, self._b_cute, self._c_cute,

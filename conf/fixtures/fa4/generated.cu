@@ -181,8 +181,9 @@ void dma_warp_fn(
     const nv_bfloat16 *V_ptr = V_base_ptr;
 
     for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
-        /* Wait until MMA warps have consumed the previous K in this buffer slot */
-        bar_sync(BAR_K_EMPTY, BAR_THREADS);
+        /* Wait until MMA warps have consumed the previous K in this buffer slot.
+         * Skip on first iteration — no previous tile to protect. */
+        if (kv_id > 0) bar_sync(BAR_K_EMPTY, BAR_THREADS);
 
         /* Load K[kv_id] into double-buffered K_smem slot */
         const uint32_t K_dst = K_smem +
@@ -197,8 +198,9 @@ void dma_warp_fn(
         /* Signal K is ready */
         bar_arrive(BAR_K_FULL, BAR_THREADS);
 
-        /* Wait until MMA warps have consumed the previous V */
-        bar_sync(BAR_V_EMPTY, BAR_THREADS);
+        /* Wait until MMA warps have consumed the previous V.
+         * Skip on first iteration — no previous tile to protect. */
+        if (kv_id > 0) bar_sync(BAR_V_EMPTY, BAR_THREADS);
 
         /* Load V[kv_id] into single-buffered V_smem */
         global_to_shared_swizzle<BLOCK_KV, DIM, DMA_THREADS>(
@@ -605,11 +607,6 @@ void flash_attention_kernel_ws(
     const int max_kv_iter = is_causal
         ? min(num_kv_iter, cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
         : num_kv_iter;
-
-    /* Initialize K_EMPTY and V_EMPTY barriers so DMA can start immediately.
-     * All 160 threads arrive at K_EMPTY and V_EMPTY before the warp split. */
-    bar_arrive(BAR_K_EMPTY, BAR_THREADS);
-    bar_arrive(BAR_V_EMPTY, BAR_THREADS);
 
     /* ---- Warp split ---- */
     if (warp_id == 0) {

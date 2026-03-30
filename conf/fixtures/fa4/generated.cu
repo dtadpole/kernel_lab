@@ -307,15 +307,20 @@ void flash_attention_kernel(
             /* ---- QK: S = Q[mma_id_q] @ K^T ---- */
             float S_local[BLOCK_KV / MMA_N][4] = {};
 
-            for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
-                for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
-                    uint32_t Q_frag[4];
-                    {
-                        uint32_t qaddr = Q_smem_thread;
-                        qaddr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);
-                        qaddr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
-                        ldmatrix_x4(Q_frag, qaddr);
-                    }
+            /* Iterate over d-dimension first, loading Q once per d-step
+             * and reusing it across all mma_id_kv. This reduces Q ldmatrix
+             * count from (BLOCK_KV/MMA_N * DIM/MMA_K) to (DIM/MMA_K). */
+            #pragma unroll
+            for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
+                uint32_t Q_frag[4];
+                {
+                    uint32_t qaddr = Q_smem_thread;
+                    qaddr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);
+                    qaddr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
+                    ldmatrix_x4(Q_frag, qaddr);
+                }
+                #pragma unroll
+                for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
                     uint32_t K_frag[2];
                     {
                         uint32_t kaddr = K_base;
@@ -325,9 +330,12 @@ void flash_attention_kernel(
                     }
                     mma_m16n8k16(Q_frag, K_frag, S_local[mma_id_kv]);
                 }
+            }
 
             /* ---- Softmax scale ---- */
+            #pragma unroll
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
+                #pragma unroll
                 for (int reg_id = 0; reg_id < 4; reg_id++)
                     S_local[mma_id_kv][reg_id] *= softmax_scale;
 
@@ -385,6 +393,7 @@ void flash_attention_kernel(
             float rescale[2];
             rescale[0] = __expf(rowmax[mma_id_q][0] - this_rowmax[0]);
             rescale[1] = __expf(rowmax[mma_id_q][1] - this_rowmax[1]);
+            #pragma unroll
             for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
                 O_rmem[mma_id_q][mma_id_d][0] *= rescale[0];
                 O_rmem[mma_id_q][mma_id_d][1] *= rescale[0];
@@ -397,6 +406,7 @@ void flash_attention_kernel(
 
             /* Row sum-exp + pack S -> P */
             float this_rowsumexp[2];
+            #pragma unroll
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
                 float *regs = S_local[mma_id_kv];
                 regs[0] = __expf(regs[0] - rowmax[mma_id_q][0]);
@@ -454,25 +464,30 @@ void flash_attention_kernel(
         __syncthreads();
 
         /* O += P @ V  [BLOCK_Q, DIM]
-         * On-the-fly V loading: load 2-reg V fragment per (mma_kv, mma_d)
-         * step, consume it immediately in MMA. No V_rmem preload. */
-        for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
-            for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++)
-                for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K;
-                     mma_id_kv++) {
-                    uint32_t V_frag[2];
-                    uint32_t addr = V_smem_thread;
-                    addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);
-                    addr ^= mma_id_d * MMA_N * sizeof(nv_bfloat16);
-                    ldmatrix_x2_trans(V_frag, addr);
+         * Load V once per (mma_kv, mma_d) step, reuse across mma_id_q.
+         * Loop order: mma_kv outer (P changes), mma_d middle (V changes),
+         * mma_id_q inner (reuses both V_frag and P_rmem[mma_id_q]). */
+        #pragma unroll
+        for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
+            #pragma unroll
+            for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
+                uint32_t V_frag[2];
+                uint32_t addr = V_smem_thread;
+                addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);
+                addr ^= mma_id_d * MMA_N * sizeof(nv_bfloat16);
+                ldmatrix_x2_trans(V_frag, addr);
+                #pragma unroll
+                for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
                     mma_m16n8k16(P_rmem[mma_id_q][mma_id_kv],
                                  V_frag,
                                  O_rmem[mma_id_q][mma_id_d]);
-                }
+            }
     }
 
     /* ---- Write O to global memory (divide by softmax denominator) ---- */
+    #pragma unroll
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
+        #pragma unroll
         for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
             const int row = warp_id * WARP_Q + mma_id_q * MMA_M + (lane_id / 4);
             const int col = mma_id_d * MMA_N + (lane_id % 4) * 2;

@@ -117,3 +117,100 @@ class TestExtractSections:
         content = by_id["programming-model"]["content"]
         assert "<table>" in content
         assert "<th>" in content
+
+
+LARGE_SECTION_HTML = """\
+<!DOCTYPE html>
+<html><body>
+<section id="big-section">
+  <h1>Big Section</h1>
+  {paragraphs}
+</section>
+</body></html>
+""".format(paragraphs="".join(f"<p>Paragraph {i} with enough words to take up tokens. " * 8 + "</p>" for i in range(30)))
+
+TINY_SECTIONS_HTML = """\
+<!DOCTYPE html>
+<html><body>
+<section id="parent">
+  <h1>Parent</h1>
+  <p>Parent content.</p>
+  <section id="tiny-a">
+    <h2>Tiny A</h2>
+    <p>Short.</p>
+  </section>
+  <section id="tiny-b">
+    <h2>Tiny B</h2>
+    <p>Also short.</p>
+  </section>
+  <section id="normal">
+    <h2>Normal Section</h2>
+    <p>This section has enough content to stand alone with many words repeated several times to ensure it exceeds the minimum token threshold for chunking purposes in our system.</p>
+  </section>
+</section>
+</body></html>
+"""
+
+
+class TestChunkSections:
+    def test_large_section_is_split(self, enc):
+        from doc_retrieval.html_parser import parse_html_doc
+
+        toc, sections, chunks = parse_html_doc(
+            LARGE_SECTION_HTML, "test-doc",
+            "https://example.com/test-doc/index.html", enc,
+            max_tokens=512, min_tokens=128, overlap_tokens=64,
+        )
+        big_chunks = [c for c in chunks if c["section_id"] == "big-section"]
+        assert len(big_chunks) > 1
+        assert all(c["section_id"] == "big-section" for c in big_chunks)
+
+    def test_tiny_sections_merged(self, enc):
+        from doc_retrieval.html_parser import parse_html_doc
+
+        toc, sections, chunks = parse_html_doc(
+            TINY_SECTIONS_HTML, "test-doc",
+            "https://example.com/test-doc/index.html", enc,
+            max_tokens=512, min_tokens=128, overlap_tokens=64,
+        )
+        chunk_texts = " ".join(c["text"] for c in chunks)
+        assert "Tiny A" in chunk_texts
+        assert "Tiny B" in chunk_texts
+
+    def test_toc_output(self, enc):
+        from doc_retrieval.html_parser import parse_html_doc
+
+        toc, sections, chunks = parse_html_doc(
+            FIXTURE_HTML, "test-doc",
+            "https://example.com/test-doc/index.html", enc,
+        )
+        assert len(toc) == 6
+        by_id = {t["section_id"]: t for t in toc}
+        assert "children" in by_id["overview"]
+        assert by_id["overview"]["parent_section_id"] is None
+
+    def test_sections_output(self, enc):
+        from doc_retrieval.html_parser import parse_html_doc
+
+        toc, sections, chunks = parse_html_doc(
+            FIXTURE_HTML, "test-doc",
+            "https://example.com/test-doc/index.html", enc,
+        )
+        assert len(sections) > 0
+        sec = next(s for s in sections if s["section_id"] == "introduction")
+        assert "content" in sec
+        assert "token_count" in sec
+        assert sec["token_count"] > 0
+
+    def test_chunks_have_section_id(self, enc):
+        from doc_retrieval.html_parser import parse_html_doc
+
+        toc, sections, chunks = parse_html_doc(
+            FIXTURE_HTML, "test-doc",
+            "https://example.com/test-doc/index.html", enc,
+        )
+        for chunk in chunks:
+            assert "section_id" in chunk
+            assert "chunk_id" in chunk
+            assert "doc_id" in chunk
+            assert chunk["doc_id"] == "test-doc"

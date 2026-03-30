@@ -146,3 +146,221 @@ def extract_sections(
                 _walk(top_section, None, [])
 
     return results
+
+
+_BLOCK_TAGS = frozenset({
+    "p", "pre", "table", "ul", "ol", "dl", "blockquote", "div",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+})
+
+
+def _split_html_at_paragraphs(
+    html_content: str,
+    max_tokens: int,
+    overlap_tokens: int,
+    enc,
+) -> list[str]:
+    """Split HTML content at block element boundaries respecting token limits.
+
+    Tries top-level children first; falls back to all block-level descendants
+    when the top level has only one element (e.g. a single wrapping tag).
+    """
+    soup = BeautifulSoup(html_content, "html.parser")
+    top_elements = [str(el) for el in soup.children if isinstance(el, Tag) or str(el).strip()]
+    top_elements = [e for e in top_elements if e.strip()]
+
+    if not top_elements:
+        return [html_content] if html_content.strip() else []
+
+    # If the entire content is wrapped in a single top-level element, flatten
+    # to block-level descendants so we can split at meaningful boundaries.
+    if len(top_elements) == 1:
+        block_tags = soup.find_all(_BLOCK_TAGS)
+        if len(block_tags) > 1:
+            elements = [str(t) for t in block_tags if str(t).strip()]
+        else:
+            elements = top_elements
+    else:
+        elements = top_elements
+
+    if not elements:
+        return [html_content] if html_content.strip() else []
+
+    chunks = []
+    current = []
+    current_tokens = 0
+
+    for elem in elements:
+        elem_tokens = len(enc.encode(elem))
+        if current_tokens + elem_tokens > max_tokens and current:
+            chunks.append("".join(current))
+            overlap = []
+            overlap_tok = 0
+            for prev in reversed(current):
+                pt = len(enc.encode(prev))
+                if overlap_tok + pt > overlap_tokens:
+                    break
+                overlap.insert(0, prev)
+                overlap_tok += pt
+            current = overlap
+            current_tokens = overlap_tok
+        current.append(elem)
+        current_tokens += elem_tokens
+
+    if current:
+        chunks.append("".join(current))
+
+    return chunks
+
+
+def parse_html_doc(
+    html: str,
+    doc_id: str,
+    base_url: str,
+    enc,
+    max_tokens: int = 512,
+    min_tokens: int = 128,
+    overlap_tokens: int = 64,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Parse Sphinx HTML into TOC entries, sections, and chunks.
+
+    Returns:
+        Tuple of (toc_entries, sections, chunks).
+    """
+    all_sections = extract_sections(html, doc_id, base_url)
+
+    # --- TOC entries ---
+    toc_entries = []
+    for sec in all_sections:
+        toc_entries.append({
+            "doc_id": sec["doc_id"],
+            "section_id": sec["section_id"],
+            "title": sec["title"],
+            "heading_level": sec["heading_level"],
+            "parent_section_id": sec["parent_section_id"],
+            "children": sec["children"],
+            "deep_link": sec["deep_link"],
+        })
+
+    # --- Sections (full content for reading layer) ---
+    section_entries = []
+    for sec in all_sections:
+        token_count = len(enc.encode(sec["content"])) if sec["content"] else 0
+        section_entries.append({
+            "doc_id": sec["doc_id"],
+            "section_id": sec["section_id"],
+            "title": sec["title"],
+            "heading_level": sec["heading_level"],
+            "heading_path": sec["heading_path"],
+            "content": sec["content"],
+            "token_count": token_count,
+            "deep_link": sec["deep_link"],
+        })
+
+    # --- Chunks (search layer) ---
+    chunks: list[dict] = []
+    chunk_index = 0
+
+    pending_merge: list[dict] = []
+    pending_tokens = 0
+
+    def _flush_pending():
+        nonlocal chunk_index, pending_merge, pending_tokens
+        if not pending_merge:
+            return
+        first = pending_merge[0]
+        merged_content = " ".join(
+            f"<h{s['heading_level']}>{s['title']}</h{s['heading_level']}> {s['content']}"
+            if s["content"] else f"<h{s['heading_level']}>{s['title']}</h{s['heading_level']}>"
+            for s in pending_merge
+        )
+        section_path = " > ".join(first["heading_path"])
+
+        if pending_tokens <= max_tokens:
+            chunk_id = hashlib.sha256(
+                f"{doc_id}:{chunk_index}:{merged_content[:100]}".encode()
+            ).hexdigest()[:16]
+            chunks.append({
+                "chunk_id": chunk_id,
+                "doc_id": doc_id,
+                "section_id": first["section_id"],
+                "source_url": first["deep_link"],
+                "title": first["title"],
+                "section_path": section_path,
+                "chunk_index": chunk_index,
+                "text": merged_content,
+            })
+            chunk_index += 1
+        else:
+            parts = _split_html_at_paragraphs(merged_content, max_tokens, overlap_tokens, enc)
+            for part in parts:
+                chunk_id = hashlib.sha256(
+                    f"{doc_id}:{chunk_index}:{part[:100]}".encode()
+                ).hexdigest()[:16]
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "doc_id": doc_id,
+                    "section_id": first["section_id"],
+                    "source_url": first["deep_link"],
+                    "title": first["title"],
+                    "section_path": section_path,
+                    "chunk_index": chunk_index,
+                    "text": part,
+                })
+                chunk_index += 1
+
+        pending_merge = []
+        pending_tokens = 0
+
+    for sec in all_sections:
+        content = sec["content"]
+        if not content.strip():
+            continue
+        token_count = len(enc.encode(content))
+
+        if token_count < min_tokens:
+            pending_merge.append(sec)
+            pending_tokens += token_count
+            if pending_tokens >= min_tokens:
+                _flush_pending()
+        else:
+            _flush_pending()
+
+            if token_count <= max_tokens:
+                section_path = " > ".join(sec["heading_path"])
+                chunk_id = hashlib.sha256(
+                    f"{doc_id}:{chunk_index}:{content[:100]}".encode()
+                ).hexdigest()[:16]
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "doc_id": doc_id,
+                    "section_id": sec["section_id"],
+                    "source_url": sec["deep_link"],
+                    "title": sec["title"],
+                    "section_path": " > ".join(sec["heading_path"]),
+                    "chunk_index": chunk_index,
+                    "text": content,
+                })
+                chunk_index += 1
+            else:
+                section_path = " > ".join(sec["heading_path"])
+                parts = _split_html_at_paragraphs(content, max_tokens, overlap_tokens, enc)
+                for part in parts:
+                    chunk_id = hashlib.sha256(
+                        f"{doc_id}:{chunk_index}:{part[:100]}".encode()
+                    ).hexdigest()[:16]
+                    chunks.append({
+                        "chunk_id": chunk_id,
+                        "doc_id": doc_id,
+                        "section_id": sec["section_id"],
+                        "source_url": sec["deep_link"],
+                        "title": sec["title"],
+                        "section_path": section_path,
+                        "chunk_index": chunk_index,
+                        "text": part,
+                    })
+                    chunk_index += 1
+
+    _flush_pending()
+
+    return toc_entries, section_entries, chunks

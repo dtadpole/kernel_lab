@@ -231,6 +231,7 @@ void flash_attention_kernel(
     }
 
     const float softmax_scale = rsqrtf(static_cast<float>(DIM));
+    const float softmax_scale_log2 = softmax_scale * 1.4426950408889634f;
 
     float rowmax[WARP_Q / MMA_M][2];
     float rowsumexp[WARP_Q / MMA_M][2] = {};
@@ -341,7 +342,7 @@ void flash_attention_kernel(
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
                 #pragma unroll
                 for (int reg_id = 0; reg_id < 4; reg_id++)
-                    S_local[mma_id_kv][reg_id] *= softmax_scale;
+                    S_local[mma_id_kv][reg_id] *= softmax_scale_log2;
 
             /* ---- Causal mask ---- */
             if (is_causal) {
@@ -395,8 +396,8 @@ void flash_attention_kernel(
 
             /* Rescale previous O accumulator */
             float rescale[2];
-            rescale[0] = __expf(rowmax[mma_id_q][0] - this_rowmax[0]);
-            rescale[1] = __expf(rowmax[mma_id_q][1] - this_rowmax[1]);
+            rescale[0] = exp2f(rowmax[mma_id_q][0] - this_rowmax[0]);
+            rescale[1] = exp2f(rowmax[mma_id_q][1] - this_rowmax[1]);
             #pragma unroll
             for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
                 O_rmem[mma_id_q][mma_id_d][0] *= rescale[0];
@@ -413,10 +414,10 @@ void flash_attention_kernel(
             #pragma unroll
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
                 float *regs = S_local[mma_id_kv];
-                regs[0] = __expf(regs[0] - rowmax[mma_id_q][0]);
-                regs[1] = __expf(regs[1] - rowmax[mma_id_q][0]);
-                regs[2] = __expf(regs[2] - rowmax[mma_id_q][1]);
-                regs[3] = __expf(regs[3] - rowmax[mma_id_q][1]);
+                regs[0] = exp2f(regs[0] - rowmax[mma_id_q][0]);
+                regs[1] = exp2f(regs[1] - rowmax[mma_id_q][0]);
+                regs[2] = exp2f(regs[2] - rowmax[mma_id_q][1]);
+                regs[3] = exp2f(regs[3] - rowmax[mma_id_q][1]);
 
                 if (mma_id_kv == 0) {
                     this_rowsumexp[0] = regs[0] + regs[1];

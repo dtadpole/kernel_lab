@@ -97,8 +97,9 @@ CONFIG_JSON    ?= $(if $(CONFIG),$(shell $(VENV_PYTHON) -c "import json,sys;d=js
 # ---------------------------------------------------------------------------
 # Input files — derived from KERNEL
 # ---------------------------------------------------------------------------
-REFERENCE_PY  ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)/reference.py
-GENERATED_CU  ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)/generated.cu
+FIXTURE_DIR   ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)
+REFERENCE_PY  ?= $(FIXTURE_DIR)/reference.py
+GENERATED_CU  ?= $(FIXTURE_DIR)/generated.cu
 
 # ---------------------------------------------------------------------------
 # Tuning parameters

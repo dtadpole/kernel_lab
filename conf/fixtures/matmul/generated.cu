@@ -20,8 +20,11 @@
 #include <mma.h>
 #include <cuda_bf16.h>
 
-#define N_STAGES 3
+#define N_STAGES 4
 #define SMEM_ROWS 64    /* SMEM rows per matrix per stage (K-tile=32) */
+
+/* Dynamic SMEM for 4-stage pipeline (64 KB) */
+static const size_t GEMM_SMEM_BYTES = 2u * N_STAGES * SMEM_ROWS * 8 * sizeof(uint4);
 
 
 /* -------------------------------------------------------------------------
@@ -90,15 +93,17 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
  *
  * Uses static shared memory (48 KB) to allow 2 blocks per SM.
  * ------------------------------------------------------------------------- */
-__launch_bounds__(256, 2)
+__launch_bounds__(256)
 __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
                                 __nv_bfloat16 *C, int M, int N, int K,
                                 int totalTiles, int nTilesN) {
     /* Static shared memory: As followed by Bs
      * Each: N_STAGES * 64 rows × 8 cols × sizeof(uint4) = 3 * 64 * 8 * 16 = 24,576 bytes
      * Total: 49,152 bytes (48 KB) — fits in static SMEM limit */
-    __shared__ uint4 As[N_STAGES * SMEM_ROWS][8];
-    __shared__ uint4 Bs[N_STAGES * SMEM_ROWS][8];
+    extern __shared__ char smem_buf[];
+    uint4 (*As)[8] = reinterpret_cast<uint4(*)[8]>(smem_buf);
+    uint4 (*Bs)[8] = reinterpret_cast<uint4(*)[8]>(
+        smem_buf + N_STAGES * SMEM_ROWS * 8 * sizeof(uint4));
 
     uint4 (*aLoadPtr)[8];
     uint4 (*bLoadPtr)[8];
@@ -299,10 +304,19 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     int nTilesN = N / 128;
     int totalTiles = nTilesM * nTilesN;
 
+    /* Configure dynamic SMEM for 4-stage pipeline (once) */
+    static bool s_smem_configured = false;
+    if (!s_smem_configured) {
+        cudaFuncSetAttribute(mma_matmul_bf16,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)GEMM_SMEM_BYTES);
+        s_smem_configured = true;
+    }
+
     dim3 threads(16, 16);
     int gridSize = totalTiles < 188 ? totalTiles : 188;
     dim3 grid(gridSize);
-    mma_matmul_bf16<<<grid, threads, 0, stream>>>(
+    mma_matmul_bf16<<<grid, threads, GEMM_SMEM_BYTES, stream>>>(
         A, B, C, M, N, K, totalTiles, nTilesN);
 
     return 0;

@@ -237,7 +237,6 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
  * ------------------------------------------------------------------------- */
 static int s_M = 0, s_N = 0, s_K = 0;
 static __nv_bfloat16 *s_Bt = nullptr;
-static const __nv_bfloat16 *s_B_cached = nullptr; /* skip transpose on repeated calls */
 
 static void ensure_shape(int n) {
     if (s_M > 0) return;
@@ -272,13 +271,10 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     if (s_Bt == nullptr)
         cudaMalloc(&s_Bt, (size_t)N * K * sizeof(__nv_bfloat16));
 
-    /* Transpose B(K×N) → B_t(N×K) only when B pointer changes */
-    if (B != s_B_cached) {
-        dim3 transposeBlock(32, 8);
-        dim3 transposeGrid((N + 31) / 32, (K + 31) / 32);
-        transpose_bf16<<<transposeGrid, transposeBlock, 0, stream>>>(B, s_Bt, K, N);
-        s_B_cached = B;
-    }
+    /* Transpose B(K×N) → B_t(N×K) every call (no caching) */
+    dim3 transposeBlock(32, 8);
+    dim3 transposeGrid((N + 31) / 32, (K + 31) / 32);
+    transpose_bf16<<<transposeGrid, transposeBlock, 0, stream>>>(B, s_Bt, K, N);
 
     /* GEMM over A(M×K) and B_t(N×K) */
     dim3 threads(16, 16);

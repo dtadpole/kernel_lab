@@ -93,7 +93,7 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
  *
  * Uses static shared memory (48 KB) to allow 2 blocks per SM.
  * ------------------------------------------------------------------------- */
-__launch_bounds__(256)
+__launch_bounds__(256, 1)
 __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
                                 __nv_bfloat16 *C, int M, int N, int K,
                                 int totalTiles, int nTilesN) {

@@ -1,6 +1,7 @@
 /*
  * High-performance BF16 matrix multiplication kernel (MMA tensor core).
  * K-tile=64 + ldmatrix.trans: doubled K-tile, no transpose kernel.
+ * Persistent kernel with swizzled 4x4 super-tile scheduling.
  *
  * Computes C = A @ B where A is M×K row-major, B is K×N row-major,
  * C is M×N row-major.  All pointers are __nv_bfloat16; MMA accumulates
@@ -82,6 +83,8 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
 
 /* -------------------------------------------------------------------------
  * Main GEMM kernel: 128×128 block, 4×4 MMA tiling, K-tile=64, 3-stage pipe
+ * Persistent kernel: each CTA processes multiple output tiles via tile loop.
+ * Swizzled 4×4 super-tile scheduling for L2 locality.
  *
  * A   is M×K row-major (__nv_bfloat16)  — loaded via cp.async, ldmatrix.x4
  * B   is K×N row-major (__nv_bfloat16)  — loaded via cp.async along N,
@@ -92,7 +95,8 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
  * ------------------------------------------------------------------------- */
 __launch_bounds__(16 * 16)
 __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
-                                __nv_bfloat16 *C, int M, int N, int K) {
+                                __nv_bfloat16 *C, int M, int N, int K,
+                                int totalTiles, int nTilesN) {
     /* Dynamic shared memory: As followed by Bs */
     extern __shared__ char smem_buf[];
     uint4 (*As)[8] = reinterpret_cast<uint4(*)[8]>(smem_buf);
@@ -104,10 +108,6 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
     uint4 (*aStorePtr)[8];
     uint4 (*bStorePtr)[8];
 
-    int blockRowStart = blockIdx.y * 128;
-    int blockColStart = blockIdx.x * 128;
-    const uint4 *globalTileA = reinterpret_cast<const uint4 *>(A + blockRowStart * K);
-
     int threadID = threadIdx.y * blockDim.x + threadIdx.x;
     int warpID   = threadID / 32;
     int laneID   = threadID % 32;
@@ -116,7 +116,7 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
     unsigned aReg[4][8];
     unsigned bReg[4][4];
-    float dReg[4][4][4] = {0.f};
+    float dReg[4][4][4];
 
     /* A store indices (K-contiguous in SMEM) */
     int storeRow = warpID * 4 + laneID / 8;
@@ -136,125 +136,154 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
     int K8 = K / 8;
     int N8 = N / 8;
-
-    /* A: row-major M×K, load K-contiguous uint4 */
-    const uint4 *aGlobalAddress = globalTileA + (warpID * 8 + laneID / 4) * K8 + laneID % 4;
-
-    /* B: row-major K×N, load N-contiguous uint4.
-     * Thread mapping: k_local = warpID*2 + laneID/16 (0..15),
-     *                 n_local = laneID%16 (0..15).
-     * Per stage: 4 cp.async calls cover 64 K-rows (4 × 16 K-rows). */
-    const uint4 *globalB = reinterpret_cast<const uint4 *>(B);
-    const uint4 *bGlobalBase = globalB
-        + (warpID * 2 + laneID / 16) * N8
-        + blockColStart / 8 + laneID % 16;
-
     int numKBlocks = K / 64;
     int kStartMax  = (numKBlocks - 1) * 8;   /* max kStart in uint4 units */
 
-    /* ---- PRELUDE: load first (N_STAGES - 1) tiles ---- */
-    for (int nStage = 0; nStage < N_STAGES - 1; nStage++) {
-        int kStart = nStage * 8;
-        aStorePtr = As + SMEM_ROWS * nStage;
-        bStorePtr = Bs + SMEM_ROWS * nStage;
+    const uint4 *globalB = reinterpret_cast<const uint4 *>(B);
 
-        /* A: first K-half (k=0..31), two M-groups */
-        cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
-        cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-        /* A: second K-half (k=32..63) */
-        cp_async(aStorePtr[storeRow + 64] + storeCol, aGlobalAddress + kStart + 4);
-        cp_async(aStorePtr[storeRow + 96] + storeCol, aGlobalAddress + 64 * K8 + kStart + 4);
+    /* ---- Persistent tile loop with swizzled scheduling ---- */
+    int nTilesM = totalTiles / nTilesN;
+    int ctaId = blockIdx.x;
+    for (int tileIdx = ctaId; tileIdx < totalTiles; tileIdx += gridDim.x) {
+        int tile_m, tile_n;
+        /* Swizzled tile mapping (4×4 super-tiles) — only when grid is large enough */
+        if (nTilesN >= 4 && nTilesM >= 4) {
+            int stile_n = 4, stile_m = 4;
+            int nSuperN = nTilesN / stile_n;
+            int superIdx = tileIdx / (stile_m * stile_n);
+            int localIdx = tileIdx % (stile_m * stile_n);
+            tile_m = (superIdx / nSuperN) * stile_m + localIdx / stile_n;
+            tile_n = (superIdx % nSuperN) * stile_n + localIdx % stile_n;
+        } else {
+            /* Fallback: simple row-major tile order */
+            tile_m = tileIdx / nTilesN;
+            tile_n = tileIdx % nTilesN;
+        }
 
-        /* B: 4 groups of 16 K-rows each (kStart*8 is BF16 K-row offset) */
-        cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
-        cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
-        cp_async(bStorePtr[bStoreRow + 64] + bStoreCol, bGlobalBase + (kStart * 8 + 32) * N8);
-        cp_async(bStorePtr[bStoreRow + 96] + bStoreCol, bGlobalBase + (kStart * 8 + 48) * N8);
+        int blockRowStart = tile_m * 128;
+        int blockColStart = tile_n * 128;
 
-        asm volatile("cp.async.commit_group;\n" ::);
-    }
-
-    /* ---- MAIN LOOP OVER K BLOCKS (K-tile = 64) ---- */
-    for (int nStage = 0; nStage < numKBlocks; nStage++) {
-        int kStart = (N_STAGES - 1 + nStage) * 8;
-        aStorePtr = As + SMEM_ROWS * ((nStage + N_STAGES - 1) % N_STAGES);
-        bStorePtr = Bs + SMEM_ROWS * ((nStage + N_STAGES - 1) % N_STAGES);
-        aLoadPtr  = As + SMEM_ROWS * (nStage % N_STAGES);
-        bLoadPtr  = Bs + SMEM_ROWS * (nStage % N_STAGES);
-
-        asm volatile("cp.async.wait_group %0;\n" :: "n"(N_STAGES - 2));
+        /* Drain any pending cp.async groups from previous tile */
+        asm volatile("cp.async.wait_all;\n" ::);
         __syncthreads();
 
-        /* ---- Load FIRST K-half (k=0..31) from SMEM to registers ---- */
-        /* A: ldmatrix.x4 (non-transposed) */
-        for (int m = 0; m < 4; m++) {
-            load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA] + loadColA);
-            load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA] + (loadColA ^ 2));
-        }
-        /* B: ldmatrix.x2.trans (first 32 K-rows → SMEM rows 0..63) */
-        for (int n = 0; n < 4; n++) {
-            int loadColB = loadColB_base ^ n;
-            load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB     ] + loadColB);
-            load_matrix_x2_trans(bReg[n] + 2, bLoadPtr[loadRowB + 32] + loadColB);
+        /* Reset accumulator for this tile */
+        for (int m = 0; m < 4; m++)
+            for (int n = 0; n < 4; n++)
+                for (int k = 0; k < 4; k++)
+                    dReg[m][n][k] = 0.f;
+
+        /* Recompute tile-dependent global addresses */
+        const uint4 *globalTileA = reinterpret_cast<const uint4 *>(A + blockRowStart * K);
+        const uint4 *aGlobalAddress = globalTileA + (warpID * 8 + laneID / 4) * K8 + laneID % 4;
+        const uint4 *bGlobalBase = globalB
+            + (warpID * 2 + laneID / 16) * N8
+            + blockColStart / 8 + laneID % 16;
+
+        /* ---- PRELUDE: load first (N_STAGES - 1) tiles ---- */
+        for (int nStage = 0; nStage < N_STAGES - 1; nStage++) {
+            int kStart = nStage * 8;
+            aStorePtr = As + SMEM_ROWS * nStage;
+            bStorePtr = Bs + SMEM_ROWS * nStage;
+
+            /* A: first K-half (k=0..31), two M-groups */
+            cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
+            cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
+            /* A: second K-half (k=32..63) */
+            cp_async(aStorePtr[storeRow + 64] + storeCol, aGlobalAddress + kStart + 4);
+            cp_async(aStorePtr[storeRow + 96] + storeCol, aGlobalAddress + 64 * K8 + kStart + 4);
+
+            /* B: 4 groups of 16 K-rows each (kStart*8 is BF16 K-row offset) */
+            cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
+            cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
+            cp_async(bStorePtr[bStoreRow + 64] + bStoreCol, bGlobalBase + (kStart * 8 + 32) * N8);
+            cp_async(bStorePtr[bStoreRow + 96] + bStoreCol, bGlobalBase + (kStart * 8 + 48) * N8);
+
+            asm volatile("cp.async.commit_group;\n" ::);
         }
 
-        /* ---- Issue cp.async for NEXT pipeline stage (overlaps with MMA) ---- */
-        kStart = (kStart > kStartMax) ? kStartMax : kStart;
-        cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
-        cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-        cp_async(aStorePtr[storeRow + 64] + storeCol, aGlobalAddress + kStart + 4);
-        cp_async(aStorePtr[storeRow + 96] + storeCol, aGlobalAddress + 64 * K8 + kStart + 4);
-        cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
-        cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
-        cp_async(bStorePtr[bStoreRow + 64] + bStoreCol, bGlobalBase + (kStart * 8 + 32) * N8);
-        cp_async(bStorePtr[bStoreRow + 96] + bStoreCol, bGlobalBase + (kStart * 8 + 48) * N8);
-        asm volatile("cp.async.commit_group;\n" ::);
+        /* ---- MAIN LOOP OVER K BLOCKS (K-tile = 64) ---- */
+        for (int nStage = 0; nStage < numKBlocks; nStage++) {
+            int kStart = (N_STAGES - 1 + nStage) * 8;
+            aStorePtr = As + SMEM_ROWS * ((nStage + N_STAGES - 1) % N_STAGES);
+            bStorePtr = Bs + SMEM_ROWS * ((nStage + N_STAGES - 1) % N_STAGES);
+            aLoadPtr  = As + SMEM_ROWS * (nStage % N_STAGES);
+            bLoadPtr  = Bs + SMEM_ROWS * (nStage % N_STAGES);
 
-        /* ---- MMA FIRST K-half (k=0..31): 32 HMMA instructions ---- */
-        for (int m = 0; m < 4; m++) {
+            asm volatile("cp.async.wait_group %0;\n" :: "n"(N_STAGES - 2));
+            __syncthreads();
+
+            /* ---- Load FIRST K-half (k=0..31) from SMEM to registers ---- */
+            /* A: ldmatrix.x4 (non-transposed) */
+            for (int m = 0; m < 4; m++) {
+                load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA] + loadColA);
+                load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA] + (loadColA ^ 2));
+            }
+            /* B: ldmatrix.x2.trans (first 32 K-rows → SMEM rows 0..63) */
             for (int n = 0; n < 4; n++) {
-                mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
-                mma_m16n8k16(aReg[m] + 4, bReg[n] + 2, dReg[m][n], dReg[m][n]);
+                int loadColB = loadColB_base ^ n;
+                load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB     ] + loadColB);
+                load_matrix_x2_trans(bReg[n] + 2, bLoadPtr[loadRowB + 32] + loadColB);
+            }
+
+            /* ---- Issue cp.async for NEXT pipeline stage (overlaps with MMA) ---- */
+            kStart = (kStart > kStartMax) ? kStartMax : kStart;
+            cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
+            cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
+            cp_async(aStorePtr[storeRow + 64] + storeCol, aGlobalAddress + kStart + 4);
+            cp_async(aStorePtr[storeRow + 96] + storeCol, aGlobalAddress + 64 * K8 + kStart + 4);
+            cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
+            cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
+            cp_async(bStorePtr[bStoreRow + 64] + bStoreCol, bGlobalBase + (kStart * 8 + 32) * N8);
+            cp_async(bStorePtr[bStoreRow + 96] + bStoreCol, bGlobalBase + (kStart * 8 + 48) * N8);
+            asm volatile("cp.async.commit_group;\n" ::);
+
+            /* ---- MMA FIRST K-half (k=0..31): 32 HMMA instructions ---- */
+            for (int m = 0; m < 4; m++) {
+                for (int n = 0; n < 4; n++) {
+                    mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
+                    mma_m16n8k16(aReg[m] + 4, bReg[n] + 2, dReg[m][n], dReg[m][n]);
+                }
+            }
+
+            /* ---- Load SECOND K-half (k=32..63) from SMEM to registers ---- */
+            /* A: +64 offset for second K-half */
+            for (int m = 0; m < 4; m++) {
+                load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA + 64] + loadColA);
+                load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA + 64] + (loadColA ^ 2));
+            }
+            /* B: +64 offset for second K-half (SMEM rows 64..127) */
+            for (int n = 0; n < 4; n++) {
+                int loadColB = loadColB_base ^ n;
+                load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB + 64] + loadColB);
+                load_matrix_x2_trans(bReg[n] + 2, bLoadPtr[loadRowB + 96] + loadColB);
+            }
+
+            /* ---- MMA SECOND K-half (k=32..63): 32 HMMA instructions ---- */
+            for (int m = 0; m < 4; m++) {
+                for (int n = 0; n < 4; n++) {
+                    mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
+                    mma_m16n8k16(aReg[m] + 4, bReg[n] + 2, dReg[m][n], dReg[m][n]);
+                }
             }
         }
 
-        /* ---- Load SECOND K-half (k=32..63) from SMEM to registers ---- */
-        /* A: +64 offset for second K-half */
-        for (int m = 0; m < 4; m++) {
-            load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA + 64] + loadColA);
-            load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA + 64] + (loadColA ^ 2));
-        }
-        /* B: +64 offset for second K-half (SMEM rows 64..127) */
-        for (int n = 0; n < 4; n++) {
-            int loadColB = loadColB_base ^ n;
-            load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB + 64] + loadColB);
-            load_matrix_x2_trans(bReg[n] + 2, bLoadPtr[loadRowB + 96] + loadColB);
-        }
-
-        /* ---- MMA SECOND K-half (k=32..63): 32 HMMA instructions ---- */
+        /* ---- EPILOGUE: FP32 → BF16 store ---- */
+        int groupID     = laneID >> 2;
+        int groupLaneID = laneID & 3;
         for (int m = 0; m < 4; m++) {
             for (int n = 0; n < 4; n++) {
-                mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
-                mma_m16n8k16(aReg[m] + 4, bReg[n] + 2, dReg[m][n], dReg[m][n]);
+                int row0 = blockRowStart + m * 16 + 2 * warpOffsetA + groupID;
+                int col0 = blockColStart + n * 8  + 2 * warpOffsetB + 2 * groupLaneID;
+                __nv_bfloat162 packed0 = __floats2bfloat162_rn(dReg[m][n][0], dReg[m][n][1]);
+                *reinterpret_cast<__nv_bfloat162 *>(&C[row0 * N + col0]) = packed0;
+
+                int row1 = row0 + 8;
+                __nv_bfloat162 packed1 = __floats2bfloat162_rn(dReg[m][n][2], dReg[m][n][3]);
+                *reinterpret_cast<__nv_bfloat162 *>(&C[row1 * N + col0]) = packed1;
             }
         }
-    }
-
-    /* ---- EPILOGUE: FP32 → BF16 store ---- */
-    int groupID     = laneID >> 2;
-    int groupLaneID = laneID & 3;
-    for (int m = 0; m < 4; m++) {
-        for (int n = 0; n < 4; n++) {
-            int row0 = blockRowStart + m * 16 + 2 * warpOffsetA + groupID;
-            int col0 = blockColStart + n * 8  + 2 * warpOffsetB + 2 * groupLaneID;
-            __nv_bfloat162 packed0 = __floats2bfloat162_rn(dReg[m][n][0], dReg[m][n][1]);
-            *reinterpret_cast<__nv_bfloat162 *>(&C[row0 * N + col0]) = packed0;
-
-            int row1 = row0 + 8;
-            __nv_bfloat162 packed1 = __floats2bfloat162_rn(dReg[m][n][2], dReg[m][n][3]);
-            *reinterpret_cast<__nv_bfloat162 *>(&C[row1 * N + col0]) = packed1;
-        }
-    }
+    } /* end persistent tile loop */
 }
 
 /* -------------------------------------------------------------------------
@@ -263,6 +292,9 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
  * Launches the GEMM directly on A(M×K) and B(K×N).  No transpose needed:
  * B is loaded N-contiguous via cp.async, and ldmatrix.trans transposes
  * during the SMEM-to-register load.
+ *
+ * Persistent kernel: launches min(188, totalTiles) CTAs, each processing
+ * multiple output tiles via a tile loop with swizzled scheduling.
  * ------------------------------------------------------------------------- */
 static int s_M = 0, s_N = 0, s_K = 0;
 static bool s_smem_configured = false;
@@ -304,10 +336,16 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
         s_smem_configured = true;
     }
 
-    /* GEMM over A(M×K) and B(K×N) — no transpose needed */
+    /* Persistent kernel: compute tile counts and launch with limited CTAs */
+    int nTilesM = M / 128;
+    int nTilesN = N / 128;
+    int totalTiles = nTilesM * nTilesN;
+
     dim3 threads(16, 16);
-    dim3 grid(N / 128, M / 128);
-    mma_matmul_bf16<<<grid, threads, GEMM_SMEM_BYTES, stream>>>(A, B, C, M, N, K);
+    int gridSize = totalTiles < 188 ? totalTiles : 188;
+    dim3 grid(gridSize);
+    mma_matmul_bf16<<<grid, threads, GEMM_SMEM_BYTES, stream>>>(
+        A, B, C, M, N, K, totalTiles, nTilesN);
 
     return 0;
 }

@@ -241,6 +241,12 @@ def measure_reference(
         for _ in range(num_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
+            # Re-randomize inputs before each trial to prevent kernels from
+            # caching preprocessed results across calls (outside timed region)
+            for inp in inputs:
+                if isinstance(inp, torch.Tensor) and inp.is_floating_point():
+                    inp.normal_()
+            torch.cuda.synchronize(device=device)
             start_ev = torch.cuda.Event(enable_timing=True)
             end_ev = torch.cuda.Event(enable_timing=True)
             start_ev.record()
@@ -248,6 +254,15 @@ def measure_reference(
             end_ev.record()
             end_ev.synchronize()
             latencies_ms.append(start_ev.elapsed_time(end_ev))
+
+        # Restore deterministic inputs and run once more for correctness output
+        inputs = list(get_inputs(config))
+        inputs = [
+            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
+            for x in inputs
+        ]
+        last_output = model(*inputs)
+        torch.cuda.synchronize(device=device)
 
     if last_output is None:
         raise RuntimeError("reference contract did not produce an output")

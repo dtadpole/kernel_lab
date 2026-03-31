@@ -6,14 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `cuda_exec` is a FastAPI service for remote CUDA kernel compilation, evaluation, and profiling. It compiles generated CUDA kernels, compares them against Python reference implementations, and profiles performance — all behind a structured HTTP API designed for agent consumption.
 
+## Environment setup
+
+The venv at `cuda_exec/.venv` is managed with **uv**:
+```bash
+cd /home/centos/kernel_lab/cuda_exec
+uv venv .venv --python 3.12
+uv pip install torch pydantic fastapi 'uvicorn[standard]' nvidia-cutlass-dsl psutil ninja
+uv pip install 'flash-attn-4>=4.0.0b5' --no-build-isolation
+```
+
 ## Commands
 
 ### Run the service
 ```bash
 cd /home/centos/kernel_lab
-.venv/bin/python -m uvicorn cuda_exec.main:app --host 127.0.0.1 --port 8000
+cuda_exec/.venv/bin/python -m uvicorn cuda_exec.main:app --host 127.0.0.1 --port 8000
 ```
-The venv lives at `cuda_exec/.venv` and has `fastapi` + `uvicorn` installed from `requirements.txt`.
 
 ### Run integration tests
 ```bash

@@ -105,6 +105,27 @@ static void fill_arange(__nv_bfloat16* host_buf, int count) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Device kernel: fill buffer with pseudo-random BF16 values.         */
+/* Used to re-randomize inputs before each timed trial so that        */
+/* kernels cannot cache preprocessed results across calls.            */
+/* ------------------------------------------------------------------ */
+__global__ void fill_random_bf16(__nv_bfloat16* buf, int count,
+                                 unsigned int seed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    /* fast hash: Wang's 32-bit integer hash */
+    unsigned int h = (unsigned int)idx ^ seed;
+    h = (h ^ 61u) ^ (h >> 16);
+    h += (h << 3);
+    h ^= (h >> 4);
+    h *= 0x27d4eb2du;
+    h ^= (h >> 15);
+    /* map to [-0.5, 0.5) to keep values small (avoids fp overflow in matmul) */
+    float val = (float)(h & 0xFFFFu) / 65536.0f - 0.5f;
+    buf[idx] = __float2bfloat16(val);
+}
+
+/* ------------------------------------------------------------------ */
 /* JSON output (BF16 values converted to float for printing)          */
 /* ------------------------------------------------------------------ */
 static void print_json(const HarnessConfig* cfg,
@@ -258,7 +279,15 @@ int main() {
         }
     }
 
-    /* Timed trials with CUDA events */
+    /* Timed trials with CUDA events.
+     * Before each trial, allocate FRESH input buffers and fill with
+     * pseudo-random data.  This prevents kernels from caching
+     * preprocessed results (e.g. a transposed copy of B) across calls:
+     *   - New pointers break pointer-based caches
+     *   - New random data breaks content-based caches
+     * Both the allocation and randomization run OUTSIDE the timed region. */
+    const int rand_block = 256;
+    const int rand_grid = (cfg.input_size + rand_block - 1) / rand_block;
     std::vector<double> latencies;
     for (int i = 0; i < cfg.num_trials; i++) {
         cudaEvent_t start_ev, end_ev;
@@ -269,6 +298,17 @@ int main() {
         if (l2_flush_buf != nullptr) {
             cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
         }
+
+        /* Allocate fresh input buffers (new pointers break pointer caches) */
+        for (int j = 0; j < num_inputs; j++)
+            cudaFree(d_inputs[j]);
+        for (int j = 0; j < num_inputs; j++) {
+            cudaMalloc(&d_inputs[j], elem_bytes);
+            unsigned int seed = 0xCAFE0000u + (unsigned int)(i * num_inputs + j);
+            fill_random_bf16<<<rand_grid, rand_block, 0, stream>>>(
+                d_inputs[j], cfg.input_size, seed);
+        }
+        cudaStreamSynchronize(stream);
 
         cudaEventRecord(start_ev, stream);
         int rc = kernel_run(d_inputs.data(), num_inputs,
@@ -288,6 +328,26 @@ int main() {
 
         cudaEventDestroy(start_ev);
         cudaEventDestroy(end_ev);
+    }
+
+    /* Correctness pass: allocate fresh buffers with original deterministic
+     * (arange) data so the output matches what evaluate.py expects. */
+    for (int j = 0; j < num_inputs; j++)
+        cudaFree(d_inputs[j]);
+    for (int j = 0; j < num_inputs; j++) {
+        cudaMalloc(&d_inputs[j], elem_bytes);
+        cudaMemcpy(d_inputs[j], h_inputs[j].data(), elem_bytes,
+                   cudaMemcpyHostToDevice);
+    }
+    {
+        int rc = kernel_run(d_inputs.data(), num_inputs,
+                            d_outputs.data(), num_outputs,
+                            cfg.input_size, stream);
+        cudaStreamSynchronize(stream);
+        if (rc != 0) {
+            fprintf(stderr, "kernel_run correctness pass failed: rc=%d\n", rc);
+            return 6;
+        }
     }
 
     /* Copy outputs to host (BF16) */

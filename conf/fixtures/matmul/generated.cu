@@ -5,9 +5,8 @@
  * C is M×N row-major.  All pointers are __nv_bfloat16; MMA accumulates
  * in FP32, results are converted back to BF16 on store.
  *
- * B is read directly from K×N layout — NO separate transpose kernel.
- * Each thread gathers 8 K-consecutive BF16 from B (stride N), packs
- * into uint4, and writes to SMEM.  A uses cp.async (contiguous along K).
+ * B(K×N) is pre-transposed to B_t(N×K) in kernel_run() so that B loading
+ * uses the same contiguous-along-K cp.async path as A.
  *
  * kernel_run contract:
  *   extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
@@ -18,6 +17,7 @@
 #include <cuda_bf16.h>
 
 #define N_STAGES 3
+
 
 /* -------------------------------------------------------------------------
  * PTX helper: cp.async 16-byte global→shared copy
@@ -74,49 +74,53 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
 }
 
 /* -------------------------------------------------------------------------
- * Gather-load helper: read 8 K-consecutive BF16 from B (K×N row-major)
- * at column n, starting at row k_base.  Stride between K rows is N.
- * Packs result into a uint4 (matching the SMEM layout for ldmatrix).
- * ------------------------------------------------------------------------- */
-__forceinline__
-__device__ uint4 gather_b_k8(const __nv_bfloat16 *B, int k_base, int n, int N) {
-    uint4 packed;
-    __nv_bfloat16 *v = reinterpret_cast<__nv_bfloat16 *>(&packed);
-    #pragma unroll
-    for (int i = 0; i < 8; i++)
-        v[i] = __ldg(&B[(k_base + i) * N + n]);
-    return packed;
-}
-
-/* -------------------------------------------------------------------------
- * Store a B tile (128 N × 32 K) from original B (K×N) into shared memory
- * with the same permuted layout as if B were pre-transposed.
+ * Transpose kernel: B(K, N) row-major → B_t(N, K) row-major
  *
- * Each thread gathers 8 K-consecutive BF16 → pack → write uint4 to SMEM.
- * Two writes per thread cover the full 128 N tile (first 64 + second 64).
+ * Uses 32×32 tiled transpose with +1 SMEM padding to avoid bank conflicts.
+ * Block dim: (32, 8).  Each thread handles 4 rows of the 32-row tile.
+ * Grid dim: (ceil(N/32), ceil(K/32)).
  * ------------------------------------------------------------------------- */
-__forceinline__
-__device__ void load_b_tile_to_smem(
-    const __nv_bfloat16 *B, int N,
-    int blockColStart, int kBlock,
-    uint4 (*bStorePtr)[8],
-    int warpID, int laneID, int storeRow, int storeCol)
-{
-    /* Thread's assigned N and K positions (same mapping as transposed cp.async) */
-    int n_first  = blockColStart + warpID * 8 + laneID / 4;
-    int n_second = n_first + 64;
-    int k_base   = kBlock * 32 + (laneID % 4) * 8;
+__global__ void transpose_bf16(const __nv_bfloat16 *__restrict__ src,
+                                __nv_bfloat16 *__restrict__ dst,
+                                int K, int N) {
+    /* +1 padding per row to avoid shared memory bank conflicts */
+    __shared__ __nv_bfloat16 tile[32][33];
 
-    bStorePtr[storeRow     ][storeCol] = gather_b_k8(B, k_base, n_first,  N);
-    bStorePtr[storeRow + 32][storeCol] = gather_b_k8(B, k_base, n_second, N);
+    int bx = blockIdx.x * 32;  /* N tile start */
+    int by = blockIdx.y * 32;  /* K tile start */
+
+    int tx = threadIdx.x;      /* 0..31 */
+    int ty = threadIdx.y;      /* 0..7  */
+
+    /* Load: each thread loads 4 elements along K (stride 8 in ty) */
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        int k = by + ty * 4 + i;
+        int n = bx + tx;
+        if (k < K && n < N)
+            tile[ty * 4 + i][tx] = src[k * N + n];
+        else if (k < 32 || n < 32)  /* keep tile valid for out-of-bounds */
+            tile[ty * 4 + i][tx] = __float2bfloat16(0.f);
+    }
+
+    __syncthreads();
+
+    /* Store: transposed — each thread writes 4 elements along N (stride 8 in ty) */
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        int n = bx + ty * 4 + i;
+        int k = by + tx;
+        if (n < N && k < K)
+            dst[n * K + k] = tile[tx][ty * 4 + i];
+    }
 }
 
 /* -------------------------------------------------------------------------
  * Main GEMM kernel: 128×128 block, 4×4 MMA tiling, 3-stage pipeline
  *
- * A is M×K row-major (__nv_bfloat16)  — loaded via cp.async
- * B is K×N row-major (__nv_bfloat16)  — loaded via gather (no transpose!)
- * C is M×N row-major (__nv_bfloat16)  — output in BF16
+ * A   is M×K row-major (__nv_bfloat16)  — loaded via cp.async
+ * B   is N×K row-major (__nv_bfloat16)  — pre-transposed, loaded via cp.async
+ * C   is M×N row-major (__nv_bfloat16)  — output in BF16
  * ------------------------------------------------------------------------- */
 __launch_bounds__(16 * 16)
 __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
@@ -132,6 +136,7 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
     int blockRowStart = blockIdx.y * 128;
     int blockColStart = blockIdx.x * 128;
     const uint4 *globalTileA = reinterpret_cast<const uint4 *>(A + blockRowStart * K);
+    const uint4 *globalTileB = reinterpret_cast<const uint4 *>(B + blockColStart * K);
 
     int threadID = threadIdx.y * blockDim.x + threadIdx.x;
     int warpID   = threadID / 32;
@@ -154,6 +159,7 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
     int K8 = K / 8;
 
     const uint4 *aGlobalAddress = globalTileA + (warpID * 8 + laneID / 4) * K8 + laneID % 4;
+    const uint4 *bGlobalAddress = globalTileB + (warpID * 8 + laneID / 4) * K8 + laneID % 4;
 
     int kStartMax = (K / 32 - 1) * 4;
     int numKBlocks = K / 32;
@@ -164,14 +170,11 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         aStorePtr = As + 64 * nStage;
         bStorePtr = Bs + 64 * nStage;
 
-        /* A: cp.async (contiguous along K) */
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
+        cp_async(bStorePtr[storeRow     ] + storeCol, bGlobalAddress + kStart);
+        cp_async(bStorePtr[storeRow + 32] + storeCol, bGlobalAddress + 64 * K8 + kStart);
         asm volatile("cp.async.commit_group;\n" ::);
-
-        /* B: gather from K×N (no transpose needed) */
-        load_b_tile_to_smem(B, N, blockColStart, nStage,
-                            bStorePtr, warpID, laneID, storeRow, storeCol);
     }
 
     /* ---- MAIN LOOP OVER K BLOCKS ---- */
@@ -185,30 +188,22 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         asm volatile("cp.async.wait_group %0;\n" :: "n"(N_STAGES - 2));
         __syncthreads();
 
-        /* Load A fragments: 4 tiles × 2 k-halves */
         for (int m = 0; m < 4; m++) {
             load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA] + loadColA);
             load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA] + (loadColA ^ 2));
         }
-        /* Load B fragments: 4 tiles × 2 k-halves */
         for (int n = 0; n < 4; n++) {
             load_matrix_x2(bReg[n]    , bLoadPtr[n * 4 + warpOffsetB + loadRowB] + loadColB);
             load_matrix_x2(bReg[n] + 2, bLoadPtr[n * 4 + warpOffsetB + loadRowB] + (loadColB ^ 2));
         }
 
-        /* Prefetch next A tile via cp.async */
         kStart = (kStart > kStartMax) ? kStartMax : kStart;
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
+        cp_async(bStorePtr[storeRow     ] + storeCol, bGlobalAddress + kStart);
+        cp_async(bStorePtr[storeRow + 32] + storeCol, bGlobalAddress + 64 * K8 + kStart);
         asm volatile("cp.async.commit_group;\n" ::);
 
-        /* Prefetch next B tile via gather */
-        int nextKBlock = N_STAGES - 1 + nStage;
-        if (nextKBlock >= numKBlocks) nextKBlock = numKBlocks - 1;
-        load_b_tile_to_smem(B, N, blockColStart, nextKBlock,
-                            bStorePtr, warpID, laneID, storeRow, storeCol);
-
-        /* Compute the 4×4 MMA tiles */
         for (int m = 0; m < 4; m++) {
             for (int n = 0; n < 4; n++) {
                 mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
@@ -235,9 +230,13 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 }
 
 /* -------------------------------------------------------------------------
- * kernel_run — entry point.  B is K×N row-major, NO transpose needed.
+ * kernel_run — entry point.
+ *
+ * Allocates a static B_t(N×K) buffer on first call, launches the transpose
+ * kernel to convert B(K×N) → B_t(N×K), then runs the GEMM.
  * ------------------------------------------------------------------------- */
 static int s_M = 0, s_N = 0, s_K = 0;
+static __nv_bfloat16 *s_Bt = nullptr;
 
 static void ensure_shape(int n) {
     if (s_M > 0) return;
@@ -268,10 +267,19 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     ensure_shape(n);
     int M = s_M, N = s_N, K = s_K;
 
-    /* No transpose, no extra buffer — B read directly as K×N */
+    /* Allocate B_t buffer once (N×K, same element count as B) */
+    if (s_Bt == nullptr)
+        cudaMalloc(&s_Bt, (size_t)N * K * sizeof(__nv_bfloat16));
+
+    /* Transpose B(K×N) → B_t(N×K) every call (no caching) */
+    dim3 transposeBlock(32, 8);
+    dim3 transposeGrid((N + 31) / 32, (K + 31) / 32);
+    transpose_bf16<<<transposeGrid, transposeBlock, 0, stream>>>(B, s_Bt, K, N);
+
+    /* GEMM over A(M×K) and B_t(N×K) */
     dim3 threads(16, 16);
     dim3 grid(N / 128, M / 128);
-    mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, B, C, M, N, K);
+    mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, s_Bt, C, M, N, K);
 
     return 0;
 }

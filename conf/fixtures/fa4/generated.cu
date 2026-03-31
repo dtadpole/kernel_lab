@@ -563,7 +563,7 @@ void mma_warp_fn(
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
-__launch_bounds__(160)
+__launch_bounds__(160, 2)
 __global__
 void flash_attention_kernel_ws(
     const nv_bfloat16 *Q,   /* [B, S, H, D] */
@@ -604,10 +604,10 @@ void flash_attention_kernel_ws(
                                   + q_block_id * BLOCK_Q * seq_stride;
 
     /* Shared memory layout:
-     *   Q region:  [BLOCK_Q, DIM] = 32KB (persistent)
+     *   Q region:  [BLOCK_Q=64, DIM] = 16KB (persistent)
      *   K region:  [2, BLOCK_KV, DIM] = 32KB (double-buffered)
      *   V region:  [2, BLOCK_KV, DIM] = 32KB (double-buffered)
-     *   Total: 32KB + 32KB + 32KB = 96KB
+     *   Total: 16KB + 32KB + 32KB = 80KB
      */
     extern __shared__ nv_bfloat16 smem[];
     const uint32_t smem_base = __cvta_generic_to_shared(smem);
@@ -617,7 +617,7 @@ void flash_attention_kernel_ws(
     const uint32_t V_smem  = KV_base + 2 * BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
     /* ---- Load Q [BLOCK_Q, DIM] from global -> shared (ALL threads) ----
-     * Only first 128 threads load (128*128 / (128*8) = 16 iters, divides evenly).
+     * Only first 128 threads load (64*128 / (128*8) = 8 iters, divides evenly).
      * DMA warp (32 threads) is idle during Q load to keep divisibility. */
     if (tid < 128) {
         global_to_shared_swizzle<BLOCK_Q, DIM, 128>(Q_smem, Q_base, seq_stride, tid);
@@ -745,7 +745,7 @@ extern "C" int kernel_run(
 
     /* ---- Launch warp-specialized Flash Attention on [B,S,H,D] layout ---- */
     {
-        const int BLOCK_Q   = 128;
+        const int BLOCK_Q   = 64;
         const int BLOCK_KV  = 64;
         const int DIM_CONST = 128;
         const int TB_SIZE   = 160;  /* 5 warps: 1 DMA + 4 MMA */
@@ -754,10 +754,10 @@ extern "C" int kernel_run(
         int num_blocks = effective_bs * cdiv(S, BLOCK_Q);
 
         /* SMEM budget: Q (persistent) + K (double-buffered) + V (double-buffered)
-         *   Q:  128*128*2 = 32768
+         *   Q:  64*128*2 = 16384
          *   K:  2*64*128*2 = 32768
          *   V:  2*64*128*2 = 32768
-         *   Total: 98304 (96KB, within SM120 limit)
+         *   Total: 81920 (80KB, within SM120 limit)
          */
         int smem_q  = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16);
         int smem_k  = 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);

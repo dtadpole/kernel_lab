@@ -211,7 +211,7 @@ async def _post(endpoint: str, body: dict[str, Any]) -> str:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("cuda-toolkit-exec")
+mcp = FastMCP("cuda")
 
 
 @mcp.tool()

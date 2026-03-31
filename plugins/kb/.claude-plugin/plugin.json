@@ -1,5 +1,5 @@
 {
-  "name": "knowledge-search",
+  "name": "kb",
   "description": "CUDA documentation search and retrieval via BM25/dense/hybrid search over indexed NVIDIA docs",
   "version": "0.1.0",
   "author": {

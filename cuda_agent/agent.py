@@ -32,8 +32,8 @@ from cuda_agent.prompts import SYSTEM_PROMPT, format_initial_prompt
 from cuda_agent.task import OptimizationTask
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_KNOWLEDGE_SEARCH_SERVER = str(_REPO_ROOT / "plugins" / "knowledge-search" / "mcp_server.py")
-_CUDA_TOOLKIT_EXEC_SERVER = str(_REPO_ROOT / "plugins" / "cuda-toolkit-exec" / "mcp_server.py")
+_KB_SERVER = str(_REPO_ROOT / "plugins" / "kb" / "mcp_server.py")
+_CUDA_SERVER = str(_REPO_ROOT / "plugins" / "cuda" / "mcp_server.py")
 _BLOCKED_TOOLS_FILE = Path(__file__).resolve().parent / "blocked_tools.json"
 
 
@@ -207,14 +207,14 @@ async def run_optimization(
             ],
         },
         mcp_servers={
-            "knowledge-search": {
+            "kb": {
                 "command": sys.executable,
-                "args": [_KNOWLEDGE_SEARCH_SERVER],
+                "args": [_KB_SERVER],
                 "env": ks_env,
             },
-            "cuda-toolkit-exec": {
+            "cuda": {
                 "command": sys.executable,
-                "args": [_CUDA_TOOLKIT_EXEC_SERVER],
+                "args": [_CUDA_SERVER],
                 "env": exec_env,
             },
         },

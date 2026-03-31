@@ -26,7 +26,7 @@ from typing import Annotated, Literal
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-mcp = FastMCP("knowledge-search")
+mcp = FastMCP("kb")
 
 # ---------------------------------------------------------------------------
 # Document retrieval tools

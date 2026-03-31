@@ -1,5 +1,5 @@
 {
-  "name": "cuda-toolkit-exec",
+  "name": "cuda",
   "description": "Remote CUDA kernel compilation, evaluation, profiling, and execution via the cuda_exec service",
   "version": "0.1.0",
   "author": {

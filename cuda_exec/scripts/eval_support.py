@@ -101,6 +101,14 @@ def load_reference_entry(reference_root: Path) -> Path:
     return candidates[0]
 
 
+def load_cudnn_entry(cudnn_root: Path) -> Path | None:
+    """Return the cudnn.py entry point if it exists, else None."""
+    candidates = sorted(cudnn_root.rglob("cudnn.py"))
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def load_reference_module(reference_path: Path):
     spec = importlib.util.spec_from_file_location("cuda_exec_reference_module", reference_path)
     if spec is None or spec.loader is None:

@@ -12,6 +12,7 @@ Important public conventions captured in this file:
 - Relative paths may include folder names, but must remain relative.
 - `reference` means the reference side of a comparison.
 - `generated` means the generated or current side under evaluation.
+- `cudnn` means the vendor-optimized baseline (cuBLAS/cuDNN/PyTorch native).
 - `artifacts` means kept results.
 - `logs` means process output.
 - `state` remains internal-first and is not exposed in default public responses.
@@ -68,6 +69,10 @@ class CompileRequest(RequestBase):
         default_factory=dict,
         description="Non-empty map of generated source inputs; must include generated.cu as the single .cu entry file; headers and inline helper files also allowed",
     )
+    cudnn_files: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional map of vendor-baseline source inputs; must include cudnn.py as the entry point if non-empty. Follows the same Model/get_inputs/get_init_inputs contract as reference.",
+    )
 
 
 class EvaluateRequest(RequestBase):
@@ -104,9 +109,9 @@ class ProfileRequest(RequestBase):
       ``NCU_KERNEL_FILTER`` regex to skip PyTorch JIT overhead kernels)
     """
 
-    side: Literal["generated", "reference"] = Field(
+    side: Literal["generated", "reference", "cudnn"] = Field(
         ...,
-        description="Which side to NCU-profile: 'generated' (compiled CUDA binary) or 'reference' (Python/CuTe DSL kernel)",
+        description="Which side to NCU-profile: 'generated' (compiled CUDA binary), 'reference' (Python/CuTe DSL kernel), or 'cudnn' (vendor baseline)",
     )
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,
@@ -281,6 +286,7 @@ class EvaluateConfigOutput(BaseModel):
     status: Literal["ok", "error", "timeout", "skipped"]
     reference: Dict[str, Any] = Field(default_factory=dict)
     generated: Dict[str, Any] = Field(default_factory=dict)
+    cudnn: Dict[str, Any] = Field(default_factory=dict)
     correctness: CorrectnessSummary = Field(default_factory=CorrectnessSummary)
     performance: PerformanceSummary = Field(default_factory=PerformanceSummary)
     artifacts: Dict[str, FilePayload] = Field(

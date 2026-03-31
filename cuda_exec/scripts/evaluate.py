@@ -42,6 +42,7 @@ from cuda_exec.scripts.eval_support import (  # noqa: E402
     gpu_cleanup,
     watchdog_handler,
     load_reference_entry,
+    load_cudnn_entry,
     load_reference_module,
     normalize_reference_contract,
     extract_config_payload,
@@ -170,6 +171,7 @@ def _comparison_payload(
     correctness: dict[str, Any],
     reference_performance: dict[str, Any],
     generated_payload: dict[str, Any],
+    cudnn_performance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ref_perf = reference_performance.get("latency_ms", {})
     gen_perf = generated_payload.get("performance", {}).get("latency_ms", {})
@@ -177,14 +179,22 @@ def _comparison_payload(
     gen_median = float(gen_perf.get("median", 0.0) or 0.0)
     speedup = (ref_median / gen_median) if gen_median > 0 else None
 
+    perf: dict[str, Any] = {
+        "reference_median_ms": ref_median,
+        "generated_median_ms": gen_median,
+        "delta_ms": gen_median - ref_median,
+        "speedup": speedup,
+    }
+
+    if cudnn_performance is not None:
+        cudnn_perf = cudnn_performance.get("latency_ms", {})
+        cudnn_median = float(cudnn_perf.get("median", 0.0) or 0.0)
+        perf["cudnn_median_ms"] = cudnn_median
+        perf["speedup_vs_cudnn"] = (cudnn_median / gen_median) if gen_median > 0 else None
+
     return {
         "correctness": correctness,
-        "performance": {
-            "reference_median_ms": ref_median,
-            "generated_median_ms": gen_median,
-            "delta_ms": gen_median - ref_median,
-            "speedup": speedup,
-        },
+        "performance": perf,
     }
 
 
@@ -246,6 +256,21 @@ def main() -> int:
             num_trials=args.num_perf_trials,
         )
 
+        # --- cuDNN vendor baseline (optional) ---
+        cudnn_root = Path(workspace_path) / "inputs" / "cudnn"
+        cudnn_path = load_cudnn_entry(cudnn_root)
+        cudnn_result = None
+        if cudnn_path is not None:
+            cudnn_module = load_reference_module(cudnn_path)
+            cudnn_result = measure_reference(
+                cudnn_module,
+                reference_config,
+                device=device,
+                seed=args.seed,
+                num_warmups=args.num_warmups,
+                num_trials=args.num_perf_trials,
+            )
+
         generated_run = _run_generated(target_path, env, workspace_path, args.timeout)
         generated_payload = generated_run["payload"]
 
@@ -262,6 +287,7 @@ def main() -> int:
             correctness,
             reference_result["performance"],
             generated_payload,
+            cudnn_performance=cudnn_result["performance"] if cudnn_result else None,
         )
 
         result = {
@@ -308,6 +334,21 @@ def main() -> int:
             },
             "comparison": comparison,
         }
+
+        if cudnn_result is not None:
+            result["cudnn"] = {
+                "output": {
+                    "result": cudnn_result["output"],
+                    "metadata": reference_config,
+                },
+                "performance": {
+                    **cudnn_result["performance"],
+                    "metadata": {
+                        **reference_config,
+                        **cudnn_result["performance"].get("metadata", {}),
+                    },
+                },
+            }
         print(json.dumps(result, indent=2))
         return 0
 

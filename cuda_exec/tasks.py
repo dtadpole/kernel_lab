@@ -486,6 +486,7 @@ def run_compile_task(
     timeout_seconds: int,
     reference_files: Dict[str, str],
     generated_files: Dict[str, str],
+    cudnn_files: Dict[str, str] | None = None,
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     workspace_path = Path(workspace["workspace_path"])
@@ -516,6 +517,17 @@ def run_compile_task(
     try:
         copied_reference = _write_input_files(reference_files, workspace_path / "inputs" / "reference")
         copied_generated = _write_input_files(generated_files, workspace_path / "inputs" / "generated")
+
+        if cudnn_files:
+            copied_cudnn = _write_input_files(cudnn_files, workspace_path / "inputs" / "cudnn")
+            if not any(path.name == "cudnn.py" for path in copied_cudnn):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "cudnn_files must include a file named cudnn.py as the entry point. "
+                        "Rename your vendor baseline module to cudnn.py and resubmit."
+                    ),
+                )
 
         if not any(path.name == "reference.py" for path in copied_reference):
             raise HTTPException(
@@ -726,6 +738,7 @@ def run_evaluate_task(
         payload["comparison"] = payload_json.get("comparison", {}) if isinstance(payload_json, dict) else {}
         payload["reference"] = payload_json.get("reference", {}) if isinstance(payload_json, dict) else {}
         payload["generated"] = payload_json.get("generated", {}) if isinstance(payload_json, dict) else {}
+        payload["cudnn"] = payload_json.get("cudnn", {}) if isinstance(payload_json, dict) else {}
         payload["files"].append(capture_turn_file(comparison_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
@@ -853,8 +866,8 @@ def run_profile_task(
     attempt = _next_attempt(workspace, "profile")
     started = time.perf_counter()
 
-    if side not in {"generated", "reference"}:
-        raise HTTPException(status_code=400, detail=f"side must be 'generated' or 'reference', got: {side}")
+    if side not in {"generated", "reference", "cudnn"}:
+        raise HTTPException(status_code=400, detail=f"side must be 'generated', 'reference', or 'cudnn', got: {side}")
 
     config_results: Dict[str, dict] = {}
     stage_files: List[dict] = []
@@ -875,7 +888,7 @@ def run_profile_task(
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
             ]
-        else:
+        elif side == "reference":
             reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "reference.py"
             if not reference_py.exists():
                 raise HTTPException(
@@ -889,6 +902,20 @@ def run_profile_task(
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
                 "--kernel-name", 'regex:"cutlass|vector_add"',
+            ]
+        else:  # side == "cudnn"
+            cudnn_py = Path(workspace["workspace_path"]) / "inputs" / "cudnn" / "cudnn.py"
+            if not cudnn_py.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"cudnn.py not found at {cudnn_py} — include cudnn_files in compile request",
+                )
+            command = [
+                "bash",
+                str(PROFILE_NCU_SCRIPT),
+                "--target", sys.executable, str(cudnn_py),
+                "--export-prefix", export_prefix_abs,
+                "--set", "detailed",
             ]
 
         stage_log_rel = _stage_log_rel("profile", attempt, config_slug)

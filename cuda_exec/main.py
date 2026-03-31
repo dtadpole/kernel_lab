@@ -137,6 +137,7 @@ def compile_endpoint(request: CompileRequest, _auth: None = Depends(verify_beare
         timeout_seconds=request.timeout_seconds,
         reference_files=request.reference_files,
         generated_files=request.generated_files,
+        cudnn_files=request.cudnn_files or None,
     )
     attempt = result["attempt"]
     artifact_map = _compile_artifact_map(result)
@@ -202,6 +203,7 @@ def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bea
             status=item["status"],
             reference=item.get("reference") or {},
             generated=item.get("generated") or {},
+            cudnn=item.get("cudnn") or {},
             correctness=item.get("correctness", {}),
             performance=item.get("performance", {}),
             artifacts=_capture_public_files(

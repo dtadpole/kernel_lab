@@ -194,10 +194,8 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         }
 
         kStart = (kStart > kStartMax) ? kStartMax : kStart;
-        /* A: offset along K columns */
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-        /* B: offset along K rows */
         cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
         cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
         asm volatile("cp.async.commit_group;\n" ::);

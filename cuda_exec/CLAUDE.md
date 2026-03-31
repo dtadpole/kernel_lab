@@ -95,3 +95,7 @@ Override with `CUDA_EXEC_ROOT` env var for tests/isolation.
 ### DESIGN.md
 
 `DESIGN.md` is the authoritative source of truth for conventions, JSON request/response examples, and detailed contract specifications. Consult it for response shapes, naming conventions, and the full attempt/config naming scheme.
+
+### Hardware roofline data
+
+`docs/roofline/` contains per-GPU peak compute and memory bandwidth specs for roofline analysis. See `docs/roofline/README.md` for a quick comparison table covering A100, H100, B200, RTX 5090, and RTX PRO 6000 Blackwell. Always reference these when reporting kernel performance (TFLOPS achieved vs. peak, % of roofline ceiling).

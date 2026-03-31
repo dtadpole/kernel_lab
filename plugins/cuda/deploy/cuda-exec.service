@@ -1,0 +1,30 @@
+[Unit]
+Description=cuda_exec GPU kernel compilation, evaluation, and profiling service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.cuda_exec_service
+ExecStart=%h/.cuda_exec_service/.venv/bin/python -m uvicorn cuda_exec.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=PYTHONPATH=%h/.cuda_exec_service
+Environment=CUDA_EXEC_ROOT=%h/.cuda_exec
+Environment=PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Hardening (compatible with GPU/CUDA access)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Resource limits
+LimitNOFILE=65536
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

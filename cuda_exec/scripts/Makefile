@@ -281,6 +281,7 @@ evaluate: ensure-venv ## Run evaluate for one config (CONFIG=slug) or all (CONFI
 		done
 	else
 		cd "$(SCRIPTS)" && \
+		FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1 \
 		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
 		$(VENV_PYTHON) "$(EVALUATE_PY)" \
 			$(_META_ARGS) \

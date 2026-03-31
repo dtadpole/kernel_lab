@@ -1,11 +1,9 @@
 """FastMCP stdio server wrapping the cuda_exec HTTP API as MCP tools.
 
 Exposes 5 action tools (compile, evaluate, profile, execute, read_file)
-that proxy to the cuda_exec HTTP service, 4 data retrieval tools
+that proxy to the cuda_exec HTTP service and 4 data retrieval tools
 (get_compile_data, get_evaluate_data, get_profile_data, get_data_point)
-that read from a local data store of raw request/response JSON, and
-2 document search tools (search_docs, lookup_doc_section) for querying
-indexed NVIDIA CUDA Toolkit documentation.
+that read from a local data store of raw request/response JSON.
 
 Every action tool call (except read_file) is persisted to the local
 data store before response compaction, so the full unmodified data
@@ -54,13 +52,13 @@ def _load_bearer_token() -> str:
     try:
         token = key_path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        print(f"cuda_agent mcp_server: key file not found: {key_path}", file=sys.stderr)
+        print(f"cuda-toolkit-exec mcp_server: key file not found: {key_path}", file=sys.stderr)
         raise SystemExit(1)
     except OSError as exc:
-        print(f"cuda_agent mcp_server: cannot read key file {key_path}: {exc}", file=sys.stderr)
+        print(f"cuda-toolkit-exec mcp_server: cannot read key file {key_path}: {exc}", file=sys.stderr)
         raise SystemExit(1)
     if not token:
-        print(f"cuda_agent mcp_server: key file is empty: {key_path}", file=sys.stderr)
+        print(f"cuda-toolkit-exec mcp_server: key file is empty: {key_path}", file=sys.stderr)
         raise SystemExit(1)
     return token
 
@@ -152,7 +150,7 @@ def _list_available(turn_dir: Path) -> list[str]:
 
 # Fields to keep in evaluate/profile per-config outputs.  Everything else
 # (reference, generated, artifacts, logs) can be huge and is available via
-# cuda_read_file on demand.
+# read_file on demand.
 _EVAL_CONFIG_KEEP = {"status", "correctness", "performance"}
 _PROFILE_CONFIG_KEEP = {"status", "summary"}
 
@@ -183,7 +181,7 @@ def _compact_response(obj: Any, *, _endpoint: str = "") -> Any:
 
         # Compact per-config outputs in evaluate/profile responses.
         # Keep only the structured summaries; the agent can use
-        # cuda_read_file to fetch full details on demand.
+        # read_file to fetch full details on demand.
         if "status" in obj and "correctness" in obj:
             # Evaluate config output
             return {k: v for k, v in obj.items() if k in _EVAL_CONFIG_KEEP}
@@ -213,11 +211,11 @@ async def _post(endpoint: str, body: dict[str, Any]) -> str:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("cuda_toolkit")
+mcp = FastMCP("cuda")
 
 
 @mcp.tool()
-async def cuda_compile(
+async def compile(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     reference_files: Annotated[dict[str, str], Field(description="Map of relative_path -> file content for reference source inputs")],
     generated_files: Annotated[dict[str, str], Field(description="Map of relative_path -> file content; must contain exactly one .cu file")],
@@ -229,7 +227,7 @@ async def cuda_compile(
     using the nvcc -> ptxas -> cuobjdump -> nvdisasm toolchain.
 
     Workflow constraints:
-    - Must be called exactly once per turn before cuda_evaluate or cuda_profile.
+    - Must be called exactly once per turn before evaluate or profile.
     - New or modified source code requires a new turn (increment metadata.turn).
     - Old turns are immutable — do not recompile on a previous turn number.
 
@@ -260,7 +258,7 @@ async def cuda_compile(
 
 
 @mcp.tool()
-async def cuda_evaluate(
+async def evaluate(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads, e.g. {'tensor2d-1024x1024': {shape: [1024,1024]}}")],
     timeout_seconds: Annotated[int, Field(description="Max seconds for evaluate")] = _DEFAULT_TOOL_TIMEOUT,
@@ -271,7 +269,7 @@ async def cuda_evaluate(
     for each config, then compares outputs numerically.
 
     Workflow constraints:
-    - Requires a successful cuda_compile on the same turn.
+    - Requires a successful compile on the same turn.
     - Can be called multiple times on the same turn (same compiled binary).
     - One compile fans out to many configs.
 
@@ -291,7 +289,7 @@ async def cuda_evaluate(
 
     Note: The MCP server strips large fields (reference, generated, artifacts,
     logs) from each config output to stay within context limits. Use
-    cuda_read_file to fetch full details on demand.
+    read_file to fetch full details on demand.
     """
 
     return await _post("/evaluate", {
@@ -302,7 +300,7 @@ async def cuda_evaluate(
 
 
 @mcp.tool()
-async def cuda_profile(
+async def profile(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads")],
     side: Annotated[Literal["generated", "reference"], Field(description="Which side to NCU-profile")] = "generated",
@@ -314,7 +312,7 @@ async def cuda_profile(
     GPU metrics: roofline, pipe utilization, memory throughput, warp stalls, etc.
 
     Workflow constraints:
-    - Requires a successful cuda_compile on the same turn (stages inputs).
+    - Requires a successful compile on the same turn (stages inputs).
     - For ``side="reference"``, NCU filters by kernel name regex to skip
       PyTorch JIT overhead kernels and capture only the CuTe DSL kernel.
 
@@ -332,7 +330,7 @@ async def cuda_profile(
             summary:  {side, ncu_profiled, ncu_report_exists, ncu_report_path, ...}
 
     Note: The MCP server strips large fields (artifacts, logs) from each config
-    output. Use cuda_read_file to fetch the .ncu-rep binary report on demand.
+    output. Use read_file to fetch the .ncu-rep binary report on demand.
     """
 
     return await _post("/profile", {
@@ -344,7 +342,7 @@ async def cuda_profile(
 
 
 @mcp.tool()
-async def cuda_execute(
+async def execute(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     command: Annotated[list[str], Field(description="Executable plus arguments, e.g. ['/usr/local/cuda/bin/nvcc', '--version']")],
     env: Annotated[dict[str, str], Field(description="Extra environment variables")] = {},
@@ -379,7 +377,7 @@ async def cuda_execute(
 
 
 @mcp.tool()
-async def cuda_read_file(
+async def read_file(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     path: Annotated[str, Field(description="Relative path under the turn root (must start with artifacts/, logs/, or state/)")],
     max_bytes: Annotated[int | None, Field(description="Optional max bytes to read")] = None,
@@ -387,7 +385,7 @@ async def cuda_read_file(
     """Read a file from a specific turn's directory tree.
 
     Provides on-demand access to any file produced during a turn.  Since
-    cuda_evaluate and cuda_profile responses are compacted by the MCP
+    evaluate and profile responses are compacted by the MCP
     server (large fields stripped), this tool is the way to retrieve
     full details when needed.
 
@@ -420,7 +418,7 @@ async def cuda_read_file(
 
 
 @mcp.tool()
-async def cuda_get_data_point(
+async def get_data_point(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     stage: Annotated[Literal["compile", "evaluate", "profile", "execute"], Field(description="Which stage to retrieve")],
     attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
@@ -428,10 +426,10 @@ async def cuda_get_data_point(
 ) -> str:
     """Retrieve the raw input/output from a prior tool call.
 
-    Every cuda_compile, cuda_evaluate, cuda_profile, and cuda_execute
-    call saves its full (uncompacted) request and response to a local
-    data store.  This tool reads those saved files so the agent can
-    re-examine past results without re-calling cuda_exec.
+    Every compile, evaluate, profile, and execute call saves its full
+    (uncompacted) request and response to a local data store.  This tool
+    reads those saved files so the agent can re-examine past results
+    without re-calling cuda_exec.
 
     Parameters:
         metadata: Turn identity dict (identifies which turn to look up).
@@ -525,7 +523,7 @@ def _data_store_not_configured() -> str:
 
 
 @mcp.tool()
-async def cuda_get_compile_data(
+async def get_compile_data(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
     field: Annotated[
@@ -587,7 +585,7 @@ async def cuda_get_compile_data(
 
 
 @mcp.tool()
-async def cuda_get_evaluate_data(
+async def get_evaluate_data(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
     config_slug: Annotated[str | None, Field(description="Filter to a single config slug (omit for all configs)")] = None,
@@ -654,7 +652,7 @@ async def cuda_get_evaluate_data(
 
 
 @mcp.tool()
-async def cuda_get_profile_data(
+async def get_profile_data(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
     attempt: Annotated[int, Field(description="Attempt number (1-based)")] = 1,
     config_slug: Annotated[str | None, Field(description="Filter to a single config slug (omit for all configs)")] = None,
@@ -715,232 +713,6 @@ async def cuda_get_profile_data(
     }
 
     return json.dumps({"all_ok": all_ok, "configs": result_configs}, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# Document retrieval tools
-# ---------------------------------------------------------------------------
-
-_doc_searcher = None
-
-
-def _get_doc_searcher():
-    """Lazy-load the document searcher singleton."""
-    global _doc_searcher
-    if _doc_searcher is None:
-        try:
-            from doc_retrieval.searcher import DocSearcher
-
-            _doc_searcher = DocSearcher()
-        except Exception as exc:
-            return None, str(exc)
-    return _doc_searcher, None
-
-
-@mcp.tool()
-async def cuda_search_docs(
-    query: Annotated[
-        str,
-        Field(description="Natural language search query about CUDA programming"),
-    ],
-    mode: Annotated[
-        Literal["bm25", "dense", "hybrid"],
-        Field(description="Search mode: bm25 (keyword), dense (semantic), hybrid (combined)"),
-    ] = "hybrid",
-    top_k: Annotated[
-        int,
-        Field(description="Number of results to return (1-20)", ge=1, le=20),
-    ] = 5,
-) -> str:
-    """Search NVIDIA CUDA Toolkit documentation.
-
-    Searches the indexed CUDA documentation corpus using the specified
-    retrieval mode.  Returns matching chunks with section metadata.
-
-    Example queries:
-        - "shared memory bank conflicts"
-        - "warp divergence impact on performance"
-        - "atomicCAS signature and semantics"
-        - "cudaMemcpyAsync stream synchronization"
-        - "PTX ld.global instruction"
-
-    Each result includes a ``url`` field with an anchor (e.g.
-    ``...index.html#thread-hierarchy``).  Extract the doc slug and
-    anchor to follow up:
-
-        result = cuda_search_docs("shared memory bank conflicts")
-        # Found section_path "Performance Guidelines > Device Memory Accesses"
-        # url ends with .../cuda-c-programming-guide/index.html#device-memory-accesses
-
-        # Read the full section for more context:
-        cuda_read_section("cuda-c-programming-guide", "device-memory-accesses")
-
-        # Or browse the parent chapter's TOC:
-        cuda_browse_toc("cuda-c-programming-guide", "performance-guidelines")
-    """
-    searcher, err = _get_doc_searcher()
-    if searcher is None:
-        return json.dumps({"error": f"Doc searcher unavailable: {err}"})
-
-    if mode == "bm25":
-        results = searcher.search_bm25(query, top_k)
-    elif mode == "dense":
-        results = searcher.search_dense(query, top_k)
-    else:
-        results = searcher.search_hybrid(query, top_k)
-
-    return json.dumps(
-        [
-            {
-                "title": r.title,
-                "section_path": r.section_path,
-                "url": r.source_url,
-                "text": r.text[:2000],  # truncate for context limits
-                "score": round(r.score, 4),
-            }
-            for r in results
-        ],
-        indent=2,
-    )
-
-
-@mcp.tool()
-async def cuda_lookup_doc_section(
-    url: Annotated[
-        str,
-        Field(description="URL of the CUDA documentation page (from a prior search result)"),
-    ],
-    section: Annotated[
-        str | None,
-        Field(description="Section heading to filter to (optional)"),
-    ] = None,
-) -> str:
-    """Retrieve full text from a specific CUDA documentation page or section.
-
-    Given a URL from a prior cuda_search_docs result, retrieves all
-    chunks from that page.  Optionally filter to a specific section.
-
-    Prefer ``cuda_read_section`` for HTML docs — it returns structured
-    content with navigation context (parent, siblings).  Use this tool
-    when you have a URL but not a doc_id/section_id, or for PDF docs
-    which don't have anchor-based navigation.
-    """
-    searcher, err = _get_doc_searcher()
-    if searcher is None:
-        return json.dumps({"error": f"Doc searcher unavailable: {err}"})
-
-    chunks = searcher._load_chunks()
-    matching = [c for c in chunks if c["source_url"] == url]
-
-    if section:
-        section_lower = section.lower()
-        matching = [
-            c for c in matching
-            if section_lower in c["section_path"].lower()
-        ]
-
-    if not matching:
-        return json.dumps({"error": f"No chunks found for url={url}, section={section}"})
-
-    # Concatenate chunk texts in order
-    matching.sort(key=lambda c: c["chunk_index"])
-    text = "\n\n".join(c["text"] for c in matching)
-
-    # Truncate to ~8000 chars to stay within context limits
-    if len(text) > 8000:
-        text = text[:8000] + "\n\n[... truncated ...]"
-
-    return json.dumps(
-        {
-            "url": url,
-            "section": section,
-            "num_chunks": len(matching),
-            "text": text,
-        },
-        indent=2,
-    )
-
-
-@mcp.tool()
-async def cuda_browse_toc(
-    doc_id: Annotated[str, Field(description=(
-        "Document slug, e.g. 'cuda-c-programming-guide', 'parallel-thread-execution'"
-    ))],
-    section_id: Annotated[str | None, Field(description=(
-        "Section anchor ID to expand. Omit for top-level chapters."
-    ))] = None,
-    depth: Annotated[int, Field(description="Expansion depth", ge=1, le=5)] = 2,
-) -> str:
-    """Browse the table of contents of a CUDA documentation page.
-
-    Available doc_ids:
-        cuda-c-programming-guide, parallel-thread-execution,
-        cuda-c-best-practices-guide, inline-ptx-assembly,
-        blackwell-tuning-guide, blackwell-compatibility-guide
-
-    Usage patterns:
-
-        # List top-level chapters:
-        cuda_browse_toc("cuda-c-programming-guide")
-
-        # Expand a chapter to see its sub-sections:
-        cuda_browse_toc("cuda-c-programming-guide", "performance-guidelines")
-
-        # Deep expand (3 levels):
-        cuda_browse_toc("cuda-c-programming-guide", "programming-model", depth=3)
-
-        # Then read a specific section:
-        cuda_read_section("cuda-c-programming-guide", "device-memory-accesses")
-    """
-    searcher, err = _get_doc_searcher()
-    if err:
-        return err
-    result = searcher.browse_toc(doc_id=doc_id, section_id=section_id, depth=depth)
-    return json.dumps(result, indent=2, ensure_ascii=False)
-
-
-@mcp.tool()
-async def cuda_read_section(
-    doc_id: Annotated[str, Field(description=(
-        "Document slug, e.g. 'cuda-c-programming-guide', 'parallel-thread-execution'"
-    ))],
-    section_id: Annotated[str, Field(description=(
-        "Section anchor ID from TOC or search result, e.g. 'thread-hierarchy'"
-    ))],
-) -> str:
-    """Read the full content of a specific documentation section.
-
-    Returns the section content as lightweight HTML with navigation
-    context.  The response includes a ``nav`` object with
-    ``parent``, ``prev_sibling``, and ``next_sibling`` section IDs
-    for continued browsing.
-
-    Usage patterns:
-
-        # After searching — expand a result to full section:
-        results = cuda_search_docs("shared memory bank conflicts")
-        # url = ".../cuda-c-programming-guide/index.html#shared-memory"
-        section = cuda_read_section("cuda-c-programming-guide", "shared-memory")
-
-        # Read the next section using nav context:
-        cuda_read_section("cuda-c-programming-guide", section.nav.next_sibling)
-
-        # Go up to the parent chapter:
-        cuda_browse_toc("cuda-c-programming-guide", section.nav.parent)
-
-        # After browsing TOC — read a section you picked:
-        toc = cuda_browse_toc("parallel-thread-execution", "instruction-set")
-        cuda_read_section("parallel-thread-execution", "data-movement-and-conversion-instructions-ld")
-    """
-    searcher, err = _get_doc_searcher()
-    if err:
-        return err
-    result = searcher.read_section(doc_id=doc_id, section_id=section_id)
-    if result is None:
-        return json.dumps({"error": f"Section '{section_id}' not found in '{doc_id}'"})
-    if len(result.get("content", "")) > 8000:
-        result["content"] = result["content"][:8000] + "\n... [truncated]"
-    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":

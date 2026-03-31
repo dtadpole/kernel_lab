@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "kb": {
+      "command": "${CLAUDE_PROJECT_ROOT}/.venv/bin/python",
+      "args": ["${pluginDir}/mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PROJECT_ROOT}"
+      }
+    }
+  }
+}

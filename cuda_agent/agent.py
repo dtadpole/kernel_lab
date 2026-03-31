@@ -31,7 +31,9 @@ from cuda_agent.config import load_config
 from cuda_agent.prompts import SYSTEM_PROMPT, format_initial_prompt
 from cuda_agent.task import OptimizationTask
 
-_MCP_SERVER_SCRIPT = str(Path(__file__).resolve().parent / "mcp_server.py")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_KB_SERVER = str(_REPO_ROOT / "plugins" / "kb" / "mcp_server.py")
+_CUDA_SERVER = str(_REPO_ROOT / "plugins" / "cuda" / "mcp_server.py")
 _BLOCKED_TOOLS_FILE = Path(__file__).resolve().parent / "blocked_tools.json"
 
 
@@ -84,8 +86,8 @@ async def _deny_direct_cuda_toolkit(
                 permissionDecision="deny",
                 permissionDecisionReason=(
                     "Direct CUDA Toolkit calls are not allowed. "
-                    "Use the cuda MCP tools (cuda_compile, cuda_evaluate, "
-                    "cuda_profile, cuda_execute) instead."
+                    "Use the MCP tools (compile, evaluate, profile, execute) "
+                    "from the cuda-toolkit-exec server instead."
                 ),
             ),
         )
@@ -153,35 +155,42 @@ async def run_optimization(
 
     max_turns = task.max_iterations * cfg.agent.max_turns_multiplier
 
-    # Build env for the MCP server subprocess.  Config values from Hydra
-    # are passed as CUDA_AGENT_MCP_* env vars so the subprocess (which
-    # cannot import Hydra config) can read them.
-    mcp_env: dict[str, str] = {
+    # Build per-server env dicts for the two MCP server subprocesses.
+    # Config values from Hydra are passed as env vars so the subprocesses
+    # (which cannot import Hydra config) can read them.
+    repo_root = str(_REPO_ROOT)
+    existing_path = os.environ.get("PYTHONPATH", "")
+    base_env: dict[str, str] = {
         "HOME": os.environ.get("HOME", str(Path.home())),
+    }
+
+    # Knowledge search MCP server env
+    ks_env: dict[str, str] = {
+        **base_env,
+        "PYTHONPATH": f"{repo_root}:{existing_path}" if existing_path else repo_root,
+    }
+    doc_root = os.environ.get("DOC_RETRIEVAL_ROOT")
+    if doc_root:
+        ks_env["DOC_RETRIEVAL_ROOT"] = doc_root
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        ks_env["OPENAI_API_KEY"] = openai_key
+
+    # CUDA toolkit execution service MCP server env
+    log_dir = _log_dir_for_task(task)
+    key_path = os.environ.get("CUDA_EXEC_KEY_PATH") or cfg.service.key_path
+    exec_env: dict[str, str] = {
+        **base_env,
         "CUDA_EXEC_URL": task.cuda_exec_url or cfg.service.cuda_exec_url,
         "CUDA_AGENT_MCP_REQUEST_TIMEOUT": str(cfg.mcp.request_timeout),
         "CUDA_AGENT_MCP_CONNECT_TIMEOUT": str(cfg.mcp.connect_timeout),
         "CUDA_AGENT_MCP_MAX_CONTENT_CHARS": str(cfg.mcp.max_content_chars),
         "CUDA_AGENT_MCP_TOOL_TIMEOUT": str(cfg.mcp.tool_timeout_seconds),
+        "CUDA_AGENT_DATA_DIR": str(log_dir),
     }
-    key_path = os.environ.get("CUDA_EXEC_KEY_PATH") or cfg.service.key_path
     if key_path:
-        mcp_env["CUDA_EXEC_KEY_PATH"] = str(Path(key_path).expanduser())
+        exec_env["CUDA_EXEC_KEY_PATH"] = str(Path(key_path).expanduser())
 
-    # Doc retrieval: add repo root to PYTHONPATH so the MCP subprocess
-    # can import doc_retrieval, and pass storage root + API key.
-    repo_root = str(Path(__file__).resolve().parents[1])
-    existing_path = os.environ.get("PYTHONPATH", "")
-    mcp_env["PYTHONPATH"] = f"{repo_root}:{existing_path}" if existing_path else repo_root
-    doc_root = os.environ.get("DOC_RETRIEVAL_ROOT")
-    if doc_root:
-        mcp_env["DOC_RETRIEVAL_ROOT"] = doc_root
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if openai_key:
-        mcp_env["OPENAI_API_KEY"] = openai_key
-
-    log_dir = _log_dir_for_task(task)
-    mcp_env["CUDA_AGENT_DATA_DIR"] = str(log_dir)
     log_tool_use = _make_log_tool_use(log_dir, cfg.agent.log_truncation_chars)
 
     options = ClaudeAgentOptions(
@@ -198,10 +207,15 @@ async def run_optimization(
             ],
         },
         mcp_servers={
-            "cuda_toolkit": {
+            "kb": {
                 "command": sys.executable,
-                "args": [_MCP_SERVER_SCRIPT],
-                "env": mcp_env,
+                "args": [_KB_SERVER],
+                "env": ks_env,
+            },
+            "cuda": {
+                "command": sys.executable,
+                "args": [_CUDA_SERVER],
+                "env": exec_env,
             },
         },
     )

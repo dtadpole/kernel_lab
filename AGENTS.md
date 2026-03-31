@@ -7,13 +7,18 @@ A repository for kernel optimization experiments and related tooling.
 - `cuda_exec/` — FastAPI-based remote CUDA execution service
 - `cuda_agent/` — MCP-based CUDA kernel optimization agent (uses cuda_exec via MCP tools)
 - `doc_retrieval/` — NVIDIA CUDA Toolkit document retrieval system (BM25 + dense search)
+- `plugins/` — Claude Code / Agent SDK plugins (MCP servers + Skills)
+  - `plugins/kb/` — Knowledge search (doc retrieval MCP server)
+  - `plugins/cuda/` — CUDA Toolkit execution service (compile/evaluate/profile MCP server)
 
 ## Repo-level conventions
 
-### 1. Python environment ownership
+### 1. Python environment
 
-- `cuda_exec` manages its own Python dependencies and its own `uv` environment.
-- the repo root does **not** define a shared Python environment for all future components.
+- All components share a single `uv`-managed virtual environment at `.venv`
+- Dependencies are defined in the root `pyproject.toml`
+- Setup: `uv venv .venv --python 3.12 && uv pip install -e "."`
+- Plugins use `.venv/bin/python` to run their MCP servers
 
 ### 2. Metadata is mandatory
 
@@ -144,14 +149,20 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 
 ### 7. `cuda_agent` conventions
 
-- `cuda_agent` manages its own Python environment (`cuda_agent/.venv`) via `uv`
-- `cuda_agent` does not import from `cuda_exec` — it communicates via HTTP through an MCP server
+- `cuda_agent` does not import from `cuda_exec` — it communicates via HTTP through MCP servers
 - `cuda_agent` requires `cuda_exec` to be running separately
 - `cuda_agent` requires `ANTHROPIC_API_KEY` in the environment
 - `cuda_agent` reads the bearer token from the same key file as `cuda_exec` (`~/.keys/cuda_exec.key` or `CUDA_EXEC_KEY_PATH`)
-- the MCP server (`mcp_server.py`) is a FastMCP stdio server wrapping cuda_exec endpoints as tools
+- `cuda_agent` loads two plugin MCP servers: `kb` (knowledge search) and `cuda` (toolkit execution)
 - the agent (`agent.py`) uses `claude-agent-sdk` to run a single long optimization session
 - the agent manages its own iteration loop internally — Claude decides when to compile, evaluate, modify, and converge
+
+### 8. Plugins
+
+- Plugins live in `plugins/` — each is a Claude Code plugin with `.claude-plugin/plugin.json`
+- Each plugin can contain: MCP servers (`.mcp.json`), Skills (`skills/`), hooks, agents
+- Plugins work in both Claude Code CLI (`--plugin-dir`) and Agent SDK (`mcp_servers={}`)
+- MCP servers use the project's `.venv/bin/python` and `PYTHONPATH` set to repo root
 
 ## Owner
 

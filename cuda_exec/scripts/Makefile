@@ -28,7 +28,8 @@ SHELL := /bin/bash
 REPO_ROOT     := $(shell git -C $(dir $(abspath $(lastword $(MAKEFILE_LIST)))) rev-parse --show-toplevel)
 SCRIPTS       := $(REPO_ROOT)/cuda_exec/scripts
 TESTS         := $(REPO_ROOT)/cuda_exec/tests
-VENV_PYTHON   := $(REPO_ROOT)/cuda_exec/.venv/bin/python
+VENV_DIR      := $(REPO_ROOT)/cuda_exec/.venv
+VENV_PYTHON   := $(VENV_DIR)/bin/python
 COMPILE_SH    := $(SCRIPTS)/compile.sh
 EVALUATE_PY   := $(SCRIPTS)/evaluate.py
 PROFILE_SH    := $(SCRIPTS)/profile.sh
@@ -152,6 +153,16 @@ endef
 # Targets
 # ---------------------------------------------------------------------------
 
+.PHONY: ensure-venv
+ensure-venv: ## Create the Python venv with uv if it does not exist
+	@if [ ! -f "$(VENV_PYTHON)" ]; then \
+		echo "--- ensure-venv: creating venv at $(VENV_DIR) ---"; \
+		uv venv "$(VENV_DIR)" --python 3.12; \
+		uv pip install --python "$(VENV_PYTHON)" \
+			-r "$(REPO_ROOT)/cuda_exec/requirements.txt"; \
+		echo "--- ensure-venv: done ---"; \
+	fi
+
 .PHONY: help
 help: ## Show available targets
 	@echo "cuda_exec manual CLI"
@@ -170,6 +181,7 @@ help: ## Show available targets
 	@echo "  make clean-test                              # clean up smoke test output"
 	@echo ""
 	@echo "CONFIG= picks a slug from conf/fixtures/\$$(KERNEL)/configs.json."
+	@echo "CONFIG=all runs evaluate over every config in configs.json."
 	@echo "If omitted, uses the per-kernel default."
 
 .PHONY: show
@@ -204,7 +216,7 @@ clean: ## Remove the entire turn root for current metadata
 	fi
 
 .PHONY: compile
-compile: ## Stage reference + generated files and run the 5-step compile pipeline
+compile: ensure-venv ## Stage reference + generated files and run the 5-step compile pipeline
 	$(call _require_input_files)
 	@set -euo pipefail
 	# Create turn-root directories
@@ -248,20 +260,39 @@ compile: ## Stage reference + generated files and run the 5-step compile pipelin
 	@ls -lh "$(ARTIFACTS)/"
 
 .PHONY: evaluate
-evaluate: ## Run evaluate (reference vs generated comparison) for one config
+evaluate: ensure-venv ## Run evaluate for one config (CONFIG=slug) or all (CONFIG=all)
 	@set -euo pipefail
-	cd "$(SCRIPTS)" && \
-	CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
-	$(VENV_PYTHON) "$(EVALUATE_PY)" \
-		$(_META_ARGS) \
-		--config-slug "$(CONFIG_SLUG)" \
-		--config-json '$(CONFIG_JSON)' \
-		--timeout $(TIMEOUT) \
-		--seed $(SEED) \
-		--num-warmups $(NUM_WARMUPS) \
-		--num-perf-trials $(NUM_PERF_TRIALS) \
-		--num-correctness-trials $(NUM_CORRECTNESS_TRIALS) \
-	| $(VENV_PYTHON) "$(FMT_EVAL_PY)"
+	if [ "$(CONFIG_SLUG)" = "all" ]; then
+		SLUGS=$$($(VENV_PYTHON) -c "import json; print(' '.join(json.load(open('$(_CONFIG_FILE)')).keys()))")
+		for slug in $$SLUGS; do
+			echo ""
+			$(MAKE) -f $(abspath $(lastword $(MAKEFILE_LIST))) evaluate \
+				KERNEL="$(KERNEL)" \
+				CONFIG="$$slug" \
+				CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
+				RUN_TAG="$(RUN_TAG)" \
+				VERSION="$(VERSION)" \
+				TURN="$(TURN)" \
+				TIMEOUT="$(TIMEOUT)" \
+				SEED="$(SEED)" \
+				NUM_WARMUPS="$(NUM_WARMUPS)" \
+				NUM_PERF_TRIALS="$(NUM_PERF_TRIALS)" \
+				NUM_CORRECTNESS_TRIALS="$(NUM_CORRECTNESS_TRIALS)"
+		done
+	else
+		cd "$(SCRIPTS)" && \
+		CUDA_EXEC_ROOT="$(CUDA_EXEC_ROOT)" \
+		$(VENV_PYTHON) "$(EVALUATE_PY)" \
+			$(_META_ARGS) \
+			--config-slug "$(CONFIG_SLUG)" \
+			--config-json '$(CONFIG_JSON)' \
+			--timeout $(TIMEOUT) \
+			--seed $(SEED) \
+			--num-warmups $(NUM_WARMUPS) \
+			--num-perf-trials $(NUM_PERF_TRIALS) \
+			--num-correctness-trials $(NUM_CORRECTNESS_TRIALS) \
+		| $(VENV_PYTHON) "$(FMT_EVAL_PY)"
+	fi
 
 # ---------------------------------------------------------------------------
 # Profile — Nsight Compute hardware-level profiling (requires sudo)
@@ -275,7 +306,7 @@ _NCU_CONFIG_ENV = \
 	CUDA_EXEC_PARAM_SHAPE="$(shell echo '$(CONFIG_JSON)' | $(VENV_PYTHON) -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["shape"]))')"
 
 .PHONY: profile-ncu-generated
-profile-ncu-generated: ## NCU profile the generated CUDA binary for one config
+profile-ncu-generated: ensure-venv ## NCU profile the generated CUDA binary for one config
 	@set -euo pipefail
 	BINARY="$(ARTIFACTS)/compile.attempt_001.generated.bin"
 	if [[ ! -x "$$BINARY" ]]; then
@@ -299,7 +330,7 @@ profile-ncu-generated: ## NCU profile the generated CUDA binary for one config
 	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
 
 .PHONY: profile-ncu-reference
-profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for one config
+profile-ncu-reference: ensure-venv ## NCU profile the reference Python/CuTe DSL kernel for one config
 	@set -euo pipefail
 	REFERENCE_PY_FILE="$(WORKSPACE)/inputs/reference/reference.py"
 	if [[ ! -f "$$REFERENCE_PY_FILE" ]]; then
@@ -324,7 +355,7 @@ profile-ncu-reference: ## NCU profile the reference Python/CuTe DSL kernel for o
 	/usr/local/cuda/bin/ncu --import "$$NCU_PREFIX.ncu-rep" --print-details all
 
 .PHONY: execute
-execute: ## Run a generic command in the workspace (override EXEC_CMD="cmd arg1 arg2")
+execute: ensure-venv ## Run a generic command in the workspace (override EXEC_CMD="cmd arg1 arg2")
 	@set -euo pipefail
 	mkdir -p "$(WORKSPACE)" "$(LOGS)"
 	echo "--- execute: running in $(WORKSPACE) ---"

@@ -1,6 +1,6 @@
 /*
  * High-performance BF16 matrix multiplication kernel (MMA tensor core).
- * K-tile=64 + ldmatrix.trans: doubled K-tile, no transpose kernel.
+ * K-tile=32 + ldmatrix.trans: 48KB static SMEM → 2 blocks/SM occupancy.
  * Persistent kernel with swizzled 4x4 super-tile scheduling.
  *
  * Computes C = A @ B where A is M×K row-major, B is K×N row-major,
@@ -21,10 +21,7 @@
 #include <cuda_bf16.h>
 
 #define N_STAGES 3
-#define SMEM_ROWS 128   /* SMEM rows per matrix per stage (K-tile=64) */
-
-/* Total dynamic SMEM: 2 matrices × N_STAGES × 128 rows × 8 cols × 16 bytes */
-static const size_t GEMM_SMEM_BYTES = 2u * N_STAGES * SMEM_ROWS * 8 * sizeof(uint4);
+#define SMEM_ROWS 64    /* SMEM rows per matrix per stage (K-tile=32) */
 
 
 /* -------------------------------------------------------------------------
@@ -82,7 +79,7 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
 }
 
 /* -------------------------------------------------------------------------
- * Main GEMM kernel: 128×128 block, 4×4 MMA tiling, K-tile=64, 3-stage pipe
+ * Main GEMM kernel: 128×128 block, 4×4 MMA tiling, K-tile=32, 3-stage pipe
  * Persistent kernel: each CTA processes multiple output tiles via tile loop.
  * Swizzled 4×4 super-tile scheduling for L2 locality.
  *
@@ -91,17 +88,17 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
  *                                          ldmatrix.x2.trans transposes S2R
  * C   is M×N row-major (__nv_bfloat16)  — output in BF16
  *
- * Uses dynamic shared memory (96 KB) to exceed the 48 KB static limit.
+ * Uses static shared memory (48 KB) to allow 2 blocks per SM.
  * ------------------------------------------------------------------------- */
-__launch_bounds__(16 * 16)
+__launch_bounds__(256, 2)
 __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
                                 __nv_bfloat16 *C, int M, int N, int K,
                                 int totalTiles, int nTilesN) {
-    /* Dynamic shared memory: As followed by Bs */
-    extern __shared__ char smem_buf[];
-    uint4 (*As)[8] = reinterpret_cast<uint4(*)[8]>(smem_buf);
-    uint4 (*Bs)[8] = reinterpret_cast<uint4(*)[8]>(
-        smem_buf + N_STAGES * SMEM_ROWS * 8 * sizeof(uint4));
+    /* Static shared memory: As followed by Bs
+     * Each: N_STAGES * 64 rows × 8 cols × sizeof(uint4) = 3 * 64 * 8 * 16 = 24,576 bytes
+     * Total: 49,152 bytes (48 KB) — fits in static SMEM limit */
+    __shared__ uint4 As[N_STAGES * SMEM_ROWS][8];
+    __shared__ uint4 Bs[N_STAGES * SMEM_ROWS][8];
 
     uint4 (*aLoadPtr)[8];
     uint4 (*bLoadPtr)[8];
@@ -136,8 +133,8 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
     int K8 = K / 8;
     int N8 = N / 8;
-    int numKBlocks = K / 64;
-    int kStartMax  = (numKBlocks - 1) * 8;   /* max kStart in uint4 units */
+    int numKBlocks = K / 32;
+    int kStartMax  = (numKBlocks - 1) * 4;   /* max kStart in uint4 units (32 BF16 / 8 = 4) */
 
     const uint4 *globalB = reinterpret_cast<const uint4 *>(B);
 
@@ -182,29 +179,24 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 
         /* ---- PRELUDE: load first (N_STAGES - 1) tiles ---- */
         for (int nStage = 0; nStage < N_STAGES - 1; nStage++) {
-            int kStart = nStage * 8;
+            int kStart = nStage * 4;
             aStorePtr = As + SMEM_ROWS * nStage;
             bStorePtr = Bs + SMEM_ROWS * nStage;
 
-            /* A: first K-half (k=0..31), two M-groups */
+            /* A: 2 cp.async (two M-groups, K-tile=32) */
             cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
             cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-            /* A: second K-half (k=32..63) */
-            cp_async(aStorePtr[storeRow + 64] + storeCol, aGlobalAddress + kStart + 4);
-            cp_async(aStorePtr[storeRow + 96] + storeCol, aGlobalAddress + 64 * K8 + kStart + 4);
 
-            /* B: 4 groups of 16 K-rows each (kStart*8 is BF16 K-row offset) */
+            /* B: 2 cp.async (two groups of 16 K-rows each) */
             cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
             cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
-            cp_async(bStorePtr[bStoreRow + 64] + bStoreCol, bGlobalBase + (kStart * 8 + 32) * N8);
-            cp_async(bStorePtr[bStoreRow + 96] + bStoreCol, bGlobalBase + (kStart * 8 + 48) * N8);
 
             asm volatile("cp.async.commit_group;\n" ::);
         }
 
-        /* ---- MAIN LOOP OVER K BLOCKS (K-tile = 64) ---- */
+        /* ---- MAIN LOOP OVER K BLOCKS (K-tile = 32) ---- */
         for (int nStage = 0; nStage < numKBlocks; nStage++) {
-            int kStart = (N_STAGES - 1 + nStage) * 8;
+            int kStart = (N_STAGES - 1 + nStage) * 4;
             aStorePtr = As + SMEM_ROWS * ((nStage + N_STAGES - 1) % N_STAGES);
             bStorePtr = Bs + SMEM_ROWS * ((nStage + N_STAGES - 1) % N_STAGES);
             aLoadPtr  = As + SMEM_ROWS * (nStage % N_STAGES);
@@ -213,13 +205,12 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
             asm volatile("cp.async.wait_group %0;\n" :: "n"(N_STAGES - 2));
             __syncthreads();
 
-            /* ---- Load FIRST K-half (k=0..31) from SMEM to registers ---- */
-            /* A: ldmatrix.x4 (non-transposed) */
+            /* ---- Load A from SMEM to registers: ldmatrix.x4 ---- */
             for (int m = 0; m < 4; m++) {
                 load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA] + loadColA);
                 load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA] + (loadColA ^ 2));
             }
-            /* B: ldmatrix.x2.trans (first 32 K-rows → SMEM rows 0..63) */
+            /* ---- Load B from SMEM to registers: ldmatrix.x2.trans ---- */
             for (int n = 0; n < 4; n++) {
                 int loadColB = loadColB_base ^ n;
                 load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB     ] + loadColB);
@@ -230,36 +221,11 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
             kStart = (kStart > kStartMax) ? kStartMax : kStart;
             cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
             cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-            cp_async(aStorePtr[storeRow + 64] + storeCol, aGlobalAddress + kStart + 4);
-            cp_async(aStorePtr[storeRow + 96] + storeCol, aGlobalAddress + 64 * K8 + kStart + 4);
             cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
             cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
-            cp_async(bStorePtr[bStoreRow + 64] + bStoreCol, bGlobalBase + (kStart * 8 + 32) * N8);
-            cp_async(bStorePtr[bStoreRow + 96] + bStoreCol, bGlobalBase + (kStart * 8 + 48) * N8);
             asm volatile("cp.async.commit_group;\n" ::);
 
-            /* ---- MMA FIRST K-half (k=0..31): 32 HMMA instructions ---- */
-            for (int m = 0; m < 4; m++) {
-                for (int n = 0; n < 4; n++) {
-                    mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
-                    mma_m16n8k16(aReg[m] + 4, bReg[n] + 2, dReg[m][n], dReg[m][n]);
-                }
-            }
-
-            /* ---- Load SECOND K-half (k=32..63) from SMEM to registers ---- */
-            /* A: +64 offset for second K-half */
-            for (int m = 0; m < 4; m++) {
-                load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA + 64] + loadColA);
-                load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA + 64] + (loadColA ^ 2));
-            }
-            /* B: +64 offset for second K-half (SMEM rows 64..127) */
-            for (int n = 0; n < 4; n++) {
-                int loadColB = loadColB_base ^ n;
-                load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB + 64] + loadColB);
-                load_matrix_x2_trans(bReg[n] + 2, bLoadPtr[loadRowB + 96] + loadColB);
-            }
-
-            /* ---- MMA SECOND K-half (k=32..63): 32 HMMA instructions ---- */
+            /* ---- MMA: single K-block (32 BF16 = 2× m16n8k16) ---- */
             for (int m = 0; m < 4; m++) {
                 for (int n = 0; n < 4; n++) {
                     mma_m16n8k16(aReg[m]    , bReg[n]    , dReg[m][n], dReg[m][n]);
@@ -295,9 +261,9 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
  *
  * Persistent kernel: launches min(188, totalTiles) CTAs, each processing
  * multiple output tiles via a tile loop with swizzled scheduling.
+ * No dynamic SMEM needed — static 48KB fits within default limit.
  * ------------------------------------------------------------------------- */
 static int s_M = 0, s_N = 0, s_K = 0;
-static bool s_smem_configured = false;
 
 static void ensure_shape(int n) {
     if (s_M > 0) return;
@@ -328,14 +294,6 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     ensure_shape(n);
     int M = s_M, N = s_N, K = s_K;
 
-    /* Configure dynamic SMEM for GEMM kernel (once) */
-    if (!s_smem_configured) {
-        cudaFuncSetAttribute(mma_matmul_bf16,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             (int)GEMM_SMEM_BYTES);
-        s_smem_configured = true;
-    }
-
     /* Persistent kernel: compute tile counts and launch with limited CTAs */
     int nTilesM = M / 128;
     int nTilesN = N / 128;
@@ -344,7 +302,7 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     dim3 threads(16, 16);
     int gridSize = totalTiles < 188 ? totalTiles : 188;
     dim3 grid(gridSize);
-    mma_matmul_bf16<<<grid, threads, GEMM_SMEM_BYTES, stream>>>(
+    mma_matmul_bf16<<<grid, threads, 0, stream>>>(
         A, B, C, M, N, K, totalTiles, nTilesN);
 
     return 0;

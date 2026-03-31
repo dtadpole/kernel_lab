@@ -5,8 +5,10 @@
  * C is M×N row-major.  All pointers are __nv_bfloat16; MMA accumulates
  * in FP32, results are converted back to BF16 on store.
  *
- * B(K×N) is pre-transposed to B_t(N×K) in kernel_run() so that B loading
- * uses the same contiguous-along-K cp.async path as A.
+ * B(K×N) is loaded directly along N (contiguous) via cp.async into SMEM.
+ * ldmatrix.trans transposes the 8×8 BF16 tiles during SMEM-to-register
+ * load, producing K-contiguous register data for the MMA .col operand.
+ * No separate transpose kernel is needed.
  *
  * kernel_run contract:
  *   extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
@@ -58,6 +60,19 @@ __device__ void load_matrix_x2(unsigned *destReg, uint4 *srcAddr) {
 }
 
 /* -------------------------------------------------------------------------
+ * PTX helper: ldmatrix.sync.aligned.x2.trans — load 2 regs transposed
+ * ------------------------------------------------------------------------- */
+__forceinline__
+__device__ void load_matrix_x2_trans(unsigned *destReg, uint4 *srcAddr) {
+    unsigned ptxSrcAddr = __cvta_generic_to_shared(srcAddr);
+    asm volatile(
+        "ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];\n"
+        : "=r"(destReg[0]), "=r"(destReg[1])
+        :  "r"(ptxSrcAddr)
+    );
+}
+
+/* -------------------------------------------------------------------------
  * PTX helper: mma.sync.aligned.m16n8k16 — BF16 inputs, FP32 accumulate
  * ------------------------------------------------------------------------- */
 __forceinline__
@@ -74,52 +89,11 @@ __device__ void mma_m16n8k16(const unsigned *A, const unsigned *B, float *C, flo
 }
 
 /* -------------------------------------------------------------------------
- * Transpose kernel: B(K, N) row-major → B_t(N, K) row-major
- *
- * Uses 32×32 tiled transpose with +1 SMEM padding to avoid bank conflicts.
- * Block dim: (32, 8).  Each thread handles 4 rows of the 32-row tile.
- * Grid dim: (ceil(N/32), ceil(K/32)).
- * ------------------------------------------------------------------------- */
-__global__ void transpose_bf16(const __nv_bfloat16 *__restrict__ src,
-                                __nv_bfloat16 *__restrict__ dst,
-                                int K, int N) {
-    /* +1 padding per row to avoid shared memory bank conflicts */
-    __shared__ __nv_bfloat16 tile[32][33];
-
-    int bx = blockIdx.x * 32;  /* N tile start */
-    int by = blockIdx.y * 32;  /* K tile start */
-
-    int tx = threadIdx.x;      /* 0..31 */
-    int ty = threadIdx.y;      /* 0..7  */
-
-    /* Load: each thread loads 4 elements along K (stride 8 in ty) */
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        int k = by + ty * 4 + i;
-        int n = bx + tx;
-        if (k < K && n < N)
-            tile[ty * 4 + i][tx] = src[k * N + n];
-        else if (k < 32 || n < 32)  /* keep tile valid for out-of-bounds */
-            tile[ty * 4 + i][tx] = __float2bfloat16(0.f);
-    }
-
-    __syncthreads();
-
-    /* Store: transposed — each thread writes 4 elements along N (stride 8 in ty) */
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        int n = bx + ty * 4 + i;
-        int k = by + tx;
-        if (n < N && k < K)
-            dst[n * K + k] = tile[tx][ty * 4 + i];
-    }
-}
-
-/* -------------------------------------------------------------------------
  * Main GEMM kernel: 128×128 block, 4×4 MMA tiling, 3-stage pipeline
  *
- * A   is M×K row-major (__nv_bfloat16)  — loaded via cp.async
- * B   is N×K row-major (__nv_bfloat16)  — pre-transposed, loaded via cp.async
+ * A   is M×K row-major (__nv_bfloat16)  — loaded via cp.async, ldmatrix.x4
+ * B   is K×N row-major (__nv_bfloat16)  — loaded via cp.async along N,
+ *                                          ldmatrix.x2.trans transposes S2R
  * C   is M×N row-major (__nv_bfloat16)  — output in BF16
  * ------------------------------------------------------------------------- */
 __launch_bounds__(16 * 16)
@@ -136,7 +110,6 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
     int blockRowStart = blockIdx.y * 128;
     int blockColStart = blockIdx.x * 128;
     const uint4 *globalTileA = reinterpret_cast<const uint4 *>(A + blockRowStart * K);
-    const uint4 *globalTileB = reinterpret_cast<const uint4 *>(B + blockColStart * K);
 
     int threadID = threadIdx.y * blockDim.x + threadIdx.x;
     int warpID   = threadID / 32;
@@ -148,18 +121,36 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
     unsigned bReg[4][4];
     float dReg[4][4][4] = {0.f};
 
+    /* A store indices (K-contiguous in SMEM) */
     int storeRow = warpID * 4 + laneID / 8;
     int storeCol = (laneID % 8) ^ (laneID / 8);
 
+    /* B store indices (N-contiguous in SMEM, K-rows × N-chunks layout) */
+    int bStoreRow = warpID * 4 + laneID / 8;          /* same as storeRow */
+    int bStoreCol = (laneID % 8) ^ ((warpID * 2 + laneID / 16) & 7);
+
+    /* A load indices (ldmatrix.x4, non-transposed) */
     int loadRowA = (laneID % 16) / 2;
     int loadColA = (laneID / 16 + 4 * (laneID % 2)) ^ (loadRowA % 4);
-    int loadRowB = (laneID % 8) / 2;
-    int loadColB = (laneID / 8 + 4 * (laneID % 2)) ^ (loadRowB % 4);
+
+    /* B load indices (ldmatrix.x2.trans — rows are K, cols are N-chunks) */
+    int loadRowB = (laneID % 16) * 2 + (warpID % 4) / 2;
+    int loadColB_base = (((warpID % 4) & 1) * 4) ^ (laneID & 7);
 
     int K8 = K / 8;
+    int N8 = N / 8;
 
+    /* A: row-major M×K, load K-contiguous uint4 */
     const uint4 *aGlobalAddress = globalTileA + (warpID * 8 + laneID / 4) * K8 + laneID % 4;
-    const uint4 *bGlobalAddress = globalTileB + (warpID * 8 + laneID / 4) * K8 + laneID % 4;
+
+    /* B: row-major K×N, load N-contiguous uint4.
+     * Thread mapping: k_local = warpID*2 + laneID/16 (0..15),
+     *                 n_local = laneID%16 (0..15).
+     * First cp.async: K-rows 0..15,  Second cp.async: K-rows 16..31. */
+    const uint4 *globalB = reinterpret_cast<const uint4 *>(B);
+    const uint4 *bGlobalBase = globalB
+        + (warpID * 2 + laneID / 16) * N8
+        + blockColStart / 8 + laneID % 16;
 
     int kStartMax = (K / 32 - 1) * 4;
     int numKBlocks = K / 32;
@@ -170,10 +161,12 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         aStorePtr = As + 64 * nStage;
         bStorePtr = Bs + 64 * nStage;
 
+        /* A: offset along K columns (kStart uint4) */
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-        cp_async(bStorePtr[storeRow     ] + storeCol, bGlobalAddress + kStart);
-        cp_async(bStorePtr[storeRow + 32] + storeCol, bGlobalAddress + 64 * K8 + kStart);
+        /* B: offset along K rows (kStart*8 rows × N8 stride) */
+        cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
+        cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
         asm volatile("cp.async.commit_group;\n" ::);
     }
 
@@ -188,20 +181,25 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
         asm volatile("cp.async.wait_group %0;\n" :: "n"(N_STAGES - 2));
         __syncthreads();
 
+        /* A: ldmatrix.x4 (non-transposed, K-contiguous SMEM) */
         for (int m = 0; m < 4; m++) {
             load_matrix_x4(aReg[m]    , aLoadPtr[m * 8 + warpOffsetA + loadRowA] + loadColA);
             load_matrix_x4(aReg[m] + 4, aLoadPtr[m * 8 + warpOffsetA + loadRowA] + (loadColA ^ 2));
         }
+        /* B: ldmatrix.x2.trans (N-contiguous SMEM, transpose during S2R load) */
         for (int n = 0; n < 4; n++) {
-            load_matrix_x2(bReg[n]    , bLoadPtr[n * 4 + warpOffsetB + loadRowB] + loadColB);
-            load_matrix_x2(bReg[n] + 2, bLoadPtr[n * 4 + warpOffsetB + loadRowB] + (loadColB ^ 2));
+            int loadColB = loadColB_base ^ n;
+            load_matrix_x2_trans(bReg[n]    , bLoadPtr[loadRowB     ] + loadColB);
+            load_matrix_x2_trans(bReg[n] + 2, bLoadPtr[loadRowB + 32] + loadColB);
         }
 
         kStart = (kStart > kStartMax) ? kStartMax : kStart;
+        /* A: offset along K columns */
         cp_async(aStorePtr[storeRow     ] + storeCol, aGlobalAddress + kStart);
         cp_async(aStorePtr[storeRow + 32] + storeCol, aGlobalAddress + 64 * K8 + kStart);
-        cp_async(bStorePtr[storeRow     ] + storeCol, bGlobalAddress + kStart);
-        cp_async(bStorePtr[storeRow + 32] + storeCol, bGlobalAddress + 64 * K8 + kStart);
+        /* B: offset along K rows */
+        cp_async(bStorePtr[bStoreRow     ] + bStoreCol, bGlobalBase + kStart * 8 * N8);
+        cp_async(bStorePtr[bStoreRow + 32] + bStoreCol, bGlobalBase + (kStart * 8 + 16) * N8);
         asm volatile("cp.async.commit_group;\n" ::);
 
         for (int m = 0; m < 4; m++) {
@@ -232,11 +230,11 @@ __global__ void mma_matmul_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *B,
 /* -------------------------------------------------------------------------
  * kernel_run — entry point.
  *
- * Allocates a static B_t(N×K) buffer on first call, launches the transpose
- * kernel to convert B(K×N) → B_t(N×K), then runs the GEMM.
+ * Launches the GEMM directly on A(M×K) and B(K×N).  No transpose needed:
+ * B is loaded N-contiguous via cp.async, and ldmatrix.trans transposes
+ * during the SMEM-to-register load.
  * ------------------------------------------------------------------------- */
 static int s_M = 0, s_N = 0, s_K = 0;
-static __nv_bfloat16 *s_Bt = nullptr;
 
 static void ensure_shape(int n) {
     if (s_M > 0) return;
@@ -267,19 +265,10 @@ extern "C" int kernel_run(__nv_bfloat16 **inputs,  int num_inputs,
     ensure_shape(n);
     int M = s_M, N = s_N, K = s_K;
 
-    /* Allocate B_t buffer once (N×K, same element count as B) */
-    if (s_Bt == nullptr)
-        cudaMalloc(&s_Bt, (size_t)N * K * sizeof(__nv_bfloat16));
-
-    /* Transpose B(K×N) → B_t(N×K) every call (no caching) */
-    dim3 transposeBlock(32, 8);
-    dim3 transposeGrid((N + 31) / 32, (K + 31) / 32);
-    transpose_bf16<<<transposeGrid, transposeBlock, 0, stream>>>(B, s_Bt, K, N);
-
-    /* GEMM over A(M×K) and B_t(N×K) */
+    /* GEMM over A(M×K) and B(K×N) — no transpose needed */
     dim3 threads(16, 16);
     dim3 grid(N / 128, M / 128);
-    mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, s_Bt, C, M, N, K);
+    mma_matmul_bf16<<<grid, threads, 0, stream>>>(A, B, C, M, N, K);
 
     return 0;
 }

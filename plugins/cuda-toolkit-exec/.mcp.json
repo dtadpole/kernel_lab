@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cuda-toolkit-exec": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "cwd": "${pluginDir}"
+    }
+  }
+}

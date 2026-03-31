@@ -12,6 +12,7 @@ import os
 import sys
 import signal
 import statistics
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,22 +43,39 @@ def set_seed(seed: int) -> None:
 # Device locking
 # ---------------------------------------------------------------------------
 
+LOCK_TIMEOUT_SECONDS = 180  # 3 minutes
+LOCK_POLL_INTERVAL = 5      # seconds between retry / status messages
+
+
 def acquire_device_lock(device: torch.device) -> int | None:
     lock_dir = Path.home() / ".cuda_exec"
     lock_dir.mkdir(parents=True, exist_ok=True)
     device_index = device.index if device.index is not None else 0
     lock_path = lock_dir / f".lock_cuda_{device_index}"
-    try:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        return fd
-    except BlockingIOError:
-        raise RuntimeError(
-            f"CUDA device {device_index} is locked by another process. "
-            f"Lock file: {lock_path}"
-        )
+
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
+    start = time.monotonic()
+
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            return fd
+        except BlockingIOError:
+            elapsed = time.monotonic() - start
+            if elapsed >= LOCK_TIMEOUT_SECONDS:
+                os.close(fd)
+                raise RuntimeError(
+                    f"CUDA device {device_index} lock timeout after {LOCK_TIMEOUT_SECONDS}s. "
+                    f"Lock file: {lock_path}"
+                )
+            print(
+                f"[lock] CUDA device {device_index} is locked by another process, "
+                f"waited {elapsed:.0f}s / {LOCK_TIMEOUT_SECONDS}s — still waiting ...",
+                file=sys.stderr, flush=True,
+            )
+            time.sleep(LOCK_POLL_INTERVAL)
 
 
 def release_device_lock(lock_fd: int | None) -> None:

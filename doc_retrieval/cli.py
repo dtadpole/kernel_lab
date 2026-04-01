@@ -1,4 +1,4 @@
-"""CLI subcommands for doc_retrieval: download, parse, index, search."""
+"""CLI subcommands for doc_retrieval: download, parse, index, find, browse, read."""
 
 from __future__ import annotations
 
@@ -32,10 +32,10 @@ def cmd_index(args: argparse.Namespace) -> None:
     build_indices(only=args.only)
 
 
-def cmd_search(args: argparse.Namespace) -> None:
-    from doc_retrieval.searcher import cli_search
+def cmd_find(args: argparse.Namespace) -> None:
+    from doc_retrieval.searcher import cli_find
 
-    cli_search(
+    cli_find(
         query=args.query,
         mode=args.mode,
         top_k=args.top_k,
@@ -115,8 +115,8 @@ def main() -> None:
     )
     ix.set_defaults(func=cmd_index)
 
-    # --- search ---
-    sr = sub.add_parser("search", help="Search CUDA documentation")
+    # --- find ---
+    sr = sub.add_parser("find", help="Search CUDA documentation")
     sr.add_argument("query", help="Search query")
     sr.add_argument(
         "--mode",
@@ -130,7 +130,7 @@ def main() -> None:
         default=5,
         help="Number of results (default: 5)",
     )
-    sr.set_defaults(func=cmd_search)
+    sr.set_defaults(func=cmd_find)
 
     # --- browse ---
     br = sub.add_parser("browse", help="Browse document table of contents")

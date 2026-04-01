@@ -9,8 +9,8 @@ It downloads, parses, indexes, and searches docs from `docs.nvidia.com/cuda/`,
 providing BM25 (sparse) and dense (FAISS + API embeddings) retrieval with hybrid
 fusion via Reciprocal Rank Fusion (RRF).
 
-Designed for integration with `cuda_agent` as MCP tools so the optimization agent
-can look up CUDA APIs, best practices, PTX instructions, and memory model semantics.
+Designed for CLI-based integration with the KB plugin so agents can look up CUDA
+APIs, best practices, PTX instructions, and memory model semantics.
 
 ## Commands
 
@@ -33,9 +33,9 @@ doc_retrieval/.venv/bin/python -m doc_retrieval index --only bm25
 doc_retrieval/.venv/bin/python -m doc_retrieval index --only dense
 ```
 
-### Search (CLI testing)
+### Find (search documentation)
 ```bash
-doc_retrieval/.venv/bin/python -m doc_retrieval search "shared memory bank conflicts" --mode hybrid
+doc_retrieval/.venv/bin/python -m doc_retrieval find "shared memory bank conflicts" --mode hybrid
 ```
 
 ## Architecture
@@ -49,7 +49,7 @@ doc_retrieval/.venv/bin/python -m doc_retrieval search "shared memory bank confl
 - **`searcher.py`** -- Unified search interface: BM25, dense, and hybrid (RRF) modes. TOC browsing and section reading for navigation. Lazy-loads all data on first use.
 - **`embeddings.py`** -- Thin API client for embedding providers (OpenAI, Voyage). Batched requests with rate limiting.
 - **`config.py`** -- Hydra config loader (same pattern as `cuda_agent/config.py`).
-- **`cli.py`** -- CLI subcommands: download, parse, index, search, browse, read.
+- **`cli.py`** -- CLI subcommands: download, parse, index, find, browse, read.
 
 ### Key design decisions
 

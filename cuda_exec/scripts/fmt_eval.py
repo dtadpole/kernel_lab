@@ -47,11 +47,25 @@ def main():
           f"  max={fmt(gl.get('max'), 'ms')}"
           f"  runs={gr}")
 
+    cl = d.get("cudnn", {}).get("performance", {}).get("latency_ms", {})
+    cr = d.get("cudnn", {}).get("performance", {}).get("runs", "?")
+    if cl:
+        print(f"  cudnn:       median={fmt(cl.get('median'), 'ms')}"
+              f"  mean={fmt(cl.get('mean'), 'ms')}"
+              f"  min={fmt(cl.get('min'), 'ms')}"
+              f"  max={fmt(cl.get('max'), 'ms')}"
+              f"  runs={cr}")
+
     su = p.get("speedup")
     su_str = f"{su:.2f}x" if su else "n/a"
-    print(f"  speedup:     {su_str}"
-          f"  (ref={fmt(p.get('reference_median_ms'), 'ms')}"
-          f"  gen={fmt(p.get('generated_median_ms'), 'ms')})")
+    su_cudnn = p.get("speedup_vs_cudnn")
+    su_cudnn_str = f"{su_cudnn:.2f}x" if su_cudnn else ""
+    speedup_line = (f"  speedup:     {su_str}"
+                    f"  (ref={fmt(p.get('reference_median_ms'), 'ms')}"
+                    f"  gen={fmt(p.get('generated_median_ms'), 'ms')})")
+    if su_cudnn_str:
+        speedup_line += f"  vs_cudnn={su_cudnn_str}"
+    print(speedup_line)
 
     return 0
 

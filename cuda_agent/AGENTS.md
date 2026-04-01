@@ -27,10 +27,9 @@ cd /home/centos/kernel_lab
 - `ANTHROPIC_API_KEY` must be set in the environment
 - Bearer token key file at `~/.keys/cuda_exec.key` (or override via `CUDA_EXEC_KEY_PATH`)
 
-### Test plugin MCP servers standalone
+### Test plugin MCP server standalone
 ```bash
 cd /home/centos/kernel_lab
-PYTHONPATH="$PWD" .venv/bin/python plugins/kb/mcp_server.py
 PYTHONPATH="$PWD" .venv/bin/python plugins/cuda/mcp_server.py
 ```
 
@@ -38,22 +37,23 @@ PYTHONPATH="$PWD" .venv/bin/python plugins/cuda/mcp_server.py
 
 ### Module responsibilities
 
-- **`agent.py`** — Agent orchestration. Loads two plugin MCP servers (`kb` for knowledge search, `cuda` for toolkit execution) and runs the optimization loop. Claude manages iteration internally.
+- **`agent.py`** — Agent orchestration. Loads the `cuda` plugin MCP server for toolkit execution and runs the optimization loop. Documentation search uses `python -m doc_retrieval` CLI via Bash. Claude manages iteration internally.
 - **`prompts.py`** — System prompt encoding workflow rules, convergence criteria, and CUDA optimization techniques. Initial prompt template formatting.
 - **`task.py`** — `OptimizationTask` dataclass holding all inputs for an optimization run.
 - **`cli.py`** — CLI argument parsing, file reading, task construction.
 - **`__main__.py`** — Entry point for `python -m cuda_agent`.
 
-### Plugin MCP servers (under `plugins/`)
+### Plugin MCP server (under `plugins/`)
 
-- **`plugins/kb/mcp_server.py`** — 4 doc retrieval tools: `search_docs`, `lookup_doc_section`, `browse_toc`, `read_section`
 - **`plugins/cuda/mcp_server.py`** — 9 execution tools: `compile`, `evaluate`, `profile`, `execute`, `read_file`, `get_compile_data`, `get_evaluate_data`, `get_profile_data`, `get_data_point`
+
+Documentation search is handled via `python -m doc_retrieval find/read/browse` CLI (no MCP server).
 
 ### Key design decisions
 
 - **Loose coupling** — MCP servers make HTTP calls to cuda_exec. No imports from `cuda_exec` package.
 - **Single long agent run** — Claude manages the optimization loop internally rather than an outer Python loop.
-- **Two independent MCP servers** — Knowledge search and toolkit execution are separate plugins, loaded independently.
+- **MCP for execution, CLI for docs** — Toolkit execution uses an MCP server; documentation search uses the `doc_retrieval` CLI via Bash.
 - **Binary content filtering** — The cuda MCP server replaces base64-encoded payloads with placeholders to keep tool results within context limits.
 - **Bearer token auth** — The cuda MCP server reads the same key file as cuda_exec (`~/.keys/cuda_exec.key`).
 - **Local data store** — Every tool call saves its full raw request and response (before compaction) to `~/.cuda_agent/<run_tag>/<version>/<direction_id>_<direction_slug>/turn_<turn>/`.

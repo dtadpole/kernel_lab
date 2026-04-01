@@ -1,6 +1,5 @@
-"""Plugin-level tests: loading, tool registration, integrity."""
+"""Plugin-level tests: manifest, skills, structure integrity."""
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -20,43 +19,33 @@ def test_kb_plugin_manifest():
 
 
 @pytest.mark.quick
-def test_kb_mcp_config():
-    """.mcp.json exists and references the MCP server."""
-    mcp_json = _PLUGIN_DIR / ".mcp.json"
-    assert mcp_json.exists()
-    data = json.loads(mcp_json.read_text())
-    assert "kb" in data["mcpServers"]
-
-
-@pytest.mark.quick
-def test_kb_mcp_server_imports():
-    """MCP server module can be imported without errors."""
-    spec = importlib.util.spec_from_file_location(
-        "kb_mcp", _PLUGIN_DIR / "mcp_server.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    assert hasattr(mod, "mcp")
-
-
-@pytest.mark.quick
-def test_kb_mcp_tools_registered():
-    """All 4 expected tools are registered."""
-    spec = importlib.util.spec_from_file_location(
-        "kb_mcp", _PLUGIN_DIR / "mcp_server.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    tools = set(mod.mcp._tool_manager._tools.keys())
-    expected = {"search_docs", "lookup_doc_section", "browse_toc", "read_section"}
-    assert expected == tools, f"Missing: {expected - tools}, Extra: {tools - expected}"
+def test_kb_no_mcp():
+    """KB plugin is skill-only — no MCP server or .mcp.json."""
+    assert not (_PLUGIN_DIR / ".mcp.json").exists()
+    assert not (_PLUGIN_DIR / "mcp_server.py").exists()
 
 
 @pytest.mark.quick
 def test_kb_skills_exist():
     """All skill directories have SKILL.md."""
     skills_dir = _PLUGIN_DIR / "skills"
-    expected_skills = {"search", "ingest", "rebuild", "download"}
+    expected_skills = {"docs", "index"}
     for skill_name in expected_skills:
         skill_file = skills_dir / skill_name / "SKILL.md"
         assert skill_file.exists(), f"Missing {skill_file}"
+
+
+@pytest.mark.quick
+def test_kb_skills_have_frontmatter():
+    """Each SKILL.md has required frontmatter fields."""
+    skills_dir = _PLUGIN_DIR / "skills"
+    for skill_dir in skills_dir.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_file = skill_dir / "SKILL.md"
+        if not skill_file.exists():
+            continue
+        content = skill_file.read_text()
+        assert content.startswith("---"), f"{skill_file} missing frontmatter"
+        assert "name:" in content, f"{skill_file} missing name field"
+        assert "description:" in content, f"{skill_file} missing description field"

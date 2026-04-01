@@ -1,0 +1,21 @@
+# cuda_exec service runtime dependencies.
+#
+# This is the single source of truth for the remote venv.
+# deploy/cli.py reads this file during `deploy` to install packages.
+#
+# Core service
+fastapi>=0.116,<1.0
+uvicorn[standard]>=0.35,<1.0
+pydantic>=2.0,<3.0
+httpx>=0.28,<1.0
+psutil>=7.0,<8.0
+pyyaml>=6.0,<7.0
+
+# CUDA / GPU
+torch>=2.11
+nvidia-cutlass-dsl>=4.0
+numpy>=2.0
+cuda-python>=13.0
+
+# Build tools
+ninja>=1.0

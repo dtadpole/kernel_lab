@@ -1,42 +1,60 @@
-"""Search tool-level tests: individual MCP tool calls."""
+"""CLI-level tests: verify doc_retrieval subcommands work end-to-end."""
 
-import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+# venv may be in the main repo root, not a worktree copy
+_VENV = _REPO_ROOT / "doc_retrieval" / ".venv" / "bin" / "python"
+if not _VENV.exists():
+    # fall back to the main repo
+    _VENV = Path("/home/centos/kernel_lab/doc_retrieval/.venv/bin/python")
+_PYTHON = str(_VENV)
 
 
-@pytest.fixture(scope="module")
-def kb_mcp():
-    """Import the kb MCP server module."""
-    spec = importlib.util.spec_from_file_location(
-        "kb_mcp", _PLUGIN_DIR / "mcp_server.py"
+def _run_cli(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [_PYTHON, "-m", "doc_retrieval", *args],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_search_docs_returns_results(kb_mcp):
-    """search_docs returns a list of results with expected fields."""
-    result = await kb_mcp.search_docs(query="shared memory bank conflicts")
-    data = json.loads(result)
+@pytest.mark.quick
+def test_find_returns_results():
+    """find subcommand returns results with expected fields."""
+    result = _run_cli("find", "shared memory bank conflicts", "--mode", "bm25")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    output = result.stdout
+    assert "Result 1" in output
+    assert "score:" in output.lower() or "score" in output
+    assert "Title:" in output
+    assert "URL:" in output
+
+
+@pytest.mark.quick
+def test_browse_returns_toc():
+    """browse subcommand returns TOC structure."""
+    result = _run_cli("browse", "cuda-c-programming-guide", "--depth", "1")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    data = json.loads(result.stdout)
     assert isinstance(data, list)
-    if data:  # index may not be built
-        assert "title" in data[0]
-        assert "score" in data[0]
-        assert "url" in data[0]
+    assert len(data) > 0
+    assert "section_id" in data[0]
+    assert "title" in data[0]
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_browse_toc_returns_structure(kb_mcp):
-    """browse_toc returns TOC structure for a known doc."""
-    result = await kb_mcp.browse_toc(doc_id="cuda-c-programming-guide")
-    data = json.loads(result)
-    assert isinstance(data, (dict, list))
+@pytest.mark.quick
+def test_read_returns_section():
+    """read subcommand returns a section with content and nav."""
+    result = _run_cli("read", "cuda-c-programming-guide", "programming-model")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert "title" in data
+    assert "content" in data
+    assert "nav" in data

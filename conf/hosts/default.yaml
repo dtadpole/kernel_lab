@@ -7,20 +7,30 @@
 #   ~/.cuda_exec_service/  — service code, venv, config
 #   ~/.cuda_exec/          — runtime data (turns, artifacts, logs)
 #   ~/.keys/cuda_exec.key  — bearer token for API auth
+#
+# Network topology:
+#   Both hosts are behind 1and1 (66.179.249.233) with port forwarding.
+#   _one: internet-visible port range 41000-41999
+#   _two: internet-visible port range 42000-42999
+#   SSH ports: _one=41922, _two=42922
+#   Service ports must be within the host's internet-visible range.
 
 defaults:
   service_dir: ".cuda_exec_service"
   data_dir: ".cuda_exec"
   key_path: ".keys/cuda_exec.key"
-  port: 8000
   service_name: "cuda-exec"
 
 hosts:
   _one:
     ssh_host: "_one"
-    port: 8000
+    port: 41980
+    internet_host: "66.179.249.233"
+    internet_port_range: "41000-41999"
     description: "RTX PRO 6000 Blackwell #1"
   _two:
     ssh_host: "_two"
-    port: 8000
+    port: 42980
+    internet_host: "66.179.249.233"
+    internet_port_range: "42000-42999"
     description: "RTX PRO 6000 Blackwell #2"

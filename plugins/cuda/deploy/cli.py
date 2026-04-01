@@ -48,7 +48,7 @@ def _resolve_host(cfg: dict[str, Any], name: str) -> dict[str, Any]:
         available = ", ".join(sorted(hosts.keys()))
         print(f"ERROR: unknown host '{name}'. Available: {available}", file=sys.stderr)
         sys.exit(1)
-    defaults = cfg.get("defaults", {})
+    defaults = cfg.get("host_defaults", {})
     return {**defaults, **hosts[name]}
 
 

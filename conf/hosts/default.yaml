@@ -15,7 +15,7 @@
 #   SSH ports: _one=41922, _two=42922
 #   Service ports must be within the host's internet-visible range.
 
-defaults:
+host_defaults:
   service_dir: ".cuda_exec_service"
   data_dir: ".cuda_exec"
   key_path: ".keys/cuda_exec.key"

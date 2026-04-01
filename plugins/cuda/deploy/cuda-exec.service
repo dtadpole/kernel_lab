@@ -14,13 +14,8 @@ Environment=PYTHONPATH=%h/.cuda_exec_service
 Environment=CUDA_EXEC_ROOT=%h/.cuda_exec
 Environment=PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Hardening (compatible with GPU/CUDA access)
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictRealtime=true
-LockPersonality=true
+# Hardening directives that imply NoNewPrivileges=true are intentionally
+# omitted — NCU profiling requires sudo for GPU performance counters.
 
 # Resource limits
 LimitNOFILE=65536

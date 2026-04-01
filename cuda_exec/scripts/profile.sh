@@ -64,7 +64,7 @@ fi
 
 mkdir -p "$(dirname "$EXPORT_PREFIX")"
 
-CMD=(/usr/local/cuda/bin/ncu --set "$SET_NAME" --target-processes "$TARGET_PROCESSES")
+CMD=(sudo --preserve-env /usr/local/cuda/bin/ncu --set "$SET_NAME" --target-processes "$TARGET_PROCESSES")
 if [[ "$FORCE_OVERWRITE" == "1" ]]; then
   CMD+=(--force-overwrite)
 fi

@@ -32,7 +32,6 @@ from cuda_agent.prompts import SYSTEM_PROMPT, format_initial_prompt
 from cuda_agent.task import OptimizationTask
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_KB_SERVER = str(_REPO_ROOT / "plugins" / "kb" / "mcp_server.py")
 _CUDA_SERVER = str(_REPO_ROOT / "plugins" / "cuda" / "mcp_server.py")
 _BLOCKED_TOOLS_FILE = Path(__file__).resolve().parent / "blocked_tools.json"
 
@@ -155,26 +154,12 @@ async def run_optimization(
 
     max_turns = task.max_iterations * cfg.agent.max_turns_multiplier
 
-    # Build per-server env dicts for the two MCP server subprocesses.
-    # Config values from Hydra are passed as env vars so the subprocesses
+    # Build env dict for the CUDA MCP server subprocess.
+    # Config values from Hydra are passed as env vars so the subprocess
     # (which cannot import Hydra config) can read them.
-    repo_root = str(_REPO_ROOT)
-    existing_path = os.environ.get("PYTHONPATH", "")
     base_env: dict[str, str] = {
         "HOME": os.environ.get("HOME", str(Path.home())),
     }
-
-    # Knowledge search MCP server env
-    ks_env: dict[str, str] = {
-        **base_env,
-        "PYTHONPATH": f"{repo_root}:{existing_path}" if existing_path else repo_root,
-    }
-    doc_root = os.environ.get("DOC_RETRIEVAL_ROOT")
-    if doc_root:
-        ks_env["DOC_RETRIEVAL_ROOT"] = doc_root
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if openai_key:
-        ks_env["OPENAI_API_KEY"] = openai_key
 
     # CUDA toolkit execution service MCP server env
     log_dir = _log_dir_for_task(task)
@@ -207,11 +192,6 @@ async def run_optimization(
             ],
         },
         mcp_servers={
-            "kb": {
-                "command": sys.executable,
-                "args": [_KB_SERVER],
-                "env": ks_env,
-            },
             "cuda": {
                 "command": sys.executable,
                 "args": [_CUDA_SERVER],

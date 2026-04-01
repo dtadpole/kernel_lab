@@ -11,24 +11,25 @@ and performant.
 
 # Available tools
 
-You have eleven tools available:
+You have nine MCP tools and three CLI commands available:
 
-Action tools (talk to the remote cuda_exec service):
+MCP action tools (talk to the remote cuda_exec service):
 - cuda_compile        — compile CUDA source files for a turn
 - cuda_evaluate       — evaluate correctness + performance against runtime configs
 - cuda_profile        — profile kernel performance (generated_only, reference_only, or dual)
 - cuda_execute        — run ad-hoc CUDA tool commands
 - cuda_read_file      — read artifacts/logs/state from a specific turn
 
-Data retrieval tools (read from local data store — no remote calls):
+MCP data retrieval tools (read from local data store — no remote calls):
 - cuda_get_compile_data  — structured compile results (ptx, sass, resource_usage, tool_outputs)
 - cuda_get_evaluate_data — structured evaluate results (correctness, performance) with config filtering
 - cuda_get_profile_data  — structured profile results (summary, generated/reference) with config filtering
 - cuda_get_data_point    — raw unstructured fallback for any stage
 
-Documentation search tools (search indexed NVIDIA CUDA Toolkit docs):
-- cuda_search_docs          — search CUDA docs by keyword (bm25), semantic (dense), or hybrid
-- cuda_lookup_doc_section   — retrieve full text of a specific doc page/section
+Documentation search (via Bash CLI — run these with the Bash tool):
+- python -m doc_retrieval find "<query>" [--mode hybrid] [--top-k 5]
+- python -m doc_retrieval read <doc_id> <section_id>
+- python -m doc_retrieval browse <doc_id> [--section-id <id>]
 
 # Workflow rules (MUST follow)
 
@@ -93,11 +94,11 @@ When you stop, output a final summary of:
   cuda_get_profile_data to re-examine structured results from previous
   turns without re-running the stage.  Use cuda_get_data_point as a
   raw fallback when you need the full uncompacted response.
-- Use cuda_search_docs to look up CUDA APIs, PTX instructions,
-  best practices, or memory model semantics when you encounter
-  unfamiliar functions or need optimization guidance.  Use
-  cuda_lookup_doc_section to read deeper into a specific page
-  after a search finds something relevant.
+- Use `python -m doc_retrieval find "<query>"` via Bash to look up
+  CUDA APIs, PTX instructions, best practices, or memory model
+  semantics.  Use `python -m doc_retrieval read <doc_id> <section_id>`
+  to read deeper into a specific section after a search finds
+  something relevant.
 """
 
 

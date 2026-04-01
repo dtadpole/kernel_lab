@@ -110,6 +110,10 @@ class Model(nn.Module):
         self._compiled = None
         self._stream = None
         self._cached_shape = None
+        self._cached_ptrs = None  # (A.data_ptr, B.data_ptr)
+        self._a_cute = None
+        self._b_cute = None
+        self._c_cute = None
         self._C = None
 
     def _ensure_compiled(self, A: torch.Tensor, B: torch.Tensor) -> None:
@@ -126,13 +130,15 @@ class Model(nn.Module):
         _, N = B.shape
         self._C = torch.empty(M, N, dtype=torch.bfloat16, device=A.device)
 
-        a_cute = from_dlpack(A, assumed_align=16)
-        b_cute = from_dlpack(B.t(), assumed_align=16)  # zero-copy: swaps strides only
-        c_cute = from_dlpack(self._C, assumed_align=16)
+        self._a_cute = from_dlpack(A, assumed_align=16)
+        self._b_cute = from_dlpack(B.t(), assumed_align=16)
+        self._c_cute = from_dlpack(self._C, assumed_align=16)
 
         self._stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
-        self._compiled = cute.compile(self._gemm, a_cute, b_cute, c_cute, stream=self._stream)
+        self._compiled = cute.compile(self._gemm, self._a_cute, self._b_cute,
+                                      self._c_cute, stream=self._stream)
         self._cached_shape = shape_key
+        self._cached_ptrs = (A.data_ptr(), B.data_ptr())
 
     def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
         if A.ndim != 2 or B.ndim != 2:
@@ -148,14 +154,15 @@ class Model(nn.Module):
 
         self._ensure_compiled(A, B)
 
-        from cutlass.cute.runtime import from_dlpack
+        # Reuse cached CuTe tensors if input pointers haven't changed
+        ptr_key = (A.data_ptr(), B.data_ptr())
+        if ptr_key != self._cached_ptrs:
+            from cutlass.cute.runtime import from_dlpack
+            self._a_cute = from_dlpack(A, assumed_align=16)
+            self._b_cute = from_dlpack(B.t(), assumed_align=16)
+            self._cached_ptrs = ptr_key
 
-        # CuTe tensors are lightweight wrappers (no copy); recreate each forward call
-        a_cute = from_dlpack(A, assumed_align=16)
-        b_cute = from_dlpack(B.t(), assumed_align=16)
-        c_cute = from_dlpack(self._C, assumed_align=16)
-
-        self._compiled(a_cute, b_cute, c_cute, self._stream)
+        self._compiled(self._a_cute, self._b_cute, self._c_cute, self._stream)
 
         return self._C
 

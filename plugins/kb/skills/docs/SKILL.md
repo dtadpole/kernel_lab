@@ -40,7 +40,8 @@ Returns full section content with navigation context (`nav.parent`, `nav.prev_si
 ### Browse — explore document structure
 
 ```bash
-doc_retrieval/.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide
+doc_retrieval/.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide                  # full TOC index
+doc_retrieval/.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide --depth 1        # top-level chapters only
 doc_retrieval/.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide --section-id performance-guidelines --depth 3
 ```
 

@@ -44,6 +44,7 @@ class Sm120Gemm:
         num_mma_warps: int = 4,
         num_stages: int = 3,
         output_bf16: bool = False,
+        max_active: int = 188,
     ):
         self.bM = bM
         self.bN = bN
@@ -56,6 +57,12 @@ class Sm120Gemm:
         self.output_bf16 = output_bf16
         # Tile shape in (M, N, K) order for use with slice_ helpers
         self.tile_shape_mnk = (bM, bN, bK)
+        # atom_layout: product must equal num_mma_warps (each atom = 1 warp).
+        # Supported: 4 warps = (2,2,1). Larger tile with more warps hits
+        # register pressure limits on SM120 (see NCU analysis 2026-04-01).
+        _atom_layouts = {2: (2, 1, 1), 4: (2, 2, 1), 6: (3, 2, 1), 8: (4, 2, 1)}
+        self.atom_layout = _atom_layouts.get(num_mma_warps, (num_mma_warps, 1, 1))
+        self.max_active = max_active
 
     @cute.jit
     def __call__(
@@ -77,10 +84,10 @@ class Sm120Gemm:
 
         tile_mnk = self.tile_shape_mnk
 
-        # ---- MMA atom (2x2x1 warp layout for 128x128 tile) ----
+        # ---- MMA atom: atom_layout set in __init__ based on num_mma_warps ----
         mma_mnk = (16, 8, 16)
         op = warp.MmaF16BF16Op(a_dtype, self.acc_dtype, mma_mnk)
-        atom_layout = (2, 2, 1)
+        atom_layout = self.atom_layout
         permutation_mnk = (
             atom_layout[0] * mma_mnk[0],
             atom_layout[1] * mma_mnk[1] * 2,
@@ -148,7 +155,7 @@ class Sm120Gemm:
         tile_sched_params = utils.PersistentTileSchedulerParams(
             num_ctas_mnl, cluster_shape_mnl,
         )
-        max_active = cutlass.const_expr(188)  # RTX PRO 6000: 188 SMs
+        max_active = cutlass.const_expr(self.max_active)
         grid = utils.StaticPersistentTileScheduler.get_grid_shape(
             tile_sched_params, max_active,
         )

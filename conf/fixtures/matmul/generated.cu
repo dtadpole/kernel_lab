@@ -156,17 +156,39 @@ void mma_m16n8k16(const unsigned* A, const unsigned* B, float* C, float* D) {
 }
 
 /* -------------------------------------------------------------------------
- * Main GEMM kernel — 256x128 tile, 3-stage TMA pipeline
+ * Reduction kernel: sum splitK FP32 partials → BF16 output
+ * ------------------------------------------------------------------------- */
+__global__ void reduce_splitk(__nv_bfloat16* __restrict__ C,
+                              const float* __restrict__ partials,
+                              int MN, int splitK) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= MN) return;
+    float sum = 0.f;
+    for (int p = 0; p < splitK; p++)
+        sum += partials[(size_t)p * MN + idx];
+    C[idx] = __float2bfloat16(sum);
+}
+
+/* -------------------------------------------------------------------------
+ * Main GEMM kernel — 256x128 tile, 3-stage TMA pipeline, optional split-K
+ *
+ * When partials == nullptr: splitK=1, write BF16 to C directly.
+ * When partials != nullptr: write FP32 to partials[blockIdx.y * M*N + ...].
+ * kBlockStart / numLocalKBlocks define this partition's K-range.
  * ------------------------------------------------------------------------- */
 __launch_bounds__(256, 1)
 __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
-                               int M, int N, int K,
+                               float* __restrict__ partials,
+                               int M, int N,
                                int totalTiles, int nTilesN,
+                               int kBlocksPerPartition, int numLocalKBlocks,
                                const __grid_constant__ CUtensorMap tma_A,
                                const __grid_constant__ CUtensorMap tma_B) {
     extern __shared__ char smem_buf[];
 
     uint64_t* mbar = reinterpret_cast<uint64_t*>(smem_buf + SMEM_MBAR_OFFSET);
+
+    int kBlockStart = blockIdx.y * kBlocksPerPartition;
 
     int threadID = threadIdx.x;
     int warpID   = threadID / 32;
@@ -191,7 +213,6 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
     unsigned bReg[4][4];
     float dReg[8][4][4];
 
-    int numKBlocks = K / TILE_K;
     int nTilesM = totalTiles / nTilesN;
 
     /* Initialize mbarriers (thread 0 only) */
@@ -242,11 +263,12 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
         int b_coord0_N0   = tile_n * TILE_N;
         int b_coord0_N1   = tile_n * TILE_N + 64;
 
-        /* ---- PRELUDE: TMA loads for first (N_STAGES-1) stages ---- */
-        #pragma unroll
-        for (int s = 0; s < N_STAGES - 1; s++) {
+        /* ---- PRELUDE: TMA loads for first min(N_STAGES-1, numLocal) stages ---- */
+        int preludeStages = (numLocalKBlocks < N_STAGES - 1)
+                          ? numLocalKBlocks : (N_STAGES - 1);
+        for (int s = 0; s < preludeStages; s++) {
             if (threadID == 0) {
-                int k_coord = s * TILE_K;
+                int k_coord = (kBlockStart + s) * TILE_K;
                 char* a_smem  = smem_buf + s * SMEM_STAGE;
                 char* b0_smem = smem_buf + s * SMEM_STAGE + SMEM_A_STAGE;
                 char* b1_smem = smem_buf + s * SMEM_STAGE + SMEM_A_STAGE + SMEM_B0_STAGE;
@@ -258,10 +280,10 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
         }
 
         /* ---- MAIN K-LOOP ---- */
-        for (int kBlock = 0; kBlock < numKBlocks; kBlock++) {
-            int stage_compute = kBlock % N_STAGES;
-            int stage_load = (kBlock + N_STAGES - 1) % N_STAGES;
-            int phase = (kBlock / N_STAGES) & 1;
+        for (int lk = 0; lk < numLocalKBlocks; lk++) {
+            int stage_compute = lk % N_STAGES;
+            int stage_load = (lk + N_STAGES - 1) % N_STAGES;
+            int phase = (lk / N_STAGES) & 1;
 
             /* Wait for compute stage data */
             mbarrier_wait_parity(&mbar[stage_compute], phase);
@@ -285,8 +307,8 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
             }
 
             /* ---- Issue TMA for next stage (thread 0 only) ---- */
-            if (threadID == 0 && kBlock + N_STAGES - 1 < numKBlocks) {
-                int next_k = (kBlock + N_STAGES - 1) * TILE_K;
+            if (threadID == 0 && lk + N_STAGES - 1 < numLocalKBlocks) {
+                int next_k = (kBlockStart + lk + N_STAGES - 1) * TILE_K;
                 char* a_smem  = smem_buf + stage_load * SMEM_STAGE;
                 char* b0_smem = smem_buf + stage_load * SMEM_STAGE + SMEM_A_STAGE;
                 char* b1_smem = smem_buf + stage_load * SMEM_STAGE + SMEM_A_STAGE + SMEM_B0_STAGE;
@@ -324,7 +346,7 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
             }
         } /* end K-loop */
 
-        /* ---- EPILOGUE: FP32 -> BF16 store to C ---- */
+        /* ---- EPILOGUE ---- */
         int blockRowStart = tile_m * TILE_M;
         int blockColStart = tile_n * TILE_N;
         int warpColOffset = b_subtile_sel * 64 + b_warp_in_subtile * 32;
@@ -332,21 +354,38 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
         int groupID     = laneID >> 2;
         int groupLaneID = laneID & 3;
 
-        #pragma unroll
-        for (int m = 0; m < 8; m++) {
+        if (partials != nullptr) {
+            /* Split-K: write FP32 to workspace partition */
+            float* out = partials + (size_t)blockIdx.y * M * N;
             #pragma unroll
-            for (int n = 0; n < 4; n++) {
-                int row0 = blockRowStart + warpOffsetA_rows + m * 16 + groupID;
-                int col0 = blockColStart + warpColOffset + n * 8 + 2 * groupLaneID;
-
-                __nv_bfloat162 packed0 = __floats2bfloat162_rn(dReg[m][n][0],
-                                                                dReg[m][n][1]);
-                *reinterpret_cast<__nv_bfloat162*>(&C[row0 * N + col0]) = packed0;
-
-                int row1 = row0 + 8;
-                __nv_bfloat162 packed1 = __floats2bfloat162_rn(dReg[m][n][2],
-                                                                dReg[m][n][3]);
-                *reinterpret_cast<__nv_bfloat162*>(&C[row1 * N + col0]) = packed1;
+            for (int m = 0; m < 8; m++) {
+                #pragma unroll
+                for (int n = 0; n < 4; n++) {
+                    int row0 = blockRowStart + warpOffsetA_rows + m * 16 + groupID;
+                    int col0 = blockColStart + warpColOffset + n * 8 + 2 * groupLaneID;
+                    out[row0 * N + col0]     = dReg[m][n][0];
+                    out[row0 * N + col0 + 1] = dReg[m][n][1];
+                    int row1 = row0 + 8;
+                    out[row1 * N + col0]     = dReg[m][n][2];
+                    out[row1 * N + col0 + 1] = dReg[m][n][3];
+                }
+            }
+        } else {
+            /* No split-K: write BF16 directly to C */
+            #pragma unroll
+            for (int m = 0; m < 8; m++) {
+                #pragma unroll
+                for (int n = 0; n < 4; n++) {
+                    int row0 = blockRowStart + warpOffsetA_rows + m * 16 + groupID;
+                    int col0 = blockColStart + warpColOffset + n * 8 + 2 * groupLaneID;
+                    __nv_bfloat162 packed0 = __floats2bfloat162_rn(dReg[m][n][0],
+                                                                    dReg[m][n][1]);
+                    *reinterpret_cast<__nv_bfloat162*>(&C[row0 * N + col0]) = packed0;
+                    int row1 = row0 + 8;
+                    __nv_bfloat162 packed1 = __floats2bfloat162_rn(dReg[m][n][2],
+                                                                    dReg[m][n][3]);
+                    *reinterpret_cast<__nv_bfloat162*>(&C[row1 * N + col0]) = packed1;
+                }
             }
         }
     } /* end persistent tile loop */
@@ -477,10 +516,44 @@ extern "C" int kernel_run(__nv_bfloat16** inputs,  int num_inputs,
         }
     }
 
-    /* Tile counts */
+    /* Tile counts and split-K selection */
     int nTilesM = M / TILE_M;
     int nTilesN = N / TILE_N;
     int totalTiles = nTilesM * nTilesN;
+    int numKBlocks = K / TILE_K;
+
+    static int s_numSMs = 0;
+    if (s_numSMs == 0)
+        cudaDeviceGetAttribute(&s_numSMs, cudaDevAttrMultiProcessorCount, 0);
+
+    /* Auto splitK: use split-K when we don't have enough tiles to fill SMs.
+     * Ensure each partition has at least N_STAGES K-blocks for pipeline.
+     * Require M >= 512 to avoid edge cases with very small matrices. */
+    int splitK = 1;
+    if (totalTiles < s_numSMs && M >= 512) {
+        int target = (s_numSMs + totalTiles - 1) / totalTiles;
+        int maxSplitK = numKBlocks / N_STAGES;
+        if (target > maxSplitK) target = maxSplitK;
+        for (int sk = 1; sk <= target && sk <= 8; sk *= 2) {
+            if (numKBlocks % sk == 0) splitK = sk;
+        }
+    }
+    int kBlocksPerPartition = numKBlocks / splitK;
+
+    /* Workspace for split-K (FP32 partial results) */
+    static float* s_workspace = nullptr;
+    static size_t s_workspace_size = 0;
+    float* workspace = nullptr;
+
+    if (splitK > 1) {
+        size_t need = (size_t)splitK * M * N * sizeof(float);
+        if (s_workspace == nullptr || s_workspace_size < need) {
+            if (s_workspace) cudaFree(s_workspace);
+            cudaMalloc(&s_workspace, need);
+            s_workspace_size = need;
+        }
+        workspace = s_workspace;
+    }
 
     /* Configure dynamic SMEM */
     static bool s_smem_configured = false;
@@ -491,12 +564,26 @@ extern "C" int kernel_run(__nv_bfloat16** inputs,  int num_inputs,
         s_smem_configured = true;
     }
 
+    /* Launch GEMM */
     dim3 threads(256);
-    int gridSize = totalTiles < 188 ? totalTiles : 188;
-    dim3 grid(gridSize);
+    int spatialGrid = totalTiles < s_numSMs ? totalTiles : s_numSMs;
+    dim3 grid(spatialGrid, splitK);
 
+    /* kBlockStart is computed per CTA from blockIdx.y inside kernel,
+     * but we pass kBlocksPerPartition so each CTA knows its range */
     mma_matmul_tma<<<grid, threads, GEMM_SMEM_BYTES, stream>>>(
-        C, M, N, K, totalTiles, nTilesN, tma_A, tma_B);
+        C, workspace, M, N, totalTiles, nTilesN,
+        kBlocksPerPartition, kBlocksPerPartition,
+        tma_A, tma_B);
+
+    /* Reduction for split-K */
+    if (splitK > 1) {
+        int MN = M * N;
+        int reduceThreads = 256;
+        int reduceBlocks = (MN + reduceThreads - 1) / reduceThreads;
+        reduce_splitk<<<reduceBlocks, reduceThreads, 0, stream>>>(
+            C, workspace, MN, splitK);
+    }
 
     return 0;
 }

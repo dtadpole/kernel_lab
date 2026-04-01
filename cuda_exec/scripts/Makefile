@@ -224,12 +224,15 @@ compile: ensure-venv ## Stage reference + generated files and run the 5-step com
 	$(call _require_input_files)
 	@set -euo pipefail
 	# Create turn-root directories
-	mkdir -p "$(WORKSPACE)/inputs/reference" "$(WORKSPACE)/inputs/generated" "$(ARTIFACTS)" "$(LOGS)" "$(STATE)"
+	mkdir -p "$(WORKSPACE)/inputs/reference" "$(WORKSPACE)/inputs/generated" "$(WORKSPACE)/inputs/cudnn" "$(ARTIFACTS)" "$(LOGS)" "$(STATE)"
 	# Stage input files (reference.py + any sibling .py helpers it imports)
 	cp "$(REFERENCE_PY)" "$(WORKSPACE)/inputs/reference/reference.py"
 	for f in $$(dirname "$(REFERENCE_PY)")/*.py; do \
 		[ "$$(basename $$f)" != "reference.py" ] && cp "$$f" "$(WORKSPACE)/inputs/reference/" 2>/dev/null || true; \
 	done
+	# Stage cuDNN/cuBLAS vendor baseline if present
+	CUDNN_PY="$$(dirname "$(REFERENCE_PY)")/cudnn.py"; \
+	if [ -f "$$CUDNN_PY" ]; then cp "$$CUDNN_PY" "$(WORKSPACE)/inputs/cudnn/cudnn.py"; fi
 	cp "$(GENERATED_CU)" "$(WORKSPACE)/inputs/generated/generated.cu"
 	# Run the 5-step compile pipeline
 	echo "--- compile [$(KERNEL)]: staging done, running compile.sh ---"

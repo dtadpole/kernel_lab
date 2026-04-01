@@ -6,18 +6,18 @@
  * m16n8k16 for compute.
  *
  * Architecture: SM 12.0 (RTX PRO 6000 Blackwell)
- * Tile: 128x128 output, K-tile=32, 4-stage pipeline
+ * Tile: 256x128 output, K-tile=32, 3-stage pipeline
  * Threads: 256 (8 warps)
  *
  * TMA tile sizes:
- *   A: 128 M-rows x 32 K-cols, SWIZZLE_64B  -> 8192 bytes/stage
+ *   A: 256 M-rows x 32 K-cols, SWIZZLE_64B  -> 16384 bytes/stage
  *   B: split into two 64-col sub-tiles per stage:
  *      B0: 32 K-rows x 64 N-cols, SWIZZLE_128B -> 4096 bytes
  *      B1: 32 K-rows x 64 N-cols, SWIZZLE_128B -> 4096 bytes
  *      Total B per stage: 8192 bytes
- *   4 stages: 4 * (8192 + 8192) = 65536 bytes
- *   mbarrier: 4 * 8 = 32 bytes
- *   Total SMEM: ~66 KB
+ *   3 stages: 3 * (16384 + 8192) = 73728 bytes
+ *   mbarrier: 3 * 8 = 24 bytes
+ *   Total SMEM: ~74 KB
  *
  * Computes C = A @ B where A is M*K row-major, B is K*N row-major,
  * C is M*N row-major.  All BF16; MMA accumulates in FP32.
@@ -38,26 +38,26 @@
 /* -------------------------------------------------------------------------
  * Constants
  * ------------------------------------------------------------------------- */
-#define N_STAGES 4
-#define TILE_M   128
+#define N_STAGES 3
+#define TILE_M   256
 #define TILE_N   128
 #define TILE_K   32
 
 /* SMEM layout per stage:
- *   A: 128 rows x 64 bytes/row = 8192 bytes (SWIZZLE_64B)
+ *   A: 256 rows x 64 bytes/row = 16384 bytes (SWIZZLE_64B)
  *   B0: 32 rows x 128 bytes/row = 4096 bytes (SWIZZLE_128B, N-cols 0..63)
  *   B1: 32 rows x 128 bytes/row = 4096 bytes (SWIZZLE_128B, N-cols 64..127)
- * Total per stage: 16384 bytes
- * 4 stages: 65536 bytes
- * mbarrier array: 4 * 8 = 32 bytes at offset 65536
- * Total: 65568 rounded to 128-byte alignment = 65664 bytes */
-static const size_t SMEM_A_STAGE  = 8192;   /* 128 rows * 64 bytes */
+ * Total per stage: 24576 bytes
+ * 3 stages: 73728 bytes
+ * mbarrier array: 3 * 8 = 24 bytes at offset 73728
+ * Total: 73752 rounded to 128-byte alignment = 73856 bytes */
+static const size_t SMEM_A_STAGE  = 16384;  /* 256 rows * 64 bytes */
 static const size_t SMEM_B0_STAGE = 4096;   /* 32 rows * 128 bytes */
 static const size_t SMEM_B1_STAGE = 4096;   /* 32 rows * 128 bytes */
 static const size_t SMEM_STAGE    = SMEM_A_STAGE + SMEM_B0_STAGE + SMEM_B1_STAGE;
-static const size_t SMEM_TOTAL_AB = N_STAGES * SMEM_STAGE;        /* 65536 */
+static const size_t SMEM_TOTAL_AB = N_STAGES * SMEM_STAGE;        /* 73728 */
 static const size_t SMEM_MBAR_OFFSET = SMEM_TOTAL_AB;
-static const size_t GEMM_SMEM_BYTES  = 65664;
+static const size_t GEMM_SMEM_BYTES  = 73856;
 
 /* -------------------------------------------------------------------------
  * PTX helpers: mbarrier
@@ -156,7 +156,7 @@ void mma_m16n8k16(const unsigned* A, const unsigned* B, float* C, float* D) {
 }
 
 /* -------------------------------------------------------------------------
- * Main GEMM kernel
+ * Main GEMM kernel — 256x128 tile, 3-stage TMA pipeline
  * ------------------------------------------------------------------------- */
 __launch_bounds__(256, 1)
 __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
@@ -166,37 +166,30 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
                                const __grid_constant__ CUtensorMap tma_B) {
     extern __shared__ char smem_buf[];
 
-    /* SMEM pointers */
-    /* Stage s layout:
-     *   A:  smem_buf + s * SMEM_STAGE + 0
-     *   B0: smem_buf + s * SMEM_STAGE + SMEM_A_STAGE
-     *   B1: smem_buf + s * SMEM_STAGE + SMEM_A_STAGE + SMEM_B0_STAGE */
     uint64_t* mbar = reinterpret_cast<uint64_t*>(smem_buf + SMEM_MBAR_OFFSET);
 
     int threadID = threadIdx.x;
     int warpID   = threadID / 32;
     int laneID   = threadID % 32;
 
-    /* Warp tiling: warpM (0..1) x warpN (0..3) */
+    /* Warp tiling: 2M x 4N — each warp covers 128M x 32N */
     int warpM = warpID / 4;
     int warpN = warpID % 4;
-    int warpOffsetA_rows = warpM * 64;
+    int warpOffsetA_rows = warpM * 128;  /* 0 or 128 */
 
     /* ldmatrix A constants (SWIZZLE_64B, 64 bytes/row, 4 chunks of 16 bytes) */
     int aLdRow_in_tile = (laneID % 8) + ((laneID / 8) & 1) * 8;
     int aLdChunkHalf = laneID / 16;
 
-    /* ldmatrix B constants (SWIZZLE_128B, 128 bytes/row within each sub-tile, 8 chunks of 16 bytes)
-     * warpN 0,1 read from sub-tile B0; warpN 2,3 read from sub-tile B1.
-     * Within sub-tile: warpN 0/2 -> chunks 0..3, warpN 1/3 -> chunks 4..7 */
+    /* ldmatrix B constants (SWIZZLE_128B, 128 bytes/row within each sub-tile) */
     int bLdRow_in_tile = (laneID % 8) + ((laneID / 8) & 1) * 8;
-    int b_subtile_sel = warpN / 2;                      /* 0 or 1 (which sub-tile) */
-    int b_warp_in_subtile = warpN % 2;                  /* 0 or 1 (which half within sub-tile) */
+    int b_subtile_sel = warpN / 2;
+    int b_warp_in_subtile = warpN % 2;
 
-    /* Registers */
-    unsigned aReg[4][8];
+    /* Registers: 8 M-tiles x 4 N-tiles accumulator, ping-pong A regs */
+    unsigned aReg[2][8];
     unsigned bReg[4][4];
-    float dReg[4][4][4];
+    float dReg[8][4][4];
 
     int numKBlocks = K / TILE_K;
     int nTilesM = totalTiles / nTilesN;
@@ -237,7 +230,7 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
 
         /* Reset accumulator */
         #pragma unroll
-        for (int m = 0; m < 4; m++)
+        for (int m = 0; m < 8; m++)
             #pragma unroll
             for (int n = 0; n < 4; n++)
                 #pragma unroll
@@ -245,9 +238,9 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
                     dReg[m][n][i] = 0.f;
 
         /* TMA coordinates */
-        int a_coord1_base = tile_m * TILE_M;  /* M offset (slow dim for A) */
-        int b_coord0_N0   = tile_n * TILE_N;        /* first 64 N-cols */
-        int b_coord0_N1   = tile_n * TILE_N + 64;   /* second 64 N-cols */
+        int a_coord1_base = tile_m * TILE_M;
+        int b_coord0_N0   = tile_n * TILE_N;
+        int b_coord0_N1   = tile_n * TILE_N + 64;
 
         /* ---- PRELUDE: TMA loads for first (N_STAGES-1) stages ---- */
         #pragma unroll
@@ -257,7 +250,6 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
                 char* a_smem  = smem_buf + s * SMEM_STAGE;
                 char* b0_smem = smem_buf + s * SMEM_STAGE + SMEM_A_STAGE;
                 char* b1_smem = smem_buf + s * SMEM_STAGE + SMEM_A_STAGE + SMEM_B0_STAGE;
-                /* Total TX = 8192 (A) + 4096 (B0) + 4096 (B1) = 16384 */
                 mbarrier_arrive_expect_tx(&mbar[s], SMEM_A_STAGE + SMEM_B0_STAGE + SMEM_B1_STAGE);
                 tma_load_2d(a_smem, &tma_A, k_coord, a_coord1_base, &mbar[s]);
                 tma_load_2d(b0_smem, &tma_B, b_coord0_N0, k_coord, &mbar[s]);
@@ -280,42 +272,13 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
             char* B1_stage = smem_buf + stage_compute * SMEM_STAGE + SMEM_A_STAGE + SMEM_B0_STAGE;
             char* B_sub_stage = (b_subtile_sel == 0) ? B0_stage : B1_stage;
 
-            /* ---- Load A from SMEM via ldmatrix.x4 ---- */
-            /* A layout: 128 rows x 64 bytes/row, SWIZZLE_64B
-             * 4 chunks of 16 bytes per row.
-             * SWIZZLE_64B XOR key = (row >> 1) & 3 (empirically verified)
-             * phys_chunk = log_chunk ^ ((row >> 1) & 3) */
-            #pragma unroll
-            for (int m = 0; m < 4; m++) {
-                int a_row = warpOffsetA_rows + m * 16 + aLdRow_in_tile;
-                int a_xor_key = (a_row >> 1) & 3;
-
-                /* First k=16: logical chunks 0,1 */
-                int a_lc0 = 0 + aLdChunkHalf;
-                int a_pc0 = a_lc0 ^ a_xor_key;
-                load_matrix_x4(aReg[m], A_stage + a_row * 64 + a_pc0 * 16);
-
-                /* Second k=16: logical chunks 2,3 */
-                int a_lc1 = 2 + aLdChunkHalf;
-                int a_pc1 = a_lc1 ^ a_xor_key;
-                load_matrix_x4(aReg[m] + 4, A_stage + a_row * 64 + a_pc1 * 16);
-            }
-
-            /* ---- Load B from SMEM via ldmatrix.x2.trans ---- */
-            /* Each B sub-tile: 32 rows x 128 bytes/row, SWIZZLE_128B
-             * 8 chunks of 16 bytes per row.
-             * SWIZZLE_128B: phys_chunk = log_chunk ^ (row & 7) (within the 128-byte row)
-             * b_warp_in_subtile: 0 -> N-chunks 0..3, 1 -> N-chunks 4..7 */
+            /* ---- Load B from SMEM via ldmatrix.x2.trans (all 4 N-tiles) ---- */
             #pragma unroll
             for (int n = 0; n < 4; n++) {
-                int b_n_chunk = b_warp_in_subtile * 4 + n;  /* 0..7 within sub-tile */
-
-                /* First k=16: rows 0..15 */
+                int b_n_chunk = b_warp_in_subtile * 4 + n;
                 int b_k_row0 = bLdRow_in_tile;
                 int b_pc0 = b_n_chunk ^ (b_k_row0 & 7);
                 load_matrix_x2_trans(bReg[n], B_sub_stage + b_k_row0 * 128 + b_pc0 * 16);
-
-                /* Second k=16: rows 16..31 */
                 int b_k_row1 = 16 + bLdRow_in_tile;
                 int b_pc1 = b_n_chunk ^ (b_k_row1 & 7);
                 load_matrix_x2_trans(bReg[n] + 2, B_sub_stage + b_k_row1 * 128 + b_pc1 * 16);
@@ -334,13 +297,29 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
                 tma_load_2d(b1_smem, &tma_B, b_coord0_N1, next_k, &mbar[stage_load]);
             }
 
-            /* ---- MMA: 4x4 sub-tiles, 2x m16n8k16 per sub-tile ---- */
+            /* ---- Interleaved A load + MMA: process 8 M-tiles in 4 pairs ---- */
             #pragma unroll
-            for (int m = 0; m < 4; m++) {
+            for (int mp = 0; mp < 4; mp++) {
+                /* Load 2 A tiles for this pair */
+                #pragma unroll
+                for (int mi = 0; mi < 2; mi++) {
+                    int m = mp * 2 + mi;
+                    int a_row = warpOffsetA_rows + m * 16 + aLdRow_in_tile;
+                    int a_xor_key = (a_row >> 1) & 3;
+                    int a_lc0 = 0 + aLdChunkHalf;
+                    int a_pc0 = a_lc0 ^ a_xor_key;
+                    load_matrix_x4(aReg[mi], A_stage + a_row * 64 + a_pc0 * 16);
+                    int a_lc1 = 2 + aLdChunkHalf;
+                    int a_pc1 = a_lc1 ^ a_xor_key;
+                    load_matrix_x4(aReg[mi] + 4, A_stage + a_row * 64 + a_pc1 * 16);
+                }
+                /* MMA: 2 A tiles x 4 B tiles x 2 K-halves */
                 #pragma unroll
                 for (int n = 0; n < 4; n++) {
-                    mma_m16n8k16(aReg[m],     bReg[n],     dReg[m][n], dReg[m][n]);
-                    mma_m16n8k16(aReg[m] + 4, bReg[n] + 2, dReg[m][n], dReg[m][n]);
+                    mma_m16n8k16(aReg[0],     bReg[n],     dReg[mp*2][n],   dReg[mp*2][n]);
+                    mma_m16n8k16(aReg[0] + 4, bReg[n] + 2, dReg[mp*2][n],   dReg[mp*2][n]);
+                    mma_m16n8k16(aReg[1],     bReg[n],     dReg[mp*2+1][n], dReg[mp*2+1][n]);
+                    mma_m16n8k16(aReg[1] + 4, bReg[n] + 2, dReg[mp*2+1][n], dReg[mp*2+1][n]);
                 }
             }
         } /* end K-loop */
@@ -348,15 +327,13 @@ __global__ void mma_matmul_tma(__nv_bfloat16* __restrict__ C,
         /* ---- EPILOGUE: FP32 -> BF16 store to C ---- */
         int blockRowStart = tile_m * TILE_M;
         int blockColStart = tile_n * TILE_N;
-        /* warpN 0,1 write to first 64 N-cols; warpN 2,3 write to second 64 N-cols.
-         * Within each half: warp_in_subtile 0 -> cols 0..31, warp_in_subtile 1 -> cols 32..63 */
         int warpColOffset = b_subtile_sel * 64 + b_warp_in_subtile * 32;
 
         int groupID     = laneID >> 2;
         int groupLaneID = laneID & 3;
 
         #pragma unroll
-        for (int m = 0; m < 4; m++) {
+        for (int m = 0; m < 8; m++) {
             #pragma unroll
             for (int n = 0; n < 4; n++) {
                 int row0 = blockRowStart + warpOffsetA_rows + m * 16 + groupID;
@@ -464,11 +441,11 @@ extern "C" int kernel_run(__nv_bfloat16** inputs,  int num_inputs,
 
     /* A: row-major M x K.
      * TMA dims: fast = K (dim 0), slow = M (dim 1).
-     * Box: 32 K-cols x 128 M-rows. SWIZZLE_64B (box fast = 32*2 = 64 bytes). */
+     * Box: 32 K-cols x 256 M-rows. SWIZZLE_64B (box fast = 32*2 = 64 bytes). */
     {
         cuuint64_t dims[2]    = {(cuuint64_t)K, (cuuint64_t)M};
         cuuint64_t strides[1] = {(cuuint64_t)K * 2};
-        cuuint32_t box[2]     = {32, 128};
+        cuuint32_t box[2]     = {32, 256};
         cuuint32_t elem[2]    = {1, 1};
         CUresult res = s_encodeTiled(&tma_A,
             CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)A,
@@ -483,8 +460,7 @@ extern "C" int kernel_run(__nv_bfloat16** inputs,  int num_inputs,
 
     /* B: row-major K x N.
      * TMA dims: fast = N (dim 0), slow = K (dim 1).
-     * Box: 64 N-cols x 32 K-rows. SWIZZLE_128B (box fast = 64*2 = 128 bytes).
-     * We issue two TMA loads per stage (for the two 64-col halves of the 128 N-tile). */
+     * Box: 64 N-cols x 32 K-rows. SWIZZLE_128B (box fast = 64*2 = 128 bytes). */
     {
         cuuint64_t dims[2]    = {(cuuint64_t)N, (cuuint64_t)K};
         cuuint64_t strides[1] = {(cuuint64_t)N * 2};

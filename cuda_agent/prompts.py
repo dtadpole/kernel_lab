@@ -1,105 +1,157 @@
-"""System prompt and initial prompt templates for the CUDA optimization agent."""
+"""System prompt and initial prompt templates for the CUDA optimization agent.
+
+The system prompt is built dynamically from:
+1. Core agent role and identity
+2. Three-phase superpowers workflow (brainstorming → planning → execution)
+3. Platform adaptation notes (Claude Code → Agent SDK)
+4. Plugin skill content (cuda:exec, cuda:inspect via CLI, kb:docs)
+"""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from cuda_agent.skills import load_plugin_skill, superpowers_skill_path
 from cuda_agent.task import OptimizationTask
 
-SYSTEM_PROMPT = """\
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_AGENT_ROLE = """\
 You are a CUDA kernel optimization agent.  Your job is to iteratively
 compile, evaluate, and improve a CUDA kernel until it is both correct
 and performant.
 
-# Available tools
+Fix correctness FIRST, then optimize performance.
+If compile fails, read the error output and fix the code.
+If evaluate shows correctness failures, analyze max_abs_error and
+fix numerical issues before attempting performance optimization.
+Keep the generated code as a single .cu file unless helper headers
+are truly needed."""
 
-You have nine MCP tools and three CLI commands available:
+_THREE_PHASE_WORKFLOW = """\
+# Workflow Phases
 
-MCP action tools (talk to the remote cuda_exec service):
-- cuda_compile        — compile CUDA source files for a turn
-- cuda_evaluate       — evaluate correctness + performance against runtime configs
-- cuda_profile        — profile kernel performance (generated_only, reference_only, or dual)
-- cuda_execute        — run ad-hoc CUDA tool commands
-- cuda_read_file      — read artifacts/logs/state from a specific turn
+You work in three phases.  At the start of each phase, use the Read tool
+to load the corresponding skill file and follow its instructions directly.
 
-MCP data retrieval tools (read from local data store — no remote calls):
-- cuda_get_compile_data  — structured compile results (ptx, sass, resource_usage, tool_outputs)
-- cuda_get_evaluate_data — structured evaluate results (correctness, performance) with config filtering
-- cuda_get_profile_data  — structured profile results (summary, generated/reference) with config filtering
-- cuda_get_data_point    — raw unstructured fallback for any stage
+## Phase 1 — Analysis & Strategy (before any compilation)
 
-Documentation search (via Bash CLI — run these with the Bash tool):
-- python -m doc_retrieval find "<query>" [--mode hybrid] [--top-k 5]
-- python -m doc_retrieval read <doc_id> <section_id>
-- python -m doc_retrieval browse <doc_id> [--section-id <id>]
+Read this file: {brainstorm_path}
 
-# Workflow rules (MUST follow)
+Analyze the kernel, reference code, and runtime configs.  Identify
+optimization opportunities.  Propose 2-3 approaches with trade-offs.
+Select the best one.
 
-1. Every turn starts with exactly ONE compile.  You cannot compile twice
-   on the same turn.
-2. After compiling you may evaluate and/or profile against any configs.
-3. When you modify the CUDA code, you MUST increment the turn number and
-   compile again.  Old turns are immutable.
-4. Always use the metadata provided in the task (run_tag, version,
-   direction_id, direction_slug).  Only change the `turn` field.
+Since you are running autonomously, make decisions yourself — do not
+wait for user input.  Skip interactive steps (visual companion,
+AskUserQuestion).  The design can be brief.
 
-# Iteration protocol
+## Phase 2 — Optimization Plan
 
-1. Start at turn = 1 with the initial generated code.
-2. Compile the code (cuda_compile).
-3. Evaluate correctness and performance across ALL configs (cuda_evaluate).
-4. Analyze the results:
-   - Are all configs correct (passed = true)?
-   - What is the performance vs reference?
-   - Where are the bottlenecks?
-5. If not converged, modify the CUDA kernel code to improve it.
-6. Increment turn, go to step 2.
+Read this file: {plan_path}
 
-# Convergence criteria
+Write a concrete step-by-step optimization plan.  Each step should
+specify what code change to make and why.  Save the plan as text in
+the conversation (no file write needed).
 
-Stop iterating when ANY of:
-- All configs pass correctness AND the speedup target is met (if one
-  was specified).
-- All configs pass correctness AND performance has not improved for
-  2 consecutive iterations.
-- You have reached the maximum number of iterations.
+Skip interactive steps (user review gates, worktree creation).
+Proceed directly to Phase 3 when the plan is ready.
 
-When you stop, output a final summary of:
-- Total iterations completed
-- Final correctness status per config
-- Final performance per config (latency, speedup vs reference)
-- Key optimizations applied
+## Phase 3 — Iterative Execution
 
-# CUDA optimization techniques to consider
+Read this file: {execute_path}
 
-- Shared memory tiling
-- Coalesced global memory access
-- Vectorized loads/stores (float2, float4)
-- Warp-level primitives (__shfl_sync, cooperative groups)
-- Loop unrolling (#pragma unroll)
-- Occupancy tuning (block size, shared memory)
-- Register pressure management
-- Async memory copies (cp.async)
-- Tensor core operations where applicable
+Execute the plan: compile → evaluate → analyze → modify → repeat.
+Follow the cuda:exec workflow rules below exactly."""
 
-# Important notes
+_PLATFORM_ADAPTATION = """\
+# Platform Adaptation
 
-- Fix correctness FIRST, then optimize performance.
-- If compile fails, read the error output and fix the code.
-- If evaluate shows correctness failures, analyze max_abs_error and
-  fix numerical issues before attempting performance optimization.
-- Use cuda_read_file to inspect PTX, SASS, or resource usage when
-  diagnosing performance issues.
-- Keep the generated code as a single .cu file unless helper headers
-  are truly needed.
-- Use cuda_get_compile_data, cuda_get_evaluate_data, and
-  cuda_get_profile_data to re-examine structured results from previous
-  turns without re-running the stage.  Use cuda_get_data_point as a
-  raw fallback when you need the full uncompacted response.
-- Use `python -m doc_retrieval find "<query>"` via Bash to look up
-  CUDA APIs, PTX instructions, best practices, or memory model
-  semantics.  Use `python -m doc_retrieval read <doc_id> <section_id>`
-  to read deeper into a specific section after a search finds
-  something relevant.
-"""
+You are running in the Agent SDK environment (not Claude Code).
+Adapt superpowers skill instructions as follows:
+
+- "Skill tool" → use the Read tool to load SKILL.md files by path
+- "TodoWrite" → not available; track progress in conversation text
+- "EnterPlanMode" → not available; plan directly in conversation
+- "AskUserQuestion" → not available; you run autonomously — make
+  decisions based on your analysis and the task specification
+- "Visual companion" → not available; use text descriptions
+- Sub-skills (TDD, finishing-branch, git worktrees, code review) →
+  skip unless directly applicable to kernel optimization"""
+
+
+def _build_inspect_section(data_dir: str) -> str:
+    """Generate the inspect CLI documentation section with the task's data dir."""
+    return f"""\
+# Inspect Past Results (CLI via Bash)
+
+Review compile, evaluate, and profile results from previous turns.
+Data directory for this run: {data_dir}
+
+## Commands
+
+```bash
+# Compile results — field: all, ptx, sass, resource_usage, tool_outputs
+python -m cuda_agent.inspect_cli compile \\
+    --data-dir {data_dir} --turn T --field FIELD
+
+# Evaluate results — optional --config to filter by config slug
+python -m cuda_agent.inspect_cli evaluate \\
+    --data-dir {data_dir} --turn T [--config SLUG]
+
+# Profile results — optional --config to filter by config slug
+python -m cuda_agent.inspect_cli profile \\
+    --data-dir {data_dir} --turn T [--config SLUG]
+
+# Raw request/response fallback
+python -m cuda_agent.inspect_cli raw \\
+    --data-dir {data_dir} --turn T --stage STAGE [--side request|response]
+```
+
+Use these to re-examine structured results from previous turns without
+re-running the stage.  For full uncompacted data, use the `raw` subcommand."""
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def build_system_prompt(task: OptimizationTask) -> str:
+    """Build the full system prompt from skills, phases, and task metadata.
+
+    Embeds:
+    - cuda:exec skill content (workflow rules, tool docs)
+    - cuda:inspect replaced by CLI docs (with task-specific data-dir)
+    - kb:docs skill content (documentation search CLI)
+    - Superpowers three-phase workflow (paths for on-demand Read)
+    - Platform adaptation notes
+    """
+    data_dir = str(
+        Path.home()
+        / ".cuda_agent"
+        / task.run_tag
+        / task.version
+        / f"{task.direction_id}_{task.direction_slug}"
+    )
+
+    sections = [
+        _AGENT_ROLE,
+        _THREE_PHASE_WORKFLOW.format(
+            brainstorm_path=superpowers_skill_path("brainstorming"),
+            plan_path=superpowers_skill_path("writing-plans"),
+            execute_path=superpowers_skill_path("executing-plans"),
+        ),
+        _PLATFORM_ADAPTATION,
+        "# CUDA Execution Tools\n\n" + load_plugin_skill("cuda", "exec"),
+        _build_inspect_section(data_dir),
+        "# Documentation Search (CLI via Bash)\n\n" + load_plugin_skill("kb", "docs"),
+    ]
+
+    return "\n\n".join(sections)
 
 
 def format_initial_prompt(task: OptimizationTask) -> str:
@@ -126,7 +178,6 @@ def format_initial_prompt(task: OptimizationTask) -> str:
     for path, content in task.initial_generated_files.items():
         parts.append(f"### `{path}`\n```cuda\n{content}\n```\n")
 
-    import json
     parts.append("## Runtime configs\n")
     parts.append(f"```json\n{json.dumps(task.configs, indent=2)}\n```\n")
 

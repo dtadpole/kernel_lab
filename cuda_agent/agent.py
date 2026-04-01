@@ -28,7 +28,8 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
 from cuda_agent.config import load_config
-from cuda_agent.prompts import SYSTEM_PROMPT, format_initial_prompt
+from cuda_agent.path_check import is_path_allowed
+from cuda_agent.prompts import build_system_prompt, format_initial_prompt
 from cuda_agent.task import OptimizationTask
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +92,31 @@ async def _deny_direct_cuda_toolkit(
             ),
         )
     return SyncHookJSONOutput()
+
+
+def _make_restrict_edit_path(allowed_dir: str):
+    """Factory: return a PreToolUse hook that restricts Edit/Write to a directory."""
+
+    async def _restrict_edit_path(
+        hook_input: HookInput,
+        tool_use_id: str | None,
+        ctx: HookContext,
+    ) -> HookJSONOutput:
+        """PreToolUse hook: deny Edit/Write outside the allowed directory."""
+        file_path = hook_input.get("tool_input", {}).get("file_path", "")
+        if not is_path_allowed(file_path, allowed_dir):
+            return SyncHookJSONOutput(
+                hookSpecificOutput=PreToolUseHookSpecificOutput(
+                    hookEventName="PreToolUse",
+                    permissionDecision="deny",
+                    permissionDecisionReason=(
+                        f"File edits are restricted to {allowed_dir}/"
+                    ),
+                ),
+            )
+        return SyncHookJSONOutput()
+
+    return _restrict_edit_path
 
 
 def _make_log_tool_use(log_dir: Path, truncation_limit: int):
@@ -178,13 +204,23 @@ async def run_optimization(
 
     log_tool_use = _make_log_tool_use(log_dir, cfg.agent.log_truncation_chars)
 
+    # Edit/Write restriction: default to the fixture directory for this task.
+    edit_allowed_dir = str(
+        _REPO_ROOT / "conf" / "fixtures" / task.direction_slug
+    )
+
     options = ClaudeAgentOptions(
         model=cfg.agent.model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=build_system_prompt(task),
         max_turns=max_turns,
         permission_mode=cfg.agent.permission_mode,
+        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "Bash", "Agent"],
         hooks={
             "PreToolUse": [
+                HookMatcher(
+                    matcher="Edit|Write",
+                    hooks=[_make_restrict_edit_path(edit_allowed_dir)],
+                ),
                 HookMatcher(matcher="Bash", hooks=[_deny_direct_cuda_toolkit]),
             ],
             "PostToolUse": [

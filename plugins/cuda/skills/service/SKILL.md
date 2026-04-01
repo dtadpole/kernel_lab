@@ -1,8 +1,8 @@
 ---
 name: service
-description: Deploy, start, stop, check status, or remove the cuda_exec service on remote GPU hosts
+description: Deploy, start, stop, check health/status, or remove the cuda_exec service on remote GPU hosts
 user-invocable: true
-argument-hint: <deploy|start|stop|status|nuke> <host|--all>
+argument-hint: <deploy|start|stop|health|status|nuke> <host|--all>
 ---
 
 # CUDA Exec Service Management
@@ -14,9 +14,10 @@ Manage the cuda_exec service on remote GPU hosts.
 | Command | Purpose |
 |---------|---------|
 | **deploy** | Sync code + install deps + configure systemd (does not start) |
-| **start** | Start the service (with health check) |
+| **start** | Start the service |
 | **stop** | Stop the service |
-| **status** | Full status report (service, health, GPU, disk, logs) |
+| **health** | Quick check: is the API responding? |
+| **status** | Full report: service state, health, GPU, disk, logs |
 | **nuke** | Nuclear option: stop + remove service + optionally remove data |
 
 ## Usage
@@ -29,9 +30,16 @@ python plugins/cuda/deploy/cli.py <command> <host> [flags]
 ```bash
 python plugins/cuda/deploy/cli.py deploy _one
 python plugins/cuda/deploy/cli.py start _one
+python plugins/cuda/deploy/cli.py health _one
 ```
 
-### Check status
+### Quick health check
+```bash
+python plugins/cuda/deploy/cli.py health _one
+python plugins/cuda/deploy/cli.py health --all
+```
+
+### Full status
 ```bash
 python plugins/cuda/deploy/cli.py status _one
 python plugins/cuda/deploy/cli.py status --all
@@ -66,8 +74,8 @@ Configured in `conf/hosts/default.yaml`:
 
 | Host | GPU | Port |
 |------|-----|------|
-| `_one` | RTX PRO 6000 Blackwell (98GB) | 8000 |
-| `_two` | RTX PRO 6000 Blackwell (98GB) | 8000 |
+| `_one` | RTX PRO 6000 Blackwell (98GB) | 41980 |
+| `_two` | RTX PRO 6000 Blackwell (98GB) | 42980 |
 
 ## Remote Layout
 

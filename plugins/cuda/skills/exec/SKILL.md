@@ -11,6 +11,7 @@ Compile, evaluate, and profile CUDA kernels via the cuda_exec remote service.
 
 ## Tools
 
+- **health** — Check if the target cuda_exec service is responding
 - **compile** — Compile CUDA source to binary/PTX/SASS
 - **evaluate** — Correctness + performance testing against runtime configs
 - **profile** — NCU profiling (generated or reference side)
@@ -18,10 +19,11 @@ Compile, evaluate, and profile CUDA kernels via the cuda_exec remote service.
 
 ## Workflow
 
-1. **Compile**: Call `compile` with metadata, reference_files, and generated_files
-2. **Evaluate**: Call `evaluate` with the same metadata and configs to test correctness + performance
-3. **Profile** (optional): Call `profile` to get NCU hardware metrics
-4. **Iterate**: Modify source code → increment `metadata.turn` → compile again
+1. **Health check**: Verify the target service is reachable before sending work
+2. **Compile**: Call `compile` with metadata, reference_files, and generated_files
+3. **Evaluate**: Call `evaluate` with the same metadata and configs to test correctness + performance
+4. **Profile** (optional): Call `profile` to get NCU hardware metrics
+5. **Iterate**: Modify source code → increment `metadata.turn` → compile again
 
 ## Kernel Types
 

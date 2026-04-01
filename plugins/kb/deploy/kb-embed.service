@@ -1,0 +1,31 @@
+[Unit]
+Description=KB embedding service (Qwen3-Embedding-4B)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.kb_embed_service
+ExecStart=%h/.kb_embed_service/.venv/bin/python -m uvicorn embed_server.main:app --host 0.0.0.0 --port 46982
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=PYTHONPATH=%h/.kb_embed_service
+Environment=EMBED_MODEL_ID=Qwen/Qwen3-Embedding-4B
+Environment=TRANSFORMERS_CACHE=%h/.cache/huggingface
+Environment=HF_HOME=%h/.cache/huggingface
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Resource limits
+LimitNOFILE=65536
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

@@ -134,7 +134,7 @@ def _build_dense(chunks: list[dict]) -> None:
 
     metadata = {
         "num_chunks": len(chunks),
-        "embedding_provider": client.provider,
+        "embedding_base_url": client.base_url,
         "embedding_model": client.model,
         "dimensions": client.dimensions,
     }

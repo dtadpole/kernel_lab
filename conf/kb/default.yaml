@@ -1,0 +1,20 @@
+# KB embedding service configuration.
+#
+# Python-based embedding server running Qwen3-Embedding-4B on a remote
+# GPU host. Exposes an OpenAI-compatible /v1/embeddings endpoint
+# consumed by doc_retrieval for dense and hybrid search.
+#
+# Access from dev machine: SSH tunnel localhost:46982 -> remote:46982
+#   ssh -NL 46982:localhost:46982 _one
+
+service_defaults:
+  service_name: "kb-embed"
+  service_dir: ".kb_embed_service"
+  model_id: "Qwen/Qwen3-Embedding-4B"
+  model_cache_dir: ".cache/huggingface"
+
+hosts:
+  _one:
+    ssh_host: "_one"
+    port: 46982
+    description: "RTX PRO 6000 Blackwell #1 — embedding service"

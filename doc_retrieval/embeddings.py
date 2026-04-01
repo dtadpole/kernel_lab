@@ -1,8 +1,9 @@
 """API-based embedding client for dense retrieval.
 
-Supports OpenAI-compatible APIs (including local services like
-HuggingFace TEI with Qwen3-Embedding-4B) and Voyage. Batches
-requests and caches embeddings to avoid re-computing unchanged content.
+Talks directly to an OpenAI-compatible /v1/embeddings endpoint
+(e.g. HuggingFace TEI with Qwen3-Embedding-4B) via httpx.
+Batches requests and caches embeddings to avoid re-computing
+unchanged content.
 """
 
 from __future__ import annotations
@@ -11,50 +12,36 @@ import hashlib
 import logging
 from pathlib import Path
 
+import httpx
 import numpy as np
 
 from doc_retrieval.config import load_config
 
 logger = logging.getLogger(__name__)
 
+# Generous timeout: large batches on first load can be slow.
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+
 
 class EmbeddingClient:
-    """Thin wrapper around an embedding API provider."""
+    """Thin wrapper around an OpenAI-compatible embedding endpoint."""
 
     def __init__(
         self,
-        provider: str = "openai",
-        model: str = "text-embedding-3-small",
-        dimensions: int = 1536,
-        batch_size: int = 100,
-        base_url: str | None = None,
-        api_key: str | None = None,
+        base_url: str = "http://localhost:46982/v1",
+        model: str = "Qwen/Qwen3-Embedding-4B",
+        dimensions: int = 2560,
+        batch_size: int = 32,
     ):
-        self.provider = provider
+        self.base_url = base_url.rstrip("/")
         self.model = model
         self.dimensions = dimensions
         self.batch_size = batch_size
-        self._base_url = base_url
-        self._api_key = api_key
-        self._client = None
+        self._client: httpx.Client | None = None
 
-    def _get_client(self):
+    def _get_client(self) -> httpx.Client:
         if self._client is None:
-            if self.provider in ("openai", "local"):
-                from openai import OpenAI
-                kwargs = {}
-                if self._base_url:
-                    kwargs["base_url"] = self._base_url
-                if self._api_key:
-                    kwargs["api_key"] = self._api_key
-                elif self.provider == "local":
-                    kwargs["api_key"] = "not-needed"
-                self._client = OpenAI(**kwargs)
-            elif self.provider == "voyage":
-                import voyageai
-                self._client = voyageai.Client()
-            else:
-                raise ValueError(f"Unknown embedding provider: {self.provider}")
+            self._client = httpx.Client(timeout=_DEFAULT_TIMEOUT)
         return self._client
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
@@ -78,19 +65,14 @@ class EmbeddingClient:
 
     def _embed_batch(self, texts: list[str]) -> np.ndarray:
         client = self._get_client()
-        if self.provider in ("openai", "local"):
-            kwargs = {"model": self.model, "input": texts}
-            # Only pass dimensions for OpenAI proper (not local TEI)
-            if self.provider == "openai":
-                kwargs["dimensions"] = self.dimensions
-            resp = client.embeddings.create(**kwargs)
-            vecs = [d.embedding for d in resp.data]
-            return np.array(vecs, dtype=np.float32)
-        elif self.provider == "voyage":
-            resp = client.embed(texts, model=self.model)
-            return np.array(resp.embeddings, dtype=np.float32)
-        else:
-            raise ValueError(f"Unknown provider: {self.provider}")
+        resp = client.post(
+            f"{self.base_url}/embeddings",
+            json={"model": self.model, "input": texts},
+        )
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        vecs = [d["embedding"] for d in data]
+        return np.array(vecs, dtype=np.float32)
 
 
 def create_client() -> EmbeddingClient:
@@ -98,12 +80,10 @@ def create_client() -> EmbeddingClient:
     cfg = load_config()
     emb = cfg.doc_retrieval.embedding
     return EmbeddingClient(
-        provider=emb.provider,
+        base_url=emb.base_url,
         model=emb.model,
         dimensions=emb.dimensions,
         batch_size=emb.batch_size,
-        base_url=getattr(emb, "base_url", None),
-        api_key=getattr(emb, "api_key", None),
     )
 
 

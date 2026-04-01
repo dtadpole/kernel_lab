@@ -2,10 +2,10 @@
 #
 # Targets map 1:1 to the kb plugin skills:
 #
-#   kb:index skill            kb:docs skill
-#   ─────────────────         ─────────────────
-#   make download             make find Q="..."
-#   make parse                make browse DOC=... [SEC=...] [DEPTH=...]
+#   kb:index skill            kb:docs skill           kb:service skill
+#   ─────────────────         ─────────────────        ─────────────────
+#   make download             make find Q="..."        (see plugins/kb/deploy/cli.py)
+#   make parse                make browse DOC=...
 #   make index                make read DOC=... SEC=...
 #   make rebuild
 #   make cleanup

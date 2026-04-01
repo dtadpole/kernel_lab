@@ -9,9 +9,9 @@ indexes, and searches NVIDIA CUDA Toolkit documentation from `docs.nvidia.com/cu
 providing BM25 (sparse) and FAISS (dense) retrieval with hybrid fusion via
 Reciprocal Rank Fusion (RRF).
 
-The `kb` plugin (`plugins/kb/`) exposes this functionality to Claude Code via two
-skills (`docs` and `index`). Both skills invoke `doc_retrieval` CLI commands.
-The `cuda_agent` also calls the same CLI via Bash for documentation lookup.
+The `kb` plugin (`plugins/kb/`) exposes this functionality to Claude Code via three
+skills: `docs` (search/read/browse), `index` (download/parse/index), and `service`
+(embedding service management). All skills invoke CLI commands — no MCP server.
 
 ## Commands
 
@@ -23,8 +23,7 @@ cd /home/centos/kernel_lab
 
 ### Download NVIDIA docs
 ```bash
-doc_retrieval/.venv/bin/python -m doc_retrieval download --tier 1
-doc_retrieval/.venv/bin/python -m doc_retrieval download --tier all
+doc_retrieval/.venv/bin/python -m doc_retrieval download
 ```
 
 ### Parse downloaded docs into chunks
@@ -58,17 +57,16 @@ doc_retrieval/.venv/bin/python -m doc_retrieval read cuda-c-programming-guide sh
 - **`downloader.py`** — Crawls Sphinx HTML pages from `docs.nvidia.com/cuda/`. Saves to `data/nvidia-docs/html/{slug}/`.
 - **`parser.py`** — Parses HTML via BeautifulSoup (html_parser.py). Outputs all_chunks.jsonl, toc.jsonl, sections.jsonl.
 - **`html_parser.py`** — BeautifulSoup-based parser for Sphinx HTML. Extracts sections with anchor IDs, builds TOC tree, produces lightweight HTML chunks for dual-layer index.
-- **`chunking.py`** — Chunking strategies: narrative (guides) vs API reference. Respects token limits from config.
 - **`indexer.py`** — Builds BM25 index (rank-bm25) and FAISS dense index from parsed chunks. Caches embeddings to avoid re-embedding unchanged content.
 - **`searcher.py`** — Unified search interface: BM25, dense, and hybrid (RRF) modes. TOC browsing and section reading for navigation. Lazy-loads all data on first use.
-- **`embeddings.py`** — API client for embedding providers (local Qwen3 via TEI, OpenAI, Voyage). Batched requests with caching.
+- **`embeddings.py`** — httpx-based client for the OpenAI-compatible `/v1/embeddings` endpoint. Connects to a local Qwen3-Embedding-4B server (deployed via `kb:service` skill). Batched requests with caching.
 - **`config.py`** — Hydra config loader. Config lives at `conf/doc_retrieval/default.yaml`.
 
 ### Key design decisions
 
 - **HTML-only, dual-layer index** — Sections (full content, lightweight HTML) for reading + 512-token chunks for BM25/FAISS search. HTML parsed with BeautifulSoup to preserve anchor IDs for navigation.
-- **Local embeddings** — Uses Qwen3-Embedding-4B via local TEI service by default; configurable via Hydra for other providers.
-- **FAISS for vectors** — `IndexFlatIP` with normalized vectors for cosine similarity. Corpus is small enough (~50K chunks) for flat index.
+- **Local embeddings** — Uses Qwen3-Embedding-4B via a Python embedding server on a remote GPU host (`plugins/kb/embed_server/`), managed by the `kb:service` skill.
+- **FAISS for vectors** — `IndexFlatIP` with normalized vectors for cosine similarity. Corpus is small enough (~3.5K chunks) for flat index.
 - **Hybrid search via RRF** — Reciprocal Rank Fusion combines BM25 and dense results without score calibration.
 - **Lazy loading** — Indices loaded on first search call to avoid startup cost.
 
@@ -90,7 +88,7 @@ data/nvidia-docs/                    # IN REPO — single source of truth
 
 ~/.doc_retrieval/                    # RUNTIME — derived artifacts (safe to delete)
   chunks/
-    all_chunks.jsonl                 # search-layer chunks (PDF + HTML)
+    all_chunks.jsonl                 # search-layer chunks
     toc.jsonl                        # HTML document TOC trees
     sections.jsonl                   # HTML full section content (reading layer)
   index/
@@ -98,6 +96,7 @@ data/nvidia-docs/                    # IN REPO — single source of truth
     faiss.index                      # FAISS dense index
     chunk_ids.json                   # chunk ID mapping
     embedding_cache.npz              # cached embeddings
+    metadata.json                    # index metadata
 ```
 
 ### Relationship to plugins/kb
@@ -106,6 +105,9 @@ data/nvidia-docs/                    # IN REPO — single source of truth
 plugins/kb/                          # Claude Code plugin (thin interface)
   skills/docs/SKILL.md              # → calls: find, read, browse
   skills/index/SKILL.md             # → calls: download, parse, index
+  skills/service/SKILL.md           # → manages: embedding server on GPU host
+  embed_server/                      # → Python embedding server code
+  deploy/                            # → deploy CLI + systemd unit
 
 doc_retrieval/                       # Python package (engine)
   cli.py                            # CLI entry point: python -m doc_retrieval <cmd>

@@ -71,8 +71,9 @@ html_parsing:
     - "footer"
 
 # --- Embedding settings ---
+# TEI (Text Embeddings Inference) on remote GPU host via SSH tunnel.
+# See: kb:service skill for deploying/managing the service.
 embedding:
-  provider: "local"
   base_url: "http://localhost:46982/v1"
   model: "Qwen/Qwen3-Embedding-4B"
   batch_size: 32  # TEI max_client_batch_size is 32

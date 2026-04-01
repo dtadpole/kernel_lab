@@ -17,7 +17,7 @@ import pytest
 # Fixtures
 # ---------------------------------------------------------------------------
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "raw" / "html"
+DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "nvidia-docs" / "html"
 
 # Use a small doc for fast tests, large doc for coverage
 SMALL_SLUG = "blackwell-tuning-guide"
@@ -395,7 +395,7 @@ def _embedding_service_available() -> bool:
     """Check if the local embedding service is running."""
     try:
         import httpx
-        resp = httpx.get("http://localhost:46982/v1/models", timeout=2.0)
+        resp = httpx.get("http://localhost:46982/info", timeout=2.0)
         return resp.status_code == 200
     except Exception:
         return False
@@ -427,15 +427,7 @@ class TestDenseSearch:
             client = create_client()
             texts = [c["text"][:500] for c in chunks]  # truncate for speed
 
-            # Embed in batches
-            all_vecs = []
-            batch_size = 32
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
-                vecs = client.embed_batch(batch)
-                all_vecs.extend(vecs)
-
-            matrix = np.array(all_vecs, dtype=np.float32)
+            matrix = client.embed_texts(texts)
             # Normalize for cosine similarity
             norms = np.linalg.norm(matrix, axis=1, keepdims=True)
             norms[norms == 0] = 1

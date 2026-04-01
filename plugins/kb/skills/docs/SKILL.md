@@ -58,6 +58,10 @@ doc_retrieval/.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide 
 - `parallel-thread-execution` — PTX ISA Reference
 - `cuda-c-best-practices-guide` — CUDA C++ Best Practices Guide
 - `inline-ptx-assembly` — Inline PTX Assembly in CUDA
+- `ampere-tuning-guide` — Ampere Tuning Guide
+- `ampere-compatibility-guide` — Ampere Compatibility Guide
+- `hopper-tuning-guide` — Hopper Tuning Guide
+- `hopper-compatibility-guide` — Hopper Compatibility Guide
 - `blackwell-tuning-guide` — Blackwell Tuning Guide
 - `blackwell-compatibility-guide` — Blackwell Compatibility Guide
 - `nvrtc` — NVRTC (Runtime Compilation)

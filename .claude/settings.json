@@ -1,5 +1,14 @@
 {
+  "extraKnownMarketplaces": {
+    "kernel-lab": {
+      "source": {
+        "source": "directory",
+        "path": "./plugins"
+      }
+    }
+  },
   "enabledPlugins": {
-    "kb": true
+    "kb@kernel-lab": true,
+    "cuda@kernel-lab": true
   }
 }

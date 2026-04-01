@@ -3,4 +3,5 @@ defaults:
   - mcp: default
   - service: default
   - doc_retrieval: default
+  - hosts: default
   - _self_

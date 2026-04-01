@@ -1,0 +1,26 @@
+# Remote GPU host configuration for cuda_exec service deployment.
+#
+# Each host entry defines an SSH target where cuda_exec can be deployed
+# and managed via the cuda:service skill.
+#
+# Remote directory convention:
+#   ~/.cuda_exec_service/  — service code, venv, config
+#   ~/.cuda_exec/          — runtime data (turns, artifacts, logs)
+#   ~/.keys/cuda_exec.key  — bearer token for API auth
+
+defaults:
+  service_dir: ".cuda_exec_service"
+  data_dir: ".cuda_exec"
+  key_path: ".keys/cuda_exec.key"
+  port: 8000
+  service_name: "cuda-exec"
+
+hosts:
+  _one:
+    ssh_host: "_one"
+    port: 8000
+    description: "RTX PRO 6000 Blackwell #1"
+  _two:
+    ssh_host: "_two"
+    port: 8000
+    description: "RTX PRO 6000 Blackwell #2"

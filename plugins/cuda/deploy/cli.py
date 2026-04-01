@@ -29,6 +29,7 @@ import yaml
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parents[2]
 _SERVICE_FILE = _SCRIPT_DIR / "cuda-exec.service"
+_REQUIREMENTS_FILE = _SCRIPT_DIR / "requirements.txt"
 
 
 def _load_hosts_config() -> dict[str, Any]:
@@ -138,8 +139,14 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
         return False
     print("  Source synced.")
 
-    # 3. Venv + deps
+    # 3. Sync requirements file + install deps
     print("[3/5] Installing dependencies...")
+    ok = ok and _rsync(
+        str(_REQUIREMENTS_FILE),
+        f"{ssh_host}:~/{svc_dir}/requirements.txt",
+    )
+    if not ok:
+        return False
     rebuild_flag = "rm -rf .venv &&" if rebuild else ""
     r = _ssh(ssh_host, f"""
         cd ~/{svc_dir}
@@ -148,10 +155,7 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
         if [ ! -d .venv ]; then
             uv venv .venv --python 3.12 2>&1
         fi
-        uv pip install --python .venv/bin/python \
-            'fastapi>=0.116,<1.0' \
-            'uvicorn[standard]>=0.35,<1.0' \
-            torch pydantic psutil ninja httpx 2>&1
+        uv pip install --python .venv/bin/python -r requirements.txt 2>&1
     """)
     if r.returncode != 0:
         print(f"  Dependency install failed.", file=sys.stderr)

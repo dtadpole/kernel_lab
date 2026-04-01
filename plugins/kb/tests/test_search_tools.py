@@ -1,52 +1,60 @@
-"""CLI tool-level tests: verify doc_retrieval CLI commands work end-to-end.
-
-These tests require the search index to be built (run kb:index rebuild first).
-"""
+"""CLI-level tests: verify doc_retrieval subcommands work end-to-end."""
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-PYTHON = str(REPO_ROOT / "doc_retrieval" / ".venv" / "bin" / "python")
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+# venv may be in the main repo root, not a worktree copy
+_VENV = _REPO_ROOT / "doc_retrieval" / ".venv" / "bin" / "python"
+if not _VENV.exists():
+    # fall back to the main repo
+    _VENV = Path("/home/centos/kernel_lab/doc_retrieval/.venv/bin/python")
+_PYTHON = str(_VENV)
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [PYTHON, "-m", "doc_retrieval", *args],
-        capture_output=True, text=True, timeout=30,
-        cwd=str(REPO_ROOT),
+        [_PYTHON, "-m", "doc_retrieval", *args],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
 
-@pytest.mark.integration
+@pytest.mark.quick
 def test_find_returns_results():
-    """find returns search results with expected fields."""
-    r = _run_cli("find", "shared memory bank conflicts", "--mode", "bm25", "--top-k", "3")
-    assert r.returncode == 0
-    # Output contains "Result 1" when results are found
-    assert "Result 1" in r.stdout
+    """find subcommand returns results with expected fields."""
+    result = _run_cli("find", "shared memory bank conflicts", "--mode", "bm25")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    output = result.stdout
+    assert "Result 1" in output
+    assert "score:" in output.lower() or "score" in output
+    assert "Title:" in output
+    assert "URL:" in output
 
 
-@pytest.mark.integration
+@pytest.mark.quick
 def test_browse_returns_toc():
-    """browse returns JSON TOC structure for a known doc."""
-    r = _run_cli("browse", "cuda-c-programming-guide", "--depth", "1")
-    assert r.returncode == 0
-    data = json.loads(r.stdout)
+    """browse subcommand returns TOC structure."""
+    result = _run_cli("browse", "cuda-c-programming-guide", "--depth", "1")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    data = json.loads(result.stdout)
     assert isinstance(data, list)
     assert len(data) > 0
     assert "section_id" in data[0]
+    assert "title" in data[0]
 
 
-@pytest.mark.integration
+@pytest.mark.quick
 def test_read_returns_section():
-    """read returns section content with navigation."""
-    r = _run_cli("read", "cuda-c-programming-guide", "introduction")
-    assert r.returncode == 0
-    data = json.loads(r.stdout)
+    """read subcommand returns a section with content and nav."""
+    result = _run_cli("read", "cuda-c-programming-guide", "programming-model")
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    data = json.loads(result.stdout)
+    assert "title" in data
     assert "content" in data
     assert "nav" in data

@@ -372,22 +372,30 @@ void mma_warp_fn(
                 const int q_start = q_block_id * BLOCK_Q;
                 const int kv_start = kv_id * BLOCK_KV;
 
-                for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-                    int q_pos_0 = q_start + mma_warp_id * WARP_Q +
-                                  mma_id_q * MMA_M + (lane_id / 4);
-                    int q_pos_1 = q_pos_0 + 8;
-                    int kv_pos_0 = kv_start +
-                                   mma_id_kv * MMA_N + (lane_id % 4) * 2;
-                    int kv_pos_1 = kv_pos_0 + 1;
+                /* Tile-level skip: if the LAST KV position in this tile
+                 * is still ≤ the FIRST Q position for this warp/mma_id_q,
+                 * then NO element can be masked — skip entirely. */
+                const int q_first = q_start + mma_warp_id * WARP_Q +
+                                    mma_id_q * MMA_M;
+                const int kv_last = kv_start + BLOCK_KV - 1;
 
-                    if (kv_pos_0 > q_pos_0)
-                        S_local[mma_id_kv][0] = -FLT_MAX;
-                    if (kv_pos_1 > q_pos_0)
-                        S_local[mma_id_kv][1] = -FLT_MAX;
-                    if (kv_pos_0 > q_pos_1)
-                        S_local[mma_id_kv][2] = -FLT_MAX;
-                    if (kv_pos_1 > q_pos_1)
-                        S_local[mma_id_kv][3] = -FLT_MAX;
+                if (kv_last > q_first) {
+                    for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
+                        int q_pos_0 = q_first + (lane_id / 4);
+                        int q_pos_1 = q_pos_0 + 8;
+                        int kv_pos_0 = kv_start +
+                                       mma_id_kv * MMA_N + (lane_id % 4) * 2;
+                        int kv_pos_1 = kv_pos_0 + 1;
+
+                        if (kv_pos_0 > q_pos_0)
+                            S_local[mma_id_kv][0] = -FLT_MAX;
+                        if (kv_pos_1 > q_pos_0)
+                            S_local[mma_id_kv][1] = -FLT_MAX;
+                        if (kv_pos_0 > q_pos_1)
+                            S_local[mma_id_kv][2] = -FLT_MAX;
+                        if (kv_pos_1 > q_pos_1)
+                            S_local[mma_id_kv][3] = -FLT_MAX;
+                    }
                 }
             }
 

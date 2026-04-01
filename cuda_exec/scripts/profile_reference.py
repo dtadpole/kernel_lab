@@ -32,7 +32,10 @@ def main() -> int:
     num_warmups = int(os.environ.get("CUDA_EXEC_NUM_WARMUPS", "5"))
     num_trials = int(os.environ.get("CUDA_EXEC_NUM_TRIALS", "10"))
 
-    # Load the reference module
+    # Load the reference module (add its directory to sys.path for sibling imports)
+    ref_dir = os.path.dirname(os.path.abspath(ref_path))
+    if ref_dir not in sys.path:
+        sys.path.insert(0, ref_dir)
     spec = importlib.util.spec_from_file_location("reference", ref_path)
     ref = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ref)

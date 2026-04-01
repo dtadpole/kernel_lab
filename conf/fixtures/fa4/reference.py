@@ -156,9 +156,10 @@ def get_inputs(config: dict[str, Any]) -> list:
     Hkv = cfg["num_kv_heads"]
     D = cfg["head_dim"]
 
-    Q = torch.randn(B, S, H, D, dtype=torch.bfloat16, device=device)
-    K = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
-    V = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
+    numel = B * S * H * D
+    Q = torch.arange(numel, dtype=torch.bfloat16, device=device).reshape(B, S, H, D).contiguous()
+    K = torch.arange(numel, dtype=torch.bfloat16, device=device).reshape(B, S, Hkv, D).contiguous()
+    V = torch.arange(numel, dtype=torch.bfloat16, device=device).reshape(B, S, Hkv, D).contiguous()
     return [Q, K, V, cfg["causal"]]
 
 

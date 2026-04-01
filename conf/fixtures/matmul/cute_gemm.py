@@ -42,7 +42,7 @@ class Sm120Gemm:
         bN: int = 128,
         bK: int = 64,
         num_mma_warps: int = 4,
-        num_stages: int = 2,
+        num_stages: int = 3,
         output_bf16: bool = False,
     ):
         self.bM = bM
@@ -148,7 +148,7 @@ class Sm120Gemm:
         tile_sched_params = utils.PersistentTileSchedulerParams(
             num_ctas_mnl, cluster_shape_mnl,
         )
-        max_active = cutlass.const_expr(170)  # RTX 5090: 170 SMs
+        max_active = cutlass.const_expr(188)  # RTX PRO 6000: 188 SMs
         grid = utils.StaticPersistentTileScheduler.get_grid_shape(
             tile_sched_params, max_active,
         )
@@ -495,7 +495,7 @@ def test():
     c_cute = from_dlpack(C, assumed_align=16)  # (M, N) N-major
 
     gemm = Sm120Gemm(
-        bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=2, output_bf16=True,
+        bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=3, output_bf16=True,
     )
     stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
 
@@ -532,7 +532,7 @@ def test():
         c2 = from_dlpack(C2, assumed_align=16)
 
         gemm2 = Sm120Gemm(
-            bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=2,
+            bM=128, bN=128, bK=64, num_mma_warps=4, num_stages=3,
             output_bf16=True,
         )
         compiled2 = cute.compile(gemm2, a2, b2, c2, stream=stream)

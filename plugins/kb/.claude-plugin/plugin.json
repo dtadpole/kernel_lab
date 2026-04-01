@@ -1,6 +1,6 @@
 {
   "name": "kb",
-  "description": "CUDA documentation search and retrieval via BM25/dense/hybrid search over indexed NVIDIA docs",
+  "description": "CUDA documentation search, reading, and index management via CLI",
   "version": "0.1.0",
   "author": {
     "name": "D.Tadpole"

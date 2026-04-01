@@ -381,7 +381,7 @@ class DocSearcher:
         }
 
 
-def cli_search(
+def cli_find(
     query: str,
     mode: str = "hybrid",
     top_k: int = 5,

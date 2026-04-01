@@ -41,6 +41,7 @@ from cuda_exec.scripts.eval_support import (  # noqa: E402
     set_seed,
     acquire_device_lock,
     release_device_lock,
+    cleanup_lockfile,
     gpu_cleanup,
     watchdog_handler,
     load_reference_entry,
@@ -414,6 +415,11 @@ def main() -> int:
             pass
 
         release_device_lock(lock_fd)
+
+        # Clean up stale lock if our process is about to exit abnormally
+        device_index = device.index if device.index is not None else 0
+        lock_path = Path.home() / ".cuda_exec" / f".lock_cuda_{device_index}"
+        cleanup_lockfile(lock_path)
 
 
 if __name__ == "__main__":

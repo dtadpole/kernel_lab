@@ -12,6 +12,7 @@ import os
 import signal
 import statistics
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,25 +40,70 @@ def set_seed(seed: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Device locking
+# Device locking (aligned with triton-ag configEndpoints.py / kbEvalCli.py)
 # ---------------------------------------------------------------------------
+MAX_LOCK_AGE = 30  # seconds — force-delete lock older than this
+MAX_LOCK_WAIT = 15  # seconds — max time to wait for lock before giving up
+
+
+def cleanup_lockfile(lock_path: Path) -> None:
+    """Remove stale lock files left by dead or timed-out processes."""
+    if not lock_path.exists():
+        return
+    my_pid = os.getpid()
+    lock_mtime = lock_path.stat().st_mtime
+    try:
+        with open(lock_path, "r") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            # Shared lock succeeded → exclusive lock is released.
+            # Check if the owning process is still alive.
+            first_line = f.readline().strip()
+            digits = "".join(c for c in first_line if c.isdigit())
+            if digits:
+                file_pid = int(digits)
+                if file_pid != my_pid:
+                    try:
+                        os.kill(file_pid, 0)  # probe — no signal sent
+                    except ProcessLookupError:
+                        # Process is dead — remove stale lock
+                        try:
+                            os.remove(lock_path)
+                        except OSError:
+                            pass
+    except BlockingIOError:
+        # Cannot get shared lock → someone holds exclusive lock.
+        # Safety net: if lock is older than MAX_LOCK_AGE, force-delete.
+        if lock_mtime < time.time() - MAX_LOCK_AGE:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+
 
 def acquire_device_lock(device: torch.device) -> int | None:
+    """Acquire GPU device lock with wait + stale cleanup."""
     lock_dir = Path.home() / ".cuda_exec"
     lock_dir.mkdir(parents=True, exist_ok=True)
     device_index = device.index if device.index is not None else 0
     lock_path = lock_dir / f".lock_cuda_{device_index}"
-    try:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        return fd
-    except BlockingIOError:
-        raise RuntimeError(
-            f"CUDA device {device_index} is locked by another process. "
-            f"Lock file: {lock_path}"
-        )
+
+    deadline = time.monotonic() + MAX_LOCK_WAIT
+    while True:
+        cleanup_lockfile(lock_path)
+        try:
+            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            return fd
+        except BlockingIOError:
+            os.close(fd)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"CUDA device {device_index} is locked by another process "
+                    f"(waited {MAX_LOCK_WAIT}s). Lock file: {lock_path}"
+                )
+            time.sleep(0.5)
 
 
 def release_device_lock(lock_fd: int | None) -> None:
@@ -81,11 +127,13 @@ def gpu_cleanup(device: torch.device) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Watchdog
+# Watchdog (signal-based, kept for backward compat)
 # ---------------------------------------------------------------------------
 
 def watchdog_handler(signum: int, frame: Any) -> None:
     raise TimeoutError("watchdog timeout expired")
+
+
 
 
 # ---------------------------------------------------------------------------

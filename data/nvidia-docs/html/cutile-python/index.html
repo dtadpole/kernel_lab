@@ -1,0 +1,584 @@
+
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>cuTile Python &#8212; cuTile Python</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/nvidia-sphinx-theme.css?v=df3ac72c" />
+    <link rel="stylesheet" type="text/css" href="_static/css/custom.css?v=7e3aaf8b" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="_static/documentation_options.js?v=5929fcd5"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'index';</script>
+    <link rel="icon" href="_static/favicon.png"/>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Release Notes" href="generated/release_notes.html" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+
+
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="#">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="cuTile Python - Home"/>
+    <img src="_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="cuTile Python - Home"/>
+  
+  
+    <p class="title logo__title">cuTile Python</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="#">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="_static/nvidia-logo-horiz-rgb-blk-for-screen.svg" class="logo__image only-light" alt="cuTile Python - Home"/>
+    <img src="_static/nvidia-logo-horiz-rgb-wht-for-screen.svg" class="logo__image only-dark pst-js-only" alt="cuTile Python - Home"/>
+  
+  
+    <p class="title logo__title">cuTile Python</p>
+  
+</a>
+
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item"><!--
+SPDX-FileCopyrightText: Copyright (c) <2025> NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+
+<nav class="bd-docs-nav bd-links" aria-label="Table of Contents">
+  <p class="bd-links__title" role="heading" aria-level="1">Table of Contents</p>
+  <div class="bd-toc-item navbar-nav">
+    <ul>
+<li class="toctree-l1"><a class="reference internal" href="generated/release_notes.html">Release Notes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="generated/release_notes.html#id1">1.2.0 (2026-03-05)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="generated/release_notes.html#id2">1.1.0 (2026-01-30)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="generated/release_notes.html#id6">1.0.1 (2025-12-18)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="generated/release_notes.html#id9">1.0.0 (2025-12-02)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#installing-cutile-python">Installing cuTile Python</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#other-packages">Other Packages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#example-code">Example Code</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#developer-tools">Developer Tools</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="execution.html">Execution Model</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#abstract-machine">Abstract Machine</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#execution-spaces">Execution Spaces</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#tile-functions">Tile Functions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#execution-tile-kernels">Tile Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#python-subset">Python Subset</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#tile-parallelism">Tile Parallelism</a></li>
+<li class="toctree-l2"><a class="reference internal" href="execution.html#constantness">Constantness</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="data.html">Data Model</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="data.html#global-arrays">Global Arrays</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#tiles-and-scalars">Tiles and Scalars</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#element-tile-space">Element &amp; Tile Space</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#shape-broadcasting">Shape Broadcasting</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#data-types">Data Types</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#numeric-arithmetic-data-types">Numeric &amp; Arithmetic Data Types</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#arithmetic-promotion">Arithmetic Promotion</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#tuples">Tuples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#rounding-modes">Rounding Modes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data.html#padding-modes">Padding Modes</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="memory_model.html">Memory Model</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="memory_model.html#memory-order">Memory Order</a></li>
+<li class="toctree-l2"><a class="reference internal" href="memory_model.html#memory-scope">Memory Scope</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="interoperability.html">Interoperability</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="interoperability.html#machine-representation">Machine Representation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="interoperability.html#interoperability-with-simt">Interoperability with SIMT</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#architecture-specific-configuration">Architecture-specific configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#load-store-performance-hints">Load/store performance hints</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="operations.html">Operations</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#load-store">Load/Store</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#factory">Factory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#shape-dtype">Shape &amp; DType</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#reduction">Reduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#scan">Scan</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#matmul">Matmul</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#selection">Selection</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#math">Math</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#bitwise">Bitwise</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#comparison">Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#atomic">Atomic</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#utility">Utility</a></li>
+<li class="toctree-l2"><a class="reference internal" href="operations.html#metaprogramming-support">Metaprogramming Support</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="debugging.html">Debugging</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="debugging.html#exception-types">Exception Types</a></li>
+<li class="toctree-l2"><a class="reference internal" href="debugging.html#environment-variables">Environment Variables</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="known_issues.html">Known Issues</a></li>
+</ul>
+
+  </div>
+</nav>
+
+<script type="text/javascript">
+  document.addEventListener('DOMContentLoaded', function() {
+    // Find all items that have children
+    const tocItems = document.querySelectorAll('.bd-toc-item .toctree-l1');
+
+    tocItems.forEach(function(item) {
+      // Check if the item has child items (a nested list)
+      const sublist = item.querySelector('ul');
+      if (sublist) {
+        // Add class to indicate it has children
+        item.classList.add('has-children');
+
+        // Create a toggle button with a simple span that will be styled with CSS
+        const toggleButton = document.createElement('button');
+        toggleButton.className = 'toc-toggle-btn';
+        toggleButton.id = 'toggle-' + Math.random().toString(36).substring(2, 9);
+
+        // Instead of Font Awesome, use a simple span with a text arrow
+        const arrowElem = document.createElement('span');
+        arrowElem.className = 'arrow-icon';
+
+        // Start with up arrow (collapsed state)
+        arrowElem.textContent = '▲';
+        toggleButton.appendChild(arrowElem);
+
+        item.appendChild(toggleButton);
+
+        // Start with sections collapsed (no 'current' class)
+        // Exception: Add 'current' class to ancestor of current page to keep it expanded
+        if (!item.classList.contains('current')) {
+          // Hide sublist manually with CSS
+          sublist.style.display = 'none';
+        } else {
+          // This is an ancestor of the current page, keep it expanded
+          arrowElem.textContent = '▼';
+        }
+
+        // Add click handler to toggle button
+        toggleButton.onclick = function(e) {
+          // Toggle expanded state by toggling display of sublist
+          if (sublist.style.display === 'none') {
+            sublist.style.display = 'block';
+            arrowElem.textContent = '▼';
+            item.classList.add('current');
+          } else {
+            sublist.style.display = 'none';
+            arrowElem.textContent = '▲';
+            item.classList.remove('current');
+          }
+
+          e.preventDefault();
+          e.stopPropagation();
+        };
+      }
+    });
+  });
+</script></div>
+        <div class="sidebar-primary-item">
+<div id="searchbox"></div></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+  </div>
+
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none"></div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="cutile-python">
+<h1>cuTile Python<a class="headerlink" href="#cutile-python" title="Link to this heading">#</a></h1>
+<p>cuTile is a parallel programming model for NVIDIA GPUs and a Python-based <abbr title="Domain-Specific Language">DSL</abbr>.
+It automatically leverages advanced hardware capabilities, such as tensor cores and tensor memory accelerators,
+while providing portability across different NVIDIA GPU architectures.
+cuTile enables the latest hardware features without requiring code changes.</p>
+<p>cuTile <a class="reference internal" href="execution.html#execution-tile-kernels"><span class="std std-ref">kernels</span></a> are GPU programs that are executed in parallel on a logical <a class="reference internal" href="execution.html#grid"><span class="std std-ref">grid</span></a> of <a class="reference internal" href="execution.html#block"><span class="std std-ref">blocks</span></a>.
+The <a class="reference internal" href="execution.html#cuda.tile.kernel" title="cuda.tile.kernel"><code class="xref py py-class docutils literal notranslate"><span class="pre">&#64;ct.kernel</span></code></a> decorator marks a Python function as a kernel’s entry point.
+Kernels cannot be called directly from the host code; the host must queue kernels for execution on GPU
+using the <a class="reference internal" href="execution.html#cuda.tile.launch" title="cuda.tile.launch"><code class="xref py py-func docutils literal notranslate"><span class="pre">ct.launch()</span></code></a> function:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cuda.tile</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">ct</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span>
+
+<span class="n">TILE_SIZE</span> <span class="o">=</span> <span class="mi">16</span>
+
+<span class="c1"># cuTile kernel for adding two dense vectors. It runs in parallel on the GPU.</span>
+<span class="nd">@ct</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">vector_add_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">result</span><span class="p">):</span>
+    <span class="n">block_id</span> <span class="o">=</span> <span class="n">ct</span><span class="o">.</span><span class="n">bid</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">a_tile</span> <span class="o">=</span> <span class="n">ct</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">index</span><span class="o">=</span><span class="p">(</span><span class="n">block_id</span><span class="p">,),</span> <span class="n">shape</span><span class="o">=</span><span class="p">(</span><span class="n">TILE_SIZE</span><span class="p">,))</span>
+    <span class="n">b_tile</span> <span class="o">=</span> <span class="n">ct</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">b</span><span class="p">,</span> <span class="n">index</span><span class="o">=</span><span class="p">(</span><span class="n">block_id</span><span class="p">,),</span> <span class="n">shape</span><span class="o">=</span><span class="p">(</span><span class="n">TILE_SIZE</span><span class="p">,))</span>
+    <span class="n">result_tile</span> <span class="o">=</span> <span class="n">a_tile</span> <span class="o">+</span> <span class="n">b_tile</span>
+    <span class="n">ct</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">index</span><span class="o">=</span><span class="p">(</span><span class="n">block_id</span><span class="p">,),</span> <span class="n">tile</span><span class="o">=</span><span class="n">result_tile</span><span class="p">)</span>
+
+<span class="c1"># Host-side function that launches the above kernel.</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">vector_add</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="n">cupy</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="n">cupy</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">result</span><span class="p">:</span> <span class="n">cupy</span><span class="o">.</span><span class="n">ndarray</span><span class="p">):</span>
+    <span class="k">assert</span> <span class="n">a</span><span class="o">.</span><span class="n">shape</span> <span class="o">==</span> <span class="n">b</span><span class="o">.</span><span class="n">shape</span> <span class="o">==</span> <span class="n">result</span><span class="o">.</span><span class="n">shape</span>
+    <span class="n">grid</span> <span class="o">=</span> <span class="p">(</span><span class="n">ct</span><span class="o">.</span><span class="n">cdiv</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">TILE_SIZE</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">ct</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span><span class="n">cupy</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">get_current_stream</span><span class="p">(),</span> <span class="n">grid</span><span class="p">,</span> <span class="n">vector_add_kernel</span><span class="p">,</span> <span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">result</span><span class="p">))</span>
+</pre></div>
+</div>
+<p><a class="reference internal" href="execution.html#execution-tile-kernels"><span class="std std-ref">Kernels</span></a> move data between <a class="reference internal" href="data/array.html#data-array-cuda-tile-array"><span class="std std-ref">arrays</span></a> and <a class="reference internal" href="data.html#data-tiles-and-scalars"><span class="std std-ref">tiles</span></a> using functions like
+<a class="reference internal" href="generated/cuda.tile.load.html#cuda.tile.load" title="cuda.tile.load"><code class="xref py py-func docutils literal notranslate"><span class="pre">ct.load()</span></code></a> and <a class="reference internal" href="generated/cuda.tile.store.html#cuda.tile.store" title="cuda.tile.store"><code class="xref py py-func docutils literal notranslate"><span class="pre">ct.store()</span></code></a>.
+Both arrays and tiles are tensor-like data structures: each has a specific shape
+(i.e., the number of elements along each axis) and a <a class="reference internal" href="data.html#data-data-types"><span class="std std-ref">dtype</span></a> (i.e., the data type of elements).
+However, there are important differences:</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="data/array.html#data-array-cuda-tile-array"><span class="std std-ref">Arrays</span></a> are stored in the global memory. They are mutable and have physical, strided
+memory layouts. Within the kernel code, they support only a limited set of operations,
+mostly related to <a class="reference internal" href="operations.html#operations-load-store"><span class="std std-ref">loading and storing</span></a> data to/from tiles. Various Python objects,
+including PyTorch tensors and CuPy arrays, can be passed as arrays from the host code
+to the kernel via kernel arguments.</p></li>
+<li><p><a class="reference internal" href="data.html#data-tiles-and-scalars"><span class="std std-ref">Tiles</span></a> are immutable values without defined storage that only exist in the kernel code.
+Tile dimensions must be compile-time constants that are powers of two.
+Tiles support a multitude of <a class="reference internal" href="operations.html#operations-operations"><span class="std std-ref">operations</span></a>, including elementwise arithmetic,
+matrix multiplication, reduction, shape manipulation, etc.</p></li>
+</ul>
+<p>Proceed to the <a class="reference internal" href="quickstart.html#quickstart"><span class="std std-ref">Quickstart</span></a> page for installation instructions and a complete working example.</p>
+<div class="toctree-wrapper compound">
+</div>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="right-next"
+       href="generated/release_notes.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Release Notes</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+
+<div class="bd-sidebar-secondary"></div>
+
+
+              
+            
+
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+<a class="footer-brand logo" href="https://www.nvidia.com">
+  <img src="_static/nvidia-logo-horiz-rgb-1c-blk-for-screen.svg" class="logo__image only-light" alt="NVIDIA"/>
+  <img src="_static/nvidia-logo-horiz-rgb-1c-wht-for-screen.svg" class="logo__image only-dark" alt="NVIDIA"/>
+</a></div>
+      
+        <div class="footer-item">
+
+<div class="footer-links">
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/">Privacy Policy</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/">Manage My Privacy</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/preferences/start/">Do Not Sell or Share My Data</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/">Terms of Service</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/accessibility/">Accessibility</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/about-nvidia/company-policies/">Corporate Policies</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/product-security/">Product Security</a>
+   | 
+  
+  
+  
+  <a class="external" href="https://www.nvidia.com/en-us/contact/">Contact</a>
+  
+  
+  
+</div>
+</div>
+      
+        <div class="footer-item">
+
+
+
+
+  <p class="copyright">
+    
+      Copyright © 2025, NVIDIA Corporation.
+      <br/>
+    
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+</div>
+
+  </footer>
+  </body>
+</html>

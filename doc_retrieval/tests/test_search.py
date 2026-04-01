@@ -2,6 +2,9 @@
 
 Each test issues a representative query and asserts that the top results
 come from the expected documents and/or sections.
+
+All docs are HTML-based (no PDF). Dense tests require the openai package
+and a running embedding service.
 """
 
 from __future__ import annotations
@@ -60,15 +63,6 @@ class TestBM25:
         assert _any_text_contains(results, "shared memory"), \
             "At least one result should mention 'shared memory'"
 
-    def test_cudamemcpyasync(self, searcher: DocSearcher):
-        """Exact API name 'cudaMemcpyAsync' should hit the Runtime API doc."""
-        results = searcher.search_bm25("cudaMemcpyAsync", TOP_K)
-
-        assert len(results) >= 1
-        doc_ids = _top_doc_ids(results)
-        assert "cuda-runtime-api" in doc_ids, \
-            f"Expected 'cuda-runtime-api' in results, got {doc_ids}"
-
     def test_ptx_ld_global(self, searcher: DocSearcher):
         """PTX instruction 'ld.global' should surface the PTX ISA doc."""
         results = searcher.search_bm25("ld.global instruction", TOP_K)
@@ -78,8 +72,26 @@ class TestBM25:
             _any_text_contains(results, "ld."), \
             "At least one result should mention the ld instruction"
 
+    def test_tma_descriptor(self, searcher: DocSearcher):
+        """'TMA descriptor' should surface TMA sections from Programming Guide or PTX ISA."""
+        results = searcher.search_bm25("TMA tensor memory accelerator descriptor", TOP_K)
+
+        assert len(results) >= 1
+        doc_ids = _top_doc_ids(results)
+        assert "cuda-c-programming-guide" in doc_ids or "parallel-thread-execution" in doc_ids, \
+            f"Expected programming guide or PTX ISA in results, got {doc_ids}"
+
+    def test_blackwell_tuning(self, searcher: DocSearcher):
+        """'blackwell tuning' should surface the Blackwell Tuning Guide."""
+        results = searcher.search_bm25("blackwell tuning guide SM120", TOP_K)
+
+        assert len(results) >= 1
+        doc_ids = _top_doc_ids(results)
+        assert "blackwell-tuning-guide" in doc_ids or "blackwell-compatibility-guide" in doc_ids, \
+            f"Expected blackwell doc in results, got {doc_ids}"
+
     def test_nvcc_compiler_options(self, searcher: DocSearcher):
-        """'nvcc -arch sm_90' should surface the NVCC compiler driver doc."""
+        """'nvcc -arch sm_90' should surface relevant content."""
         results = searcher.search_bm25("nvcc -arch sm_90", TOP_K)
 
         assert len(results) >= 1
@@ -87,22 +99,16 @@ class TestBM25:
             _any_text_contains(results, "-arch"), \
             "At least one result should mention nvcc or -arch"
 
-    def test_cublas_gemm(self, searcher: DocSearcher):
-        """'cublasSgemm' should surface the cuBLAS library doc."""
-        results = searcher.search_bm25("cublasSgemm", TOP_K)
-
-        assert len(results) >= 1
-        doc_ids = _top_doc_ids(results)
-        assert "cublas-library" in doc_ids, \
-            f"Expected 'cublas-library' in results, got {doc_ids}"
-
 
 # =======================================================================
 # Dense (Semantic) Tests
 # =======================================================================
 
 class TestDense:
-    """Dense vector search — good for conceptual / semantic queries."""
+    """Dense vector search — good for conceptual / semantic queries.
+
+    Requires the openai package and a running embedding service.
+    """
 
     def test_how_to_avoid_warp_divergence(self, searcher: DocSearcher):
         """Semantic query about warp divergence should surface relevant
@@ -114,7 +120,6 @@ class TestDense:
         assert len(results) >= 3
         assert results[0].score > 0.5, \
             f"Top result similarity should be > 0.5, got {results[0].score:.4f}"
-        # Should find content about branching/divergence/warps
         assert _any_text_contains(results, "warp") or \
             _any_text_contains(results, "divergen") or \
             _any_text_contains(results, "branch"), \
@@ -129,8 +134,6 @@ class TestDense:
         )
 
         assert len(results) >= 3
-        # Dense results should be about memory access patterns —
-        # coalescing, alignment, global memory, or device memory
         assert _any_text_contains(results, "coalesc") or \
             _any_text_contains(results, "global memory") or \
             _any_text_contains(results, "memory access") or \

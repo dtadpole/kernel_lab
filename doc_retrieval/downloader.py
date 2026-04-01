@@ -1,8 +1,8 @@
-"""Download NVIDIA CUDA Toolkit PDFs and crawl HTML documentation pages.
+"""Download NVIDIA CUDA Toolkit HTML documentation pages.
 
-Downloads raw source documents into the repo at ``doc_retrieval/data/raw/``.
-PDFs go into ``raw/pdfs/``.  HTML docs go into ``raw/html/{slug}/index.html``
-with referenced ``_images/`` alongside.
+Crawls Sphinx HTML pages from ``docs.nvidia.com/cuda/`` into the repo at
+``data/nvidia-docs/html/{slug}/index.html`` with referenced ``_images/``
+alongside.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from pathlib import Path
 
 import httpx
@@ -35,19 +34,6 @@ def _raw_root() -> Path:
     return p
 
 
-def _pdf_list(tier: str) -> list[str]:
-    """Return the list of PDF filenames for the requested tier."""
-    cfg = load_config()
-    dl = cfg.doc_retrieval.download
-    if tier == "1":
-        return list(dl.tier1)
-    if tier == "2":
-        return list(dl.tier1) + list(dl.tier2)
-    if tier == "3" or tier == "all":
-        return list(dl.tier1) + list(dl.tier2) + list(dl.tier3)
-    return list(dl.tier1)
-
-
 def _html_pages() -> list[dict]:
     """Return the list of HTML pages to crawl."""
     cfg = load_config()
@@ -60,71 +46,6 @@ def _html_pages() -> list[dict]:
 def _extract_image_refs(html: str) -> list[str]:
     """Extract ``_images/`` relative paths from HTML ``src`` attributes."""
     return sorted(set(re.findall(r'src=["\'](_images/[^"\' ]+)["\']', html)))
-
-
-# ---------------------------------------------------------------------------
-# PDF downloads
-# ---------------------------------------------------------------------------
-
-async def _download_pdf(
-    client: httpx.AsyncClient,
-    base_url: str,
-    filename: str,
-    out_dir: Path,
-    delay: float,
-) -> bool:
-    """Download a single PDF. Returns True on success."""
-    dest = out_dir / filename
-    if dest.exists():
-        logger.info("Already downloaded: %s", filename)
-        return True
-
-    url = f"{base_url}{filename}"
-    logger.info("Downloading %s ...", url)
-    try:
-        resp = await client.get(url, follow_redirects=True)
-        resp.raise_for_status()
-        dest.write_bytes(resp.content)
-        size_mb = len(resp.content) / (1024 * 1024)
-        logger.info("  -> saved %s (%.1f MB)", dest.name, size_mb)
-        await asyncio.sleep(delay)
-        return True
-    except httpx.HTTPStatusError as exc:
-        logger.warning("  -> HTTP %d for %s", exc.response.status_code, url)
-        return False
-    except httpx.RequestError as exc:
-        logger.warning("  -> Request error for %s: %s", url, exc)
-        return False
-
-
-async def _download_pdfs(tier: str) -> None:
-    """Download all PDFs for the given tier."""
-    cfg = load_config()
-    dl = cfg.doc_retrieval.download
-    base_url = dl.pdf_base_url
-    delay = dl.request_delay
-
-    out_dir = _raw_root() / "pdfs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    pdfs = _pdf_list(tier)
-    logger.info("Downloading %d PDFs (tier %s) to %s ...", len(pdfs), tier, out_dir)
-
-    limits = httpx.Limits(
-        max_connections=dl.max_connections,
-        max_keepalive_connections=dl.max_connections,
-    )
-    async with httpx.AsyncClient(
-        limits=limits,
-        timeout=httpx.Timeout(60.0, connect=10.0),
-        headers={"User-Agent": _USER_AGENT},
-    ) as client:
-        ok = 0
-        for filename in pdfs:
-            if await _download_pdf(client, base_url, filename, out_dir, delay):
-                ok += 1
-
-    logger.info("PDF download complete: %d/%d succeeded", ok, len(pdfs))
 
 
 # ---------------------------------------------------------------------------
@@ -234,101 +155,17 @@ async def _crawl_html_pages() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration: flat .html / .json files → folder structure
-# ---------------------------------------------------------------------------
-
-async def _migrate_legacy_html(out_dir: Path, delay: float) -> None:
-    """Migrate legacy flat .html and .json files to folder structure with images."""
-    cfg = load_config()
-    dl = cfg.doc_retrieval.download
-
-    limits = httpx.Limits(
-        max_connections=dl.max_connections,
-        max_keepalive_connections=dl.max_connections,
-    )
-    async with httpx.AsyncClient(
-        limits=limits,
-        timeout=httpx.Timeout(60.0, connect=10.0),
-        headers={"User-Agent": _USER_AGENT},
-    ) as client:
-        # Migrate flat .html files
-        for html_file in sorted(out_dir.glob("*.html")):
-            slug = html_file.stem
-            slug_dir = out_dir / slug
-            if (slug_dir / "index.html").exists():
-                logger.info("Already migrated: %s", slug)
-                continue
-
-            logger.info("Migrating %s.html -> %s/index.html", slug, slug)
-            html = html_file.read_text(encoding="utf-8")
-            slug_dir.mkdir(parents=True, exist_ok=True)
-            (slug_dir / "index.html").write_text(html, encoding="utf-8")
-
-            image_refs = _extract_image_refs(html)
-            if image_refs:
-                images_dir = slug_dir / "_images"
-                images_dir.mkdir(exist_ok=True)
-                ok = await _download_images(client, slug, image_refs, images_dir, delay)
-                logger.info("  -> downloaded %d/%d images", ok, len(image_refs))
-
-        # Migrate flat .json files (old crawl format)
-        import json
-        for json_file in sorted(out_dir.glob("*.json")):
-            data = json.loads(json_file.read_text(encoding="utf-8"))
-            slug = data["slug"]
-            slug_dir = out_dir / slug
-            if (slug_dir / "index.html").exists():
-                logger.info("Already migrated: %s", slug)
-                continue
-
-            logger.info("Migrating %s.json -> %s/index.html", slug, slug)
-            html = data["html"]
-            slug_dir.mkdir(parents=True, exist_ok=True)
-            (slug_dir / "index.html").write_text(html, encoding="utf-8")
-
-            image_refs = _extract_image_refs(html)
-            if image_refs:
-                images_dir = slug_dir / "_images"
-                images_dir.mkdir(exist_ok=True)
-                ok = await _download_images(client, slug, image_refs, images_dir, delay)
-                logger.info("  -> downloaded %d/%d images", ok, len(image_refs))
-
-
-# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def download_docs(
-    tier: str = "all",
-    pdf_only: bool = False,
-    html_only: bool = False,
-    migrate: bool = False,
-) -> None:
-    """Download NVIDIA CUDA documentation (PDFs and/or HTML pages).
+def download_docs() -> None:
+    """Download NVIDIA CUDA HTML documentation pages.
 
-    Raw docs are written to ``doc_retrieval/data/raw/`` in the repo.
-
-    Args:
-        tier: PDF download tier ("1", "2", "3", or "all").
-        pdf_only: If True, skip HTML crawling.
-        html_only: If True, skip PDF downloads.
-        migrate: If True, migrate legacy flat files to folder structure.
+    Raw docs are written to ``data/nvidia-docs/html/`` in the repo.
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-
-    async def _run() -> None:
-        if migrate:
-            out_dir = _raw_root() / "html"
-            cfg = load_config()
-            await _migrate_legacy_html(out_dir, cfg.doc_retrieval.download.request_delay)
-            return
-        if not html_only:
-            await _download_pdfs(tier)
-        if not pdf_only:
-            await _crawl_html_pages()
-
-    asyncio.run(_run())
+    asyncio.run(_crawl_html_pages())

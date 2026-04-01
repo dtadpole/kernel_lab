@@ -64,7 +64,9 @@ class TestCLIStructure:
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0
-        assert "--tier" in result.stdout
+        # PDF flags should be gone
+        assert "--tier" not in result.stdout
+        assert "--pdf-only" not in result.stdout
 
     def test_index_help(self):
         result = subprocess.run(

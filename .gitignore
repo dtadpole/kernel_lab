@@ -34,6 +34,4 @@ dist/
 *.qdrep
 *.sqlite
 
-# Doc retrieval generated data (chunks, indices) — raw/ is tracked
-doc_retrieval/data/chunks/
-doc_retrieval/data/index/
+# Doc retrieval runtime artifacts live in ~/.doc_retrieval/ (not in repo)

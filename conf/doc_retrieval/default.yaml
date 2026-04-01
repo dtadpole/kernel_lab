@@ -2,56 +2,6 @@
 
 # --- Download settings ---
 download:
-  pdf_base_url: "https://docs.nvidia.com/cuda/pdf/"
-  tier1:
-    - "CUDA_C_Programming_Guide.pdf"
-    - "CUDA_C_Best_Practices_Guide.pdf"
-    - "ptx_isa_9.2.pdf"
-    - "CUDA_Runtime_API.pdf"
-    - "CUDA_Driver_API.pdf"
-    - "CUDA_Math_API.pdf"
-    - "CUDA_Compiler_Driver_NVCC.pdf"
-  tier2:
-    - "CUBLAS_Library.pdf"
-    - "CUSPARSE_Library.pdf"
-    - "CUSOLVER_Library.pdf"
-    - "CUDA_Binary_Utilities.pdf"
-    - "Inline_PTX_Assembly.pdf"
-    - "PTX_Writers_Guide_To_Interoperability.pdf"
-    - "Blackwell_Tuning_Guide.pdf"
-    - "Blackwell_Compatibility_Guide.pdf"
-    - "Hopper_Tuning_Guide.pdf"
-    - "Hopper_Compatibility_Guide.pdf"
-    - "Ada_Tuning_Guide.pdf"
-    - "Ada_Compatibility_Guide.pdf"
-  tier3:
-    - "CUFFT_Library.pdf"
-    - "CURAND_Library.pdf"
-    - "NPP_Library.pdf"
-    - "NVBLAS_Library.pdf"
-    - "nvjpeg.pdf"
-    - "nvjitlink.pdf"
-    - "nvfatbin.pdf"
-    - "cuDLA_API.pdf"
-    - "NVVM_IR_Spec.pdf"
-    - "libdevice-users-guide.pdf"
-    - "libNVVM_API.pdf"
-    - "cuda-gdb.pdf"
-    - "ctadvisor.pdf"
-    - "Turing_Tuning_Guide.pdf"
-    - "Turing_Compatibility_Guide.pdf"
-    - "CUDA_Quick_Start_Guide.pdf"
-    - "CUDA_Installation_Guide_Linux.pdf"
-    - "CUDA_Installation_Guide_Windows.pdf"
-    - "CUDA_Toolkit_Release_Notes.pdf"
-    - "CUDA_Debugger_API.pdf"
-    - "CUDA_on_WSL_User_Guide.pdf"
-    - "GPUDirect_RDMA.pdf"
-    - "eflow-users-guide.pdf"
-    - "Floating_Point_on_NVIDIA_GPU.pdf"
-    - "Incomplete_LU_Cholesky.pdf"
-    - "CUDA-For-Tegra-AppNote.pdf"
-    - "Demo_Suite.pdf"
   html_pages:
     - url: "https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html"
       slug: "cuda-c-programming-guide"
@@ -133,8 +83,8 @@ search:
   rrf_k: 60
 
 # --- Storage paths ---
-# Raw source docs (PDFs, HTML+images) live in the repo — single source of truth.
+# Raw HTML docs live in the repo (data/nvidia-docs/) — single source of truth.
 # Derived artifacts (chunks, indices) live in a runtime directory.
 storage:
-  raw_root: "${oc.env:DOC_RETRIEVAL_RAW_ROOT,doc_retrieval/data/raw}"
+  raw_root: "${oc.env:DOC_RETRIEVAL_RAW_ROOT,data/nvidia-docs}"
   runtime_root: "${oc.env:DOC_RETRIEVAL_RUNTIME_ROOT,${oc.env:HOME}/.doc_retrieval}"

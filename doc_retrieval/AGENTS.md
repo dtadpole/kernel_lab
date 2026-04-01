@@ -1,22 +1,28 @@
-# CLAUDE.md
+# doc_retrieval
 
-This file provides guidance to Claude Code when working with code in this directory.
+This file provides guidance when working with code in this directory.
 
 ## What this is
 
-`doc_retrieval` is a document retrieval system for NVIDIA CUDA Toolkit documentation.
-It downloads, parses, indexes, and searches docs from `docs.nvidia.com/cuda/`,
-providing BM25 (sparse) and dense (FAISS + API embeddings) retrieval with hybrid
-fusion via Reciprocal Rank Fusion (RRF).
+`doc_retrieval` is the search engine behind the `kb` plugin. It downloads, parses,
+indexes, and searches NVIDIA CUDA Toolkit documentation from `docs.nvidia.com/cuda/`,
+providing BM25 (sparse) and FAISS (dense) retrieval with hybrid fusion via
+Reciprocal Rank Fusion (RRF).
 
-Designed for CLI-based integration with the KB plugin so agents can look up CUDA
-APIs, best practices, PTX instructions, and memory model semantics.
+The `kb` plugin (`plugins/kb/`) exposes this functionality to Claude Code via two
+skills (`docs` and `index`). Both skills invoke `doc_retrieval` CLI commands.
+The `cuda_agent` also calls the same CLI via Bash for documentation lookup.
 
 ## Commands
 
-### Download NVIDIA docs
+All commands use the project venv:
+
 ```bash
 cd /home/centos/kernel_lab
+```
+
+### Download NVIDIA docs
+```bash
 doc_retrieval/.venv/bin/python -m doc_retrieval download --tier 1
 doc_retrieval/.venv/bin/python -m doc_retrieval download --tier all
 ```
@@ -38,26 +44,33 @@ doc_retrieval/.venv/bin/python -m doc_retrieval index --only dense
 doc_retrieval/.venv/bin/python -m doc_retrieval find "shared memory bank conflicts" --mode hybrid
 ```
 
+### Browse / Read (navigate documentation)
+```bash
+doc_retrieval/.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide --depth 1
+doc_retrieval/.venv/bin/python -m doc_retrieval read cuda-c-programming-guide shared-memory
+```
+
 ## Architecture
 
 ### Module responsibilities
 
-- **`downloader.py`** -- Downloads PDFs from `docs.nvidia.com/cuda/pdf/` and crawls HTML pages. Supports tiered downloads (tier 1 = essential, tier 2 = important, tier 3 = remaining).
-- **`parser.py`** -- Orchestrates parsing: PDFs via Docling, HTML via BeautifulSoup (html_parser.py). Outputs all_chunks.jsonl, toc.jsonl, sections.jsonl.
-- **`html_parser.py`** -- BeautifulSoup-based parser for Sphinx HTML. Extracts sections with anchor IDs, builds TOC tree, produces lightweight HTML chunks for dual-layer index.
-- **`indexer.py`** -- Builds BM25 index (rank-bm25) and FAISS dense index from parsed chunks. Caches embeddings to avoid re-embedding unchanged content.
-- **`searcher.py`** -- Unified search interface: BM25, dense, and hybrid (RRF) modes. TOC browsing and section reading for navigation. Lazy-loads all data on first use.
-- **`embeddings.py`** -- Thin API client for embedding providers (OpenAI, Voyage). Batched requests with rate limiting.
-- **`config.py`** -- Hydra config loader (same pattern as `cuda_agent/config.py`).
-- **`cli.py`** -- CLI subcommands: download, parse, index, find, browse, read.
+- **`cli.py`** — CLI subcommands: download, parse, index, find, browse, read.
+- **`downloader.py`** — Crawls Sphinx HTML pages from `docs.nvidia.com/cuda/`. Saves to `data/nvidia-docs/html/{slug}/`.
+- **`parser.py`** — Parses HTML via BeautifulSoup (html_parser.py). Outputs all_chunks.jsonl, toc.jsonl, sections.jsonl.
+- **`html_parser.py`** — BeautifulSoup-based parser for Sphinx HTML. Extracts sections with anchor IDs, builds TOC tree, produces lightweight HTML chunks for dual-layer index.
+- **`chunking.py`** — Chunking strategies: narrative (guides) vs API reference. Respects token limits from config.
+- **`indexer.py`** — Builds BM25 index (rank-bm25) and FAISS dense index from parsed chunks. Caches embeddings to avoid re-embedding unchanged content.
+- **`searcher.py`** — Unified search interface: BM25, dense, and hybrid (RRF) modes. TOC browsing and section reading for navigation. Lazy-loads all data on first use.
+- **`embeddings.py`** — API client for embedding providers (local Qwen3 via TEI, OpenAI, Voyage). Batched requests with caching.
+- **`config.py`** — Hydra config loader. Config lives at `conf/doc_retrieval/default.yaml`.
 
 ### Key design decisions
 
-- **Dual-layer HTML index** -- Sections (full content, lightweight HTML) for reading + 512-token chunks for BM25/FAISS search. HTML parsed with BeautifulSoup to preserve anchor IDs for navigation. PDFs continue using Docling.
-- **API-based embeddings** -- Uses OpenAI `text-embedding-3-small` by default; configurable via Hydra.
-- **FAISS for vectors** -- `IndexFlatIP` with normalized vectors for cosine similarity. Corpus is small enough (~50K chunks) for flat index.
-- **Hybrid search via RRF** -- Reciprocal Rank Fusion combines BM25 and dense results without score calibration.
-- **Lazy loading** -- Indices loaded on first search call to avoid startup cost when tools aren't used.
+- **HTML-only, dual-layer index** — Sections (full content, lightweight HTML) for reading + 512-token chunks for BM25/FAISS search. HTML parsed with BeautifulSoup to preserve anchor IDs for navigation.
+- **Local embeddings** — Uses Qwen3-Embedding-4B via local TEI service by default; configurable via Hydra for other providers.
+- **FAISS for vectors** — `IndexFlatIP` with normalized vectors for cosine similarity. Corpus is small enough (~50K chunks) for flat index.
+- **Hybrid search via RRF** — Reciprocal Rank Fusion combines BM25 and dense results without score calibration.
+- **Lazy loading** — Indices loaded on first search call to avoid startup cost.
 
 ### Storage layout
 
@@ -65,35 +78,40 @@ Raw source documents live in the **repo** (committed to git).
 Derived artifacts live in the **runtime** directory.
 
 ```
-doc_retrieval/data/raw/              # IN REPO — single source of truth
-  pdfs/
-    CUDA_C_Programming_Guide.pdf
-    ptx_isa_9.2.pdf
-    ...
+data/nvidia-docs/                    # IN REPO — single source of truth
   html/
     cuda-c-programming-guide/        # one folder per doc (slug name)
       index.html                     # full single-page Sphinx HTML
       _images/                       # referenced images
-        grid-of-thread-blocks.png
-        memory-hierarchy.png
-        ...
     parallel-thread-execution/
       index.html
       _images/
-        ...
+    ...
 
-~/.doc_retrieval/                    # RUNTIME — derived artifacts only
+~/.doc_retrieval/                    # RUNTIME — derived artifacts (safe to delete)
   chunks/
-    all_chunks.jsonl   # Search-layer chunks (PDF + HTML)
-    toc.jsonl          # HTML document TOC trees
-    sections.jsonl     # HTML full section content (reading layer)
-  index/             # bm25.pkl, faiss.index, chunk_ids.json, embedding_cache.npz
+    all_chunks.jsonl                 # search-layer chunks (PDF + HTML)
+    toc.jsonl                        # HTML document TOC trees
+    sections.jsonl                   # HTML full section content (reading layer)
+  index/
+    bm25.pkl                         # BM25 index
+    faiss.index                      # FAISS dense index
+    chunk_ids.json                   # chunk ID mapping
+    embedding_cache.npz              # cached embeddings
 ```
 
-Convention:
-- **Raw docs (PDFs, HTML+images)** → `doc_retrieval/data/raw/` in repo. Never duplicated to runtime.
-- **HTML folder structure** → `{slug}/index.html` + `{slug}/_images/`. One folder per doc.
-- **Derived artifacts (chunks, indices)** → `~/.doc_retrieval/` (or `DOC_RETRIEVAL_ROOT` env var). Not committed.
-- Downloader writes to `doc_retrieval/data/raw/`. Parser reads from `doc_retrieval/data/raw/`, writes to runtime.
-- PDF filenames match NVIDIA's naming (e.g. `CUDA_C_Programming_Guide.pdf`).
-- HTML slugs match NVIDIA's URL path (e.g. `cuda-c-programming-guide` from `docs.nvidia.com/cuda/cuda-c-programming-guide/`).
+### Relationship to plugins/kb
+
+```
+plugins/kb/                          # Claude Code plugin (thin interface)
+  skills/docs/SKILL.md              # → calls: find, read, browse
+  skills/index/SKILL.md             # → calls: download, parse, index
+
+doc_retrieval/                       # Python package (engine)
+  cli.py                            # CLI entry point: python -m doc_retrieval <cmd>
+  ...
+```
+
+Both the `kb` plugin and `cuda_agent` consume `doc_retrieval` through the same
+CLI interface (`python -m doc_retrieval`). The plugin provides the skill
+definitions; the package provides the implementation.

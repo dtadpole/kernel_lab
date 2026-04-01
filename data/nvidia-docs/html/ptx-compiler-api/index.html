@@ -1,0 +1,1722 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en">
+<head>
+  <meta charset="utf-8">
+<meta name="generator" content="Docutils 0.17.1: http://docutils.sourceforge.net/">
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>1. Introduction — PTX Compiler API 13.2 documentation</title>
+      <link rel="stylesheet" href="../_static/pygments.css" type="text/css">
+      <link rel="stylesheet" href="../_static/css/theme.css" type="text/css">
+      <link rel="stylesheet" href="../_static/copybutton.css" type="text/css">
+      <link rel="stylesheet" href="../_static/design-style.b7bb847fb20b106c3d81b95245e65545.min.css" type="text/css">
+      <link rel="stylesheet" href="../_static/omni-style.css" type="text/css">
+      <link rel="stylesheet" href="../_static/api-styles.css" type="text/css">
+    <link rel="shortcut icon" href="../_static/favicon.ico">
+  <!--[if lt IE 9]>
+    <script src="_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script data-url_root="./" id="documentation_options" src="../_static/documentation_options.js"></script>
+        <script src="../_static/jquery.js"></script>
+        <script src="../_static/underscore.js"></script>
+        <script src="../_static/doctools.js"></script>
+        <script src="../_static/mermaid-init.js"></script>
+        <script src="../_static/clipboard.min.js"></script>
+        <script src="../_static/copybutton.js"></script>
+        <script src="../_static/design-tabs.js"></script>
+        <script src="../_static/geoip/geoip.js"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html">
+    <link rel="search" title="Search" href="search.html">
+    <link rel="prev" title="Contents" href="contents.html">
+ 
+<script src="//assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js"></script>
+ 
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search">
+            <a href="contents.html">
+            <img src="../_static/Logo_and_CUDA.png" class="logo" alt="Logo">
+          </a>
+
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs">
+    <input type="hidden" name="check_keywords" value="yes">
+    <input type="hidden" name="area" value="default">
+  </form>
+</div>
+        </div>
+<div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">1. Introduction</a></li>
+<li class="toctree-l1">
+<a class="reference internal" href="#getting-started">2. Getting Started</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#system-requirements">2.1. System Requirements</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#installation">2.2. Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="#thread-safety">3. Thread Safety</a></li>
+<li class="toctree-l1">
+<a class="reference internal" href="#user-interface">4. User Interface</a><ul>
+<li class="toctree-l2">
+<a class="reference internal" href="#ptx-compiler-handle">4.1. PTX-Compiler Handle</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#typedefs">4.1.1. Typedefs</a></li>
+</ul>
+</li>
+<li class="toctree-l2">
+<a class="reference internal" href="#error-codes">4.2. Error codes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#enumerations">4.2.1. Enumerations</a></li>
+</ul>
+</li>
+<li class="toctree-l2">
+<a class="reference internal" href="#api-versioning">4.3. API Versioning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#functions">4.3.1. Functions</a></li>
+</ul>
+</li>
+<li class="toctree-l2">
+<a class="reference internal" href="#compilation-apis">4.4. Compilation APIs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id1">4.4.1. Functions</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="#compilation-options">5. Compilation Options</a></li>
+<li class="toctree-l1"><a class="reference internal" href="#basic-usage">6. Basic Usage</a></li>
+<li class="toctree-l1">
+<a class="reference internal" href="#example-simple-vector-addition">7. Example: Simple Vector Addition</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#build-instruction">7.1. Build Instruction</a></li>
+<li class="toctree-l2">
+<a class="reference internal" href="#notices">7.2. Notices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#notice">7.2.1. Notice</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#opencl">7.2.2. OpenCL</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#trademarks">7.2.3. Trademarks</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="contents.html">PTX Compiler API</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+
+
+  
+
+<li>
+<a href="../index.html" class="icon icon-home"></a> »</li>
+  
+<li>
+<span class="section-number">1. </span>Introduction</li>
+
+      <li class="wy-breadcrumbs-aside">
+      </li>
+<li class="wy-breadcrumbs-aside">
+
+
+  <span>v13.2 |</span>
+
+
+
+  <a href="https://developer.nvidia.com/cuda-toolkit-archive" class="reference external">Archive</a>
+
+
+  <span> </span>
+</li>
+
+  </ul>
+  <hr>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <p class="rubric-h1 rubric">PTX Compiler APIs</p>
+<p>The User guide to PTX Compiler APIs.</p>
+<section id="introduction">
+<h1>
+<span class="section-number">1. </span>Introduction<a class="headerlink" href="#introduction" title="Permalink to this headline"></a>
+</h1>
+<p>The PTX Compiler APIs are a set of APIs which can be used to compile a PTX program into GPU assembly
+code.</p>
+<p>The APIs accept PTX programs in character string form and create handles to the compiler that can be
+used to obtain the GPU assembly code. The GPU assembly code string generated by the APIs can be
+loaded by <code class="docutils literal notranslate"><span class="pre">cuModuleLoadData</span></code> and <code class="docutils literal notranslate"><span class="pre">cuModuleLoadDataEx</span></code>, and linked with other modules by
+<code class="docutils literal notranslate"><span class="pre">cuLinkAddData</span></code> of the CUDA Driver API or <code class="docutils literal notranslate"><span class="pre">nvJitLinkAddData</span></code> API from <a class="reference external" href="https://docs.nvidia.com/cuda/nvjitlink/index.html">nvjitlink</a>.</p>
+<p>The main use cases for these PTX Compiler APIs are:</p>
+<ul class="simple">
+<li><p>With CUDA driver APIs, compilation and loading are tied together. PTX Compiler APIs de-couple the
+two operations. This allows applications to perform early compilation and caching of the GPU
+assembly code.</p></li>
+<li><p>PTX Compiler APIs allow users to use runtime compilation for the latest PTX version that is
+supported as part of CUDA Toolkit release. This support may not be available in the PTX JIT
+compiler present in the CUDA Driver if the application is running with an older driver installed
+in the system. Refer to <a class="reference external" href="https://docs.nvidia.com/deploy/cuda-compatibility/index.html">CUDA Compatibility</a> for more details.</p></li>
+<li><p>With PTX Compiler APIs, clients can implement a custom caching mechanism with the compiled GPU
+assembly. With CUDA driver, there is no control over caching of the JIT compilation results.</p></li>
+<li><p>The clients get fine grain control and can specify the compiler <a class="reference external" href="#compilation-options">options</a>
+during compilation.</p></li>
+</ul>
+</section>
+<section id="getting-started">
+<h1>
+<span class="section-number">2. </span>Getting Started<a class="headerlink" href="#getting-started" title="Permalink to this headline"></a>
+</h1>
+<section id="system-requirements">
+<h2>
+<span class="section-number">2.1. </span>System Requirements<a class="headerlink" href="#system-requirements" title="Permalink to this headline"></a>
+</h2>
+<p>PTX Compiler library requires the following system configuration:</p>
+<ul class="simple">
+<li><p>POSIX threads support for non-Windows platform.</p></li>
+<li><p>GPU: Any GPU with CUDA Compute Capability 5.0 or higher.</p></li>
+<li><p>CUDA Toolkit and Driver.</p></li>
+</ul>
+</section>
+<section id="installation">
+<h2>
+<span class="section-number">2.2. </span>Installation<a class="headerlink" href="#installation" title="Permalink to this headline"></a>
+</h2>
+<p>PTX Compiler library is part of the CUDA Toolkit release and the components are organized as follows
+in the CUDA toolkit installation directory:</p>
+<ul class="simple">
+<li>
+<p>On Windows:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">include\nvPTXCompiler.h</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lib\x64\nvptxcompiler_static.lib</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">doc\pdf\PTX_Compiler_API_User_Guide.pdf</span></code></p></li>
+</ul>
+</li>
+<li>
+<p>On Linux:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/nvPTXCompiler.h</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lib64/libnvptxcompiler_static.a</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">doc/pdf/PTX_Compiler_API_User_Guide.pdf</span></code></p></li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+<section id="thread-safety">
+<h1>
+<span class="section-number">3. </span>Thread Safety<a class="headerlink" href="#thread-safety" title="Permalink to this headline"></a>
+</h1>
+<p>All PTX Compiler API functions are thread safe and may be invoked by multiple threads concurrently.</p>
+</section>
+<section id="user-interface">
+<h1>
+<span class="section-number">4. </span>User Interface<a class="headerlink" href="#user-interface" title="Permalink to this headline"></a>
+</h1>
+<p>This chapter presents the PTX Compiler APIs. Basic usage of the API is explained in Basic Usage.</p>
+<ul class="simple">
+<li><p><a class="reference external" href="#ptx-compiler-handle">PTX-compiler handle</a></p></li>
+<li><p><a class="reference external" href="#error-codes">Error codes</a></p></li>
+<li><p><a class="reference external" href="#api-versioning">API Versioning</a></p></li>
+<li><p><a class="reference external" href="#compilation-apis">Compilation APIs</a></p></li>
+</ul>
+<section id="ptx-compiler-handle">
+<h2>
+<span class="section-number">4.1. </span>PTX-Compiler Handle<a class="headerlink" href="#ptx-compiler-handle" title="Permalink to this headline"></a>
+</h2>
+<p class="rubric-h2 rubric" id="group__handle">Typedefs</p>
+<div class="dl-as-table docutils container">
+<dl class="simple">
+<dt><a class="reference internal" href="#group__handle_1ga78e3bba9412ef3e505a9a908089c883e"><span class="std std-ref">nvPTXCompilerHandle</span></a></dt>
+<dd>
+<p>nvPTXCompilerHandle represents a handle to the PTX Compiler.</p>
+</dd>
+</dl>
+</div>
+<section id="typedefs">
+<h3>
+<span class="section-number">4.1.1. </span>Typedefs<a class="headerlink" href="#typedefs" title="Permalink to this headline"></a>
+</h3>
+<dl class="cpp type">
+<dt class="sig sig-object cpp" id="_CPPv419nvPTXCompilerHandle">
+<span id="_CPPv319nvPTXCompilerHandle"></span><span id="_CPPv219nvPTXCompilerHandle"></span><span id="nvPTXCompilerHandle"></span><span class="target" id="group__handle_1ga78e3bba9412ef3e505a9a908089c883e"></span><span class="k"><span class="pre">typedef</span></span><span class="w"> </span><span class="k"><span class="pre">struct</span></span><span class="w"> </span><span class="n"><span class="pre">nvPTXCompiler</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></span><a class="headerlink" href="#_CPPv419nvPTXCompilerHandle" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>nvPTXCompilerHandle represents a handle to the PTX Compiler. </p>
+<p>To compile a PTX program string, an instance of nvPTXCompiler must be created and the handle to it must be obtained using the API <a class="reference internal" href="#group__compilation_1ga86b0c1159bfd34f0fdf632101f30ca26"><span class="std std-ref">nvPTXCompilerCreate()</span></a>. Then the compilation can be done using the API <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a>. </p>
+</dd>
+</dl>
+
+</section>
+</section>
+<section id="error-codes">
+<h2>
+<span class="section-number">4.2. </span>Error codes<a class="headerlink" href="#error-codes" title="Permalink to this headline"></a>
+</h2>
+<p class="rubric-h2 rubric" id="group__error">Enumerations</p>
+<div class="dl-as-table docutils container">
+<dl class="simple">
+<dt><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">nvPTXCompileResult</span></a></dt>
+<dd>
+<p>The nvPTXCompiler APIs return the nvPTXCompileResult codes to indicate the call result.</p>
+</dd>
+</dl>
+</div>
+<section id="enumerations">
+<h3>
+<span class="section-number">4.2.1. </span>Enumerations<a class="headerlink" href="#enumerations" title="Permalink to this headline"></a>
+</h3>
+<dl class="cpp enum">
+<dt class="sig sig-object cpp" id="_CPPv418nvPTXCompileResult">
+<span id="_CPPv318nvPTXCompileResult"></span><span id="_CPPv218nvPTXCompileResult"></span><span class="target" id="group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"></span><span class="k"><span class="pre">enum</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompileResult</span></span></span><a class="headerlink" href="#_CPPv418nvPTXCompileResult" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>The nvPTXCompiler APIs return the nvPTXCompileResult codes to indicate the call result. </p>
+<p><em>Values:</em></p>
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult20NVPTXCOMPILE_SUCCESSE">
+<span id="_CPPv3N18nvPTXCompileResult20NVPTXCOMPILE_SUCCESSE"></span><span id="_CPPv2N18nvPTXCompileResult20NVPTXCOMPILE_SUCCESSE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01a8bda5ac16ff99f4d6c17e43cd093d55c"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_SUCCESS</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult20NVPTXCOMPILE_SUCCESSE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLEE">
+<span id="_CPPv3N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLEE"></span><span id="_CPPv2N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLEE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01a43db9ff1b7157fd17fa79fd727d38cc5"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLEE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_INVALID_INPUTE">
+<span id="_CPPv3N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_INVALID_INPUTE"></span><span id="_CPPv2N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_INVALID_INPUTE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01ad195caa15cfd8b94b5fff7267bf2e18e"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_INVALID_INPUT</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_INVALID_INPUTE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult38NVPTXCOMPILE_ERROR_COMPILATION_FAILUREE">
+<span id="_CPPv3N18nvPTXCompileResult38NVPTXCOMPILE_ERROR_COMPILATION_FAILUREE"></span><span id="_CPPv2N18nvPTXCompileResult38NVPTXCOMPILE_ERROR_COMPILATION_FAILUREE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01a083e5baf88c9d2c122d793462336bbfd"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_COMPILATION_FAILURE</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult38NVPTXCOMPILE_ERROR_COMPILATION_FAILUREE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult27NVPTXCOMPILE_ERROR_INTERNALE">
+<span id="_CPPv3N18nvPTXCompileResult27NVPTXCOMPILE_ERROR_INTERNALE"></span><span id="_CPPv2N18nvPTXCompileResult27NVPTXCOMPILE_ERROR_INTERNALE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01ad374e4041d04053047ed8142ea46be48"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_INTERNAL</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult27NVPTXCOMPILE_ERROR_INTERNALE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_OUT_OF_MEMORYE">
+<span id="_CPPv3N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_OUT_OF_MEMORYE"></span><span id="_CPPv2N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_OUT_OF_MEMORYE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01afc1aeb230017e6815ae798a3c3ad987e"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_OUT_OF_MEMORY</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult32NVPTXCOMPILE_ERROR_OUT_OF_MEMORYE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult49NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETEE">
+<span id="_CPPv3N18nvPTXCompileResult49NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETEE"></span><span id="_CPPv2N18nvPTXCompileResult49NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETEE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01a6450aaa5e232fd7af05413198767a626"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETE</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult49NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETEE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_UNSUPPORTED_PTX_VERSIONE">
+<span id="_CPPv3N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_UNSUPPORTED_PTX_VERSIONE"></span><span id="_CPPv2N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_UNSUPPORTED_PTX_VERSIONE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01acfdc09156d5c7fd8d981ec66d749e9f1"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_UNSUPPORTED_PTX_VERSION</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult42NVPTXCOMPILE_ERROR_UNSUPPORTED_PTX_VERSIONE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult43NVPTXCOMPILE_ERROR_UNSUPPORTED_DEVSIDE_SYNCE">
+<span id="_CPPv3N18nvPTXCompileResult43NVPTXCOMPILE_ERROR_UNSUPPORTED_DEVSIDE_SYNCE"></span><span id="_CPPv2N18nvPTXCompileResult43NVPTXCOMPILE_ERROR_UNSUPPORTED_DEVSIDE_SYNCE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01a965200c66df10bb54f764620e16daaf0"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_UNSUPPORTED_DEVSIDE_SYNC</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult43NVPTXCOMPILE_ERROR_UNSUPPORTED_DEVSIDE_SYNCE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult28NVPTXCOMPILE_ERROR_CANCELLEDE">
+<span id="_CPPv3N18nvPTXCompileResult28NVPTXCOMPILE_ERROR_CANCELLEDE"></span><span id="_CPPv2N18nvPTXCompileResult28NVPTXCOMPILE_ERROR_CANCELLEDE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01a0d3c06d53ee462a0a991637241580e89"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_ERROR_CANCELLED</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult28NVPTXCOMPILE_ERROR_CANCELLEDE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+<dl class="cpp enumerator">
+<dt class="sig sig-object cpp" id="_CPPv4N18nvPTXCompileResult31NVPTXCOMPILE_PARSE_ONLY_SUCCESSE">
+<span id="_CPPv3N18nvPTXCompileResult31NVPTXCOMPILE_PARSE_ONLY_SUCCESSE"></span><span id="_CPPv2N18nvPTXCompileResult31NVPTXCOMPILE_PARSE_ONLY_SUCCESSE"></span><span class="target" id="group__error_1gga402c9248a2b7f74f2d56fa8c292f4e01ae0a413b39c7760928de3cf064221f263"></span><span class="k"><span class="pre">enumerator</span></span><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">NVPTXCOMPILE_PARSE_ONLY_SUCCESS</span></span></span><a class="headerlink" href="#_CPPv4N18nvPTXCompileResult31NVPTXCOMPILE_PARSE_ONLY_SUCCESSE" title="Permalink to this definition"></a><br>
+</dt>
+<dd></dd>
+</dl>
+
+</dd>
+</dl>
+
+</section>
+</section>
+<section id="api-versioning">
+<h2>
+<span class="section-number">4.3. </span>API Versioning<a class="headerlink" href="#api-versioning" title="Permalink to this headline"></a>
+</h2>
+<p id="group__versioning">The PTX compiler APIs are versioned so that any new features or API changes can be done by bumping up the API version. </p>
+<p class="rubric-h2 rubric">Functions</p>
+<div class="dl-as-table docutils container">
+<dl class="simple">
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__versioning_1ga5bc657a75e33cad967df8da7d1387511"><span class="std std-ref">nvPTXCompilerGetNumSupportedArchs</span></a>(int *numArchs)</dt>
+<dd>
+<p>Sets the output paramater <code class="docutils literal notranslate"><span class="pre">numArchs</span></code> with the number of architectures supported by PTX Compiler Library.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__versioning_1gae6aa43abe2b0ab4bd948c58984cf44ae"><span class="std std-ref">nvPTXCompilerGetNumSupportedVersions</span></a>(int *numVersions)</dt>
+<dd>
+<p>Sets the output paramater <code class="docutils literal notranslate"><span class="pre">numVersions</span></code> with the number of PTX ISA versions supported by PTX Compiler Library.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__versioning_1ga0abce69c5235af0da34fb09171e46c2a"><span class="std std-ref">nvPTXCompilerGetSupportedArchs</span></a>(int *supportedArchs)</dt>
+<dd>
+<p>Populates the array passed via output paramater <code class="docutils literal notranslate"><span class="pre">supportedArchs</span></code> with architectures supported by PTX Compiler Library.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__versioning_1ga916f37c92d682ef18c552e9e767c465a"><span class="std std-ref">nvPTXCompilerGetSupportedVersions</span></a>(int(*versions)[2])</dt>
+<dd>
+<p>Populates the 2D Array passed via output paramater <code class="docutils literal notranslate"><span class="pre">versions</span></code> with PTX ISA Versions major, minor pair supported by PTX Compiler Library.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__versioning_1gadb846da0f180ce336bf1f050ce5b3e6b"><span class="std std-ref">nvPTXCompilerGetVersion</span></a>(unsigned int *major, unsigned int *minor)</dt>
+<dd>
+<p>Queries the current <code class="docutils literal notranslate"><span class="pre">major</span></code> and <code class="docutils literal notranslate"><span class="pre">minor</span></code> version of PTX Compiler APIs being used.</p>
+</dd>
+</dl>
+</div>
+<section id="functions">
+<h3>
+<span class="section-number">4.3.1. </span>Functions<a class="headerlink" href="#functions" title="Permalink to this headline"></a>
+</h3>
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv433nvPTXCompilerGetNumSupportedArchsPi">
+<span id="_CPPv333nvPTXCompilerGetNumSupportedArchsPi"></span><span id="_CPPv233nvPTXCompilerGetNumSupportedArchsPi"></span><span id="nvPTXCompilerGetNumSupportedArchs__iP"></span><span class="target" id="group__versioning_1ga5bc657a75e33cad967df8da7d1387511"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetNumSupportedArchs</span></span></span><span class="sig-paren">(</span><span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">numArchs</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv433nvPTXCompilerGetNumSupportedArchsPi" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Sets the output paramater <code class="docutils literal notranslate"><span class="pre">numArchs</span></code> with the number of architectures supported by PTX Compiler Library. </p>
+<p>This can be used to pass an array to nvPTXCompilerGetSupportedArchs to get the supported architectures.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<p><strong>numArchs</strong> – <strong>[out]</strong> Number of supported architectures</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_INPUT </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv436nvPTXCompilerGetNumSupportedVersionsPi">
+<span id="_CPPv336nvPTXCompilerGetNumSupportedVersionsPi"></span><span id="_CPPv236nvPTXCompilerGetNumSupportedVersionsPi"></span><span id="nvPTXCompilerGetNumSupportedVersions__iP"></span><span class="target" id="group__versioning_1gae6aa43abe2b0ab4bd948c58984cf44ae"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetNumSupportedVersions</span></span></span><span class="sig-paren">(</span><span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">numVersions</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv436nvPTXCompilerGetNumSupportedVersionsPi" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Sets the output paramater <code class="docutils literal notranslate"><span class="pre">numVersions</span></code> with the number of PTX ISA versions supported by PTX Compiler Library. </p>
+<p>This can be used to pass a 2D Array to nvPTXCompilerGetSupportedVersions. Number of rows in 2D Array will be equal to value populated in <code class="docutils literal notranslate"><span class="pre">numVersions</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<p><strong>numVersions</strong> – <strong>[out]</strong> Number of supported PTX ISA versions</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_INPUT </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv430nvPTXCompilerGetSupportedArchsPi">
+<span id="_CPPv330nvPTXCompilerGetSupportedArchsPi"></span><span id="_CPPv230nvPTXCompilerGetSupportedArchsPi"></span><span id="nvPTXCompilerGetSupportedArchs__iP"></span><span class="target" id="group__versioning_1ga0abce69c5235af0da34fb09171e46c2a"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetSupportedArchs</span></span></span><span class="sig-paren">(</span><span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">supportedArchs</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv430nvPTXCompilerGetSupportedArchsPi" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Populates the array passed via output paramater <code class="docutils literal notranslate"><span class="pre">supportedArchs</span></code> with architectures supported by PTX Compiler Library. </p>
+<p>The array is sorted in the ascending order. The size of the array to be passed can be determined using nvPTXCompilerGetNumSupportedArchs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<p><strong>supportedArchs</strong> – <strong>[out]</strong> Sorted array of supported architectures.</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_INPUT </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv433nvPTXCompilerGetSupportedVersionsPAL2E_i">
+<span id="_CPPv333nvPTXCompilerGetSupportedVersionsPAL2E_i"></span><span id="_CPPv233nvPTXCompilerGetSupportedVersionsPA2_i"></span><span class="target" id="group__versioning_1ga916f37c92d682ef18c552e9e767c465a"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetSupportedVersions</span></span></span><span class="sig-paren">(</span><span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">(</span></span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">versions</span></span><span class="p"><span class="pre">)</span></span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">2</span></span><span class="p"><span class="pre">]</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv433nvPTXCompilerGetSupportedVersionsPAL2E_i" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Populates the 2D Array passed via output paramater <code class="docutils literal notranslate"><span class="pre">versions</span></code> with PTX ISA Versions major, minor pair supported by PTX Compiler Library. </p>
+<p>The array is sorted in the ascending order. the row size of the 2D array can be determined using nvPTXCompilerGetNumSupportedVersions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<p><strong>versions</strong> – <strong>[out]</strong> Sorted 2D array with column size 2, having pair of major and minor PTX ISA version supported.</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_INPUT </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv423nvPTXCompilerGetVersionPjPj">
+<span id="_CPPv323nvPTXCompilerGetVersionPjPj"></span><span id="_CPPv223nvPTXCompilerGetVersionPjPj"></span><span id="nvPTXCompilerGetVersion__unsigned-iP.unsigned-iP"></span><span class="target" id="group__versioning_1gadb846da0f180ce336bf1f050ce5b3e6b"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetVersion</span></span></span><span class="sig-paren">(</span><span class="kt"><span class="pre">unsigned</span></span><span class="w"> </span><span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">major</span></span>, <span class="kt"><span class="pre">unsigned</span></span><span class="w"> </span><span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">minor</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv423nvPTXCompilerGetVersionPjPj" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Queries the current <code class="docutils literal notranslate"><span class="pre">major</span></code> and <code class="docutils literal notranslate"><span class="pre">minor</span></code> version of PTX Compiler APIs being used. </p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The version of PTX Compiler APIs follows the CUDA Toolkit versioning. The PTX ISA version supported by a PTX Compiler API version is listed <a class="reference external" href="https://docs.nvidia.com/cuda/parallel-thread-execution/#release-notes">here</a>.</p>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>major</strong> – <strong>[out]</strong> Major version of the PTX Compiler APIs </p></li>
+<li><p><strong>minor</strong> – <strong>[out]</strong> Minor version of the PTX Compiler APIs </p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+</section>
+</section>
+<section id="compilation-apis">
+<h2>
+<span class="section-number">4.4. </span>Compilation APIs<a class="headerlink" href="#compilation-apis" title="Permalink to this headline"></a>
+</h2>
+<p class="rubric-h2 rubric" id="group__compilation">Functions</p>
+<div class="dl-as-table docutils container">
+<dl class="simple">
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile</span></a>(nvPTXCompilerHandle compiler, int numCompileOptions, const char *const *compileOptions)</dt>
+<dd>
+<p>Compile a PTX program with the given compiler options.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1ga86b0c1159bfd34f0fdf632101f30ca26"><span class="std std-ref">nvPTXCompilerCreate</span></a>(nvPTXCompilerHandle *compiler, size_t ptxCodeLen, const char *ptxCode)</dt>
+<dd>
+<p>Obtains the handle to an instance of the PTX compiler initialized with the given PTX program <code class="docutils literal notranslate"><span class="pre">ptxCode</span></code> .</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1gabe1fd08fafc16166b553aa1f2ac132f4"><span class="std std-ref">nvPTXCompilerDestroy</span></a>(nvPTXCompilerHandle *compiler)</dt>
+<dd>
+<p>Destroys and cleans the already created PTX compiler.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1ga8f56c9115a219cb518d15ea8e21cd633"><span class="std std-ref">nvPTXCompilerGetCompiledProgram</span></a>(nvPTXCompilerHandle compiler, void *binaryImage)</dt>
+<dd>
+<p>Obtains the image of the compiled program.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1ga026bf92499c9c0e362b4b899b1550f6a"><span class="std std-ref">nvPTXCompilerGetCompiledProgramSize</span></a>(nvPTXCompilerHandle compiler, size_t *binaryImageSize)</dt>
+<dd>
+<p>Obtains the size of the image of the compiled program.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1gaaf88564e76bf5314a597296ba1397942"><span class="std std-ref">nvPTXCompilerGetErrorLog</span></a>(nvPTXCompilerHandle compiler, char *errorLog)</dt>
+<dd>
+<p>Query the error message that was seen previously for the handle.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1ga197d976f96d939b6da998bd10c8b591f"><span class="std std-ref">nvPTXCompilerGetErrorLogSize</span></a>(nvPTXCompilerHandle compiler, size_t *errorLogSize)</dt>
+<dd>
+<p>Query the size of the error message that was seen previously for the handle.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1gae35e6f03a99742a9c008c1a03b6dc35f"><span class="std std-ref">nvPTXCompilerGetInfoLog</span></a>(nvPTXCompilerHandle compiler, char *infoLog)</dt>
+<dd>
+<p>Query the information message that was seen previously for the handle.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1gabff992a534a0d8fde596bfbe8da08449"><span class="std std-ref">nvPTXCompilerGetInfoLogSize</span></a>(nvPTXCompilerHandle compiler, size_t *infoLogSize)</dt>
+<dd>
+<p>Query the size of the information message that was seen previously for the handle.</p>
+</dd>
+<dt>
+<span class="tag-as-table-cell">nvPTXCompileResult</span> <a class="reference internal" href="#group__compilation_1gae9e9942cf8b8363353cea54a9277e667"><span class="std std-ref">nvPTXCompilerSetFlowCallback</span></a>(nvPTXCompilerHandle compiler, int(*callback)(void *, void *), void *payload)</dt>
+<dd>
+<p>Register a callback function that the compiler will invoke at different phases of PTX Compilation during a call to <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> .</p>
+</dd>
+</dl>
+</div>
+<section id="id1">
+<h3>
+<span class="section-number">4.4.1. </span>Functions<a class="headerlink" href="#id1" title="Permalink to this headline"></a>
+</h3>
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv420nvPTXCompilerCompile19nvPTXCompilerHandleiPPCKc">
+<span id="_CPPv320nvPTXCompilerCompile19nvPTXCompilerHandleiPPCKc"></span><span id="_CPPv220nvPTXCompilerCompile19nvPTXCompilerHandleiPPCKc"></span><span id="nvPTXCompilerCompile__nvPTXCompilerHandle.i.cCPCP"></span><span class="target" id="group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerCompile</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="n sig-param"><span class="pre">numCompileOptions</span></span>, <span class="k"><span class="pre">const</span></span><span class="w"> </span><span class="kt"><span class="pre">char</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="k"><span class="pre">const</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">compileOptions</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv420nvPTXCompilerCompile19nvPTXCompilerHandleiPPCKc" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Compile a PTX program with the given compiler options. </p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>&amp;#8212;gpu-name (-arch) is a mandatory option.</p>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[inout]</strong> A handle to PTX compiler initialized with the PTX program which is to be compiled. The compiled program can be accessed using the handle </p></li>
+<li><p><strong>numCompileOptions</strong> – <strong>[in]</strong> Length of the array <code class="docutils literal notranslate"><span class="pre">compileOptions</span></code> </p></li>
+<li><p><strong>compileOptions</strong> – <strong>[in]</strong> Compiler options with which compilation should be done. The compiler options string is a null terminated character array. A valid list of compiler options is at <a class="reference external" href="http://docs.nvidia.com/cuda/ptx-compiler-api/index.html#compile-options">link</a>. </p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_OUT_OF_MEMORY </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_COMPILATION_FAILURE </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_UNSUPPORTED_PTX_VERSION </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_UNSUPPORTED_DEVSIDE_SYNC </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv419nvPTXCompilerCreateP19nvPTXCompilerHandle6size_tPKc">
+<span id="_CPPv319nvPTXCompilerCreateP19nvPTXCompilerHandle6size_tPKc"></span><span id="_CPPv219nvPTXCompilerCreateP19nvPTXCompilerHandle6size_tPKc"></span><span id="nvPTXCompilerCreate__nvPTXCompilerHandleP.s.cCP"></span><span class="target" id="group__compilation_1ga86b0c1159bfd34f0fdf632101f30ca26"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerCreate</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="n"><span class="pre">size_t</span></span><span class="w"> </span><span class="n sig-param"><span class="pre">ptxCodeLen</span></span>, <span class="k"><span class="pre">const</span></span><span class="w"> </span><span class="kt"><span class="pre">char</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">ptxCode</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv419nvPTXCompilerCreateP19nvPTXCompilerHandle6size_tPKc" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Obtains the handle to an instance of the PTX compiler initialized with the given PTX program <code class="docutils literal notranslate"><span class="pre">ptxCode</span></code>. </p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[out]</strong> Returns a handle to PTX compiler initialized with the PTX program <code class="docutils literal notranslate"><span class="pre">ptxCode</span></code> </p></li>
+<li><p><strong>ptxCodeLen</strong> – <strong>[in]</strong> Size of the PTX program <code class="docutils literal notranslate"><span class="pre">ptxCode</span></code> passed as string </p></li>
+<li><p><strong>ptxCode</strong> – <strong>[in]</strong> The PTX program which is to be compiled passed as string.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_OUT_OF_MEMORY </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv420nvPTXCompilerDestroyP19nvPTXCompilerHandle">
+<span id="_CPPv320nvPTXCompilerDestroyP19nvPTXCompilerHandle"></span><span id="_CPPv220nvPTXCompilerDestroyP19nvPTXCompilerHandle"></span><span id="nvPTXCompilerDestroy__nvPTXCompilerHandleP"></span><span class="target" id="group__compilation_1gabe1fd08fafc16166b553aa1f2ac132f4"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerDestroy</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">compiler</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv420nvPTXCompilerDestroyP19nvPTXCompilerHandle" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Destroys and cleans the already created PTX compiler. </p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<p><strong>compiler</strong> – <strong>[in]</strong> A handle to the PTX compiler which is to be destroyed</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_OUT_OF_MEMORY </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv431nvPTXCompilerGetCompiledProgram19nvPTXCompilerHandlePv">
+<span id="_CPPv331nvPTXCompilerGetCompiledProgram19nvPTXCompilerHandlePv"></span><span id="_CPPv231nvPTXCompilerGetCompiledProgram19nvPTXCompilerHandlePv"></span><span id="nvPTXCompilerGetCompiledProgram__nvPTXCompilerHandle.voidP"></span><span class="target" id="group__compilation_1ga8f56c9115a219cb518d15ea8e21cd633"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetCompiledProgram</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="kt"><span class="pre">void</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">binaryImage</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv431nvPTXCompilerGetCompiledProgram19nvPTXCompilerHandlePv" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Obtains the image of the compiled program. </p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> API should be invoked for the handle before calling this API. Otherwise, NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETE is returned. </p>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to PTX compiler on which <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> has been performed. </p></li>
+<li><p><strong>binaryImage</strong> – <strong>[out]</strong> The image of the compiled program. Client should allocate memory for <code class="docutils literal notranslate"><span class="pre">binaryImage</span></code> </p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETE </span></a></p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv435nvPTXCompilerGetCompiledProgramSize19nvPTXCompilerHandleP6size_t">
+<span id="_CPPv335nvPTXCompilerGetCompiledProgramSize19nvPTXCompilerHandleP6size_t"></span><span id="_CPPv235nvPTXCompilerGetCompiledProgramSize19nvPTXCompilerHandleP6size_t"></span><span id="nvPTXCompilerGetCompiledProgramSize__nvPTXCompilerHandle.sP"></span><span class="target" id="group__compilation_1ga026bf92499c9c0e362b4b899b1550f6a"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetCompiledProgramSize</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="n"><span class="pre">size_t</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">binaryImageSize</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv435nvPTXCompilerGetCompiledProgramSize19nvPTXCompilerHandleP6size_t" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Obtains the size of the image of the compiled program. </p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> API should be invoked for the handle before calling this API. Otherwise, NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETE is returned. </p>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to PTX compiler on which <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> has been performed. </p></li>
+<li><p><strong>binaryImageSize</strong> – <strong>[out]</strong> The size of the image of the compiled program</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_COMPILER_INVOCATION_INCOMPLETE </span></a></p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv424nvPTXCompilerGetErrorLog19nvPTXCompilerHandlePc">
+<span id="_CPPv324nvPTXCompilerGetErrorLog19nvPTXCompilerHandlePc"></span><span id="_CPPv224nvPTXCompilerGetErrorLog19nvPTXCompilerHandlePc"></span><span id="nvPTXCompilerGetErrorLog__nvPTXCompilerHandle.cP"></span><span class="target" id="group__compilation_1gaaf88564e76bf5314a597296ba1397942"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetErrorLog</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="kt"><span class="pre">char</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">errorLog</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv424nvPTXCompilerGetErrorLog19nvPTXCompilerHandlePc" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Query the error message that was seen previously for the handle. </p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to PTX compiler on which <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> has been performed. </p></li>
+<li><p><strong>errorLog</strong> – <strong>[out]</strong> The error log which was produced in previous call to nvPTXCompilerCompiler(). Clients should allocate memory for <code class="docutils literal notranslate"><span class="pre">errorLog</span></code> </p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv428nvPTXCompilerGetErrorLogSize19nvPTXCompilerHandleP6size_t">
+<span id="_CPPv328nvPTXCompilerGetErrorLogSize19nvPTXCompilerHandleP6size_t"></span><span id="_CPPv228nvPTXCompilerGetErrorLogSize19nvPTXCompilerHandleP6size_t"></span><span id="nvPTXCompilerGetErrorLogSize__nvPTXCompilerHandle.sP"></span><span class="target" id="group__compilation_1ga197d976f96d939b6da998bd10c8b591f"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetErrorLogSize</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="n"><span class="pre">size_t</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">errorLogSize</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv428nvPTXCompilerGetErrorLogSize19nvPTXCompilerHandleP6size_t" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Query the size of the error message that was seen previously for the handle. </p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to PTX compiler on which <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> has been performed. </p></li>
+<li><p><strong>errorLogSize</strong> – <strong>[out]</strong> The size of the error log in bytes which was produced in previous call to nvPTXCompilerCompiler().</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv423nvPTXCompilerGetInfoLog19nvPTXCompilerHandlePc">
+<span id="_CPPv323nvPTXCompilerGetInfoLog19nvPTXCompilerHandlePc"></span><span id="_CPPv223nvPTXCompilerGetInfoLog19nvPTXCompilerHandlePc"></span><span id="nvPTXCompilerGetInfoLog__nvPTXCompilerHandle.cP"></span><span class="target" id="group__compilation_1gae35e6f03a99742a9c008c1a03b6dc35f"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetInfoLog</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="kt"><span class="pre">char</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">infoLog</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv423nvPTXCompilerGetInfoLog19nvPTXCompilerHandlePc" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Query the information message that was seen previously for the handle. </p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to PTX compiler on which <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> has been performed. </p></li>
+<li><p><strong>infoLog</strong> – <strong>[out]</strong> The information log which was produced in previous call to nvPTXCompilerCompiler(). Clients should allocate memory for <code class="docutils literal notranslate"><span class="pre">infoLog</span></code> </p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv427nvPTXCompilerGetInfoLogSize19nvPTXCompilerHandleP6size_t">
+<span id="_CPPv327nvPTXCompilerGetInfoLogSize19nvPTXCompilerHandleP6size_t"></span><span id="_CPPv227nvPTXCompilerGetInfoLogSize19nvPTXCompilerHandleP6size_t"></span><span id="nvPTXCompilerGetInfoLogSize__nvPTXCompilerHandle.sP"></span><span class="target" id="group__compilation_1gabff992a534a0d8fde596bfbe8da08449"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerGetInfoLogSize</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="n"><span class="pre">size_t</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">infoLogSize</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv427nvPTXCompilerGetInfoLogSize19nvPTXCompilerHandleP6size_t" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Query the size of the information message that was seen previously for the handle. </p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to PTX compiler on which <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a> has been performed. </p></li>
+<li><p><strong>infoLogSize</strong> – <strong>[out]</strong> The size of the information log in bytes which was produced in previous call to nvPTXCompilerCompiler().</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INTERNAL </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+<dl class="cpp function">
+<dt class="sig sig-object cpp" id="_CPPv428nvPTXCompilerSetFlowCallback19nvPTXCompilerHandlePFiPvPvEPv">
+<span id="_CPPv328nvPTXCompilerSetFlowCallback19nvPTXCompilerHandlePFiPvPvEPv"></span><span id="_CPPv228nvPTXCompilerSetFlowCallback19nvPTXCompilerHandlePFiPvPvEPv"></span><span class="target" id="group__compilation_1gae9e9942cf8b8363353cea54a9277e667"></span><a class="reference internal" href="#_CPPv418nvPTXCompileResult" title="nvPTXCompileResult"><span class="n"><span class="pre">nvPTXCompileResult</span></span></a><span class="w"> </span><span class="sig-name descname"><span class="n"><span class="pre">nvPTXCompilerSetFlowCallback</span></span></span><span class="sig-paren">(</span><a class="reference internal" href="#_CPPv419nvPTXCompilerHandle" title="nvPTXCompilerHandle"><span class="n"><span class="pre">nvPTXCompilerHandle</span></span></a><span class="w"> </span><span class="n sig-param"><span class="pre">compiler</span></span>, <span class="kt"><span class="pre">int</span></span><span class="w"> </span><span class="p"><span class="pre">(</span></span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">callback</span></span><span class="p"><span class="pre">)</span></span><span class="p"><span class="pre">(</span></span><span class="kt"><span class="pre">void</span></span><span class="p"><span class="pre">*</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="kt"><span class="pre">void</span></span><span class="p"><span class="pre">*</span></span><span class="p"><span class="pre">)</span></span>, <span class="kt"><span class="pre">void</span></span><span class="w"> </span><span class="p"><span class="pre">*</span></span><span class="n sig-param"><span class="pre">payload</span></span><span class="sig-paren">)</span><a class="headerlink" href="#_CPPv428nvPTXCompilerSetFlowCallback19nvPTXCompilerHandlePFiPvPvEPv" title="Permalink to this definition"></a><br>
+</dt>
+<dd>
+<p>Register a callback function that the compiler will invoke at different phases of PTX Compilation during a call to <a class="reference internal" href="#group__compilation_1ga3d08161ba6e6a5fb40814900ce0f2e38"><span class="std std-ref">nvPTXCompilerCompile()</span></a>. </p>
+<p>The callback function decides to cancel the compilation by returning specific values.</p>
+<p>Callback function must satisfy the following constraints</p>
+<p>(1) Its signature should be </p>
+<div class="highlight-c++ notranslate">
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">callback</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">param1</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">param2</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+</div>
+ When invoking the callback, the compiler will always pass <code class="docutils literal notranslate"><span class="pre">payload</span></code> to param1 so that the callback may make decisions based on <code class="docutils literal notranslate"><span class="pre">payload</span></code> . It’ll always pass NULL to param2 for now which is reserved for future extensions.
+<p>(2) It must return 1 to cancel compilation or 0 to continue. Other return values are reserved for future use.</p>
+<p>(3) It must return consistent values. Once it returns 1 at one point, it must return 1 in all following invocations during the current nvPTXCompilerCompile call in progress.</p>
+<p>(4) It must be thread-safe.</p>
+<p>(5) It must not invoke any nvrtc/libnvvm/ptx APIs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd">
+<ul class="simple">
+<li><p><strong>compiler</strong> – <strong>[in]</strong> A handle to an initialized PTX compiler in which to introduce the callback. </p></li>
+<li><p><strong>callback</strong> – <strong>[in]</strong> Function pointer to the callback function. </p></li>
+<li><p><strong>payload</strong> – <strong>[in]</strong> payload to be passed as a parameter when invoking the callback. </p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even">
+<p></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_SUCCESS </span></a> <a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_INPUT </span></a></p></li>
+<li><p><a class="reference internal" href="#group__error_1ga402c9248a2b7f74f2d56fa8c292f4e01"><span class="std std-ref">NVPTXCOMPILE_ERROR_INVALID_COMPILER_HANDLE </span></a> </p></li>
+</ul>
+
+</dd>
+</dl>
+</dd>
+</dl>
+
+</section>
+</section>
+</section>
+<section id="compilation-options">
+<h1>
+<span class="section-number">5. </span>Compilation Options<a class="headerlink" href="#compilation-options" title="Permalink to this headline"></a>
+</h1>
+<p>This chapter describes options supported by <code class="docutils literal notranslate"><span class="pre">nvPTXCompilerCompile()</span></code> API.</p>
+<p>Option names with two preceding dashes (<code class="docutils literal notranslate"><span class="pre">--</span></code>) are long option names and option names with one
+preceding dash (<code class="docutils literal notranslate"><span class="pre">-</span></code>) are short option names. Short option names can be used instead of long option
+names. When a compile option takes an argument, an assignment operator (<code class="docutils literal notranslate"><span class="pre">=</span></code>) is used to separate
+the compile option argument from the compile option name, e.g., <code class="docutils literal notranslate"><span class="pre">"--gpu-name=sm_80"</span></code>.
+Alternatively, the compile option name and the argument can be specified in
+separate strings without an assignment operator, .e.g, <code class="docutils literal notranslate"><span class="pre">"--gpu-name"</span></code><code class="docutils literal notranslate"><span class="pre">"sm_80"</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--allow-expensive-optimizations</span></code> (<code class="docutils literal notranslate"><span class="pre">-allow-expensive-optimizations</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Enable (disable) to allow compiler to perform expensive optimizations using maximum available
+resources (memory and compile-time).</em></p>
+<p>If unspecified, default behavior is to enable this feature for optimization level &gt;= <code class="docutils literal notranslate"><span class="pre">O2</span></code>.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--compile-as-tools-patch</span></code> (<code class="docutils literal notranslate"><span class="pre">-astoolspatch</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Compile patch code for CUDA tools.</em></p>
+<p>Shall not be used in conjunction with <code class="docutils literal notranslate"><span class="pre">-c</span></code> or <code class="docutils literal notranslate"><span class="pre">-ewp</span></code>.</p>
+<p>Some PTX ISA features may not be usable in this compilation mode.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--compile-only</span></code> (<code class="docutils literal notranslate"><span class="pre">-c</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate relocatable object.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--def-load-cache</span></code> (<code class="docutils literal notranslate"><span class="pre">-dlcm</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Default cache modifier on global/generic load.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--def-store-cache</span></code> (<code class="docutils literal notranslate"><span class="pre">-dscm</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Default cache modifier on global/generic store.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--device-debug</span></code> (<code class="docutils literal notranslate"><span class="pre">-g</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate debug information for device code.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--device-function-maxrregcount</span> <span class="pre">N</span></code> (<code class="docutils literal notranslate"><span class="pre">-func-maxrregcount</span></code>)</p>
+<blockquote>
+<div>
+<p><em>When compiling with -c option, specify the maximum number of registers that device functions can use.</em></p>
+<p>This option is ignored for whole-program compilation and does not affect registers used by entry
+functions. For device functions, this option overrides the value specified by <code class="docutils literal notranslate"><span class="pre">--maxrregcount</span></code>
+option. If neither <code class="docutils literal notranslate"><span class="pre">--device-function-maxrregcount</span></code> nor <code class="docutils literal notranslate"><span class="pre">--maxrregcount</span></code> is specified, then no
+maximum is assumed.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Under certain situations, <code class="docutils literal notranslate"><span class="pre">static</span></code> device functions can safely inherit a higher register count
+from the caller entry function. In such cases, ptx compiler may apply the higher count for
+compiling the static function.</p>
+</div>
+<p>Value less than the minimum registers required by ABI will be bumped up by the compiler to ABI
+minimum limit.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--disable-optimizer-constants</span></code> (<code class="docutils literal notranslate"><span class="pre">-disable-optimizer-consts</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Disable use of optimizer constant bank.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--disable-warnings</span></code> (<code class="docutils literal notranslate"><span class="pre">-w</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Inhibit all warning messages.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--dont-merge-basicblocks</span></code> (<code class="docutils literal notranslate"><span class="pre">-no-bb-merge</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Prevents basic block merging, at a slight perfomance cost.</em></p>
+<p>Normally ptx compiler attempts to merge consecutive basic blocks as part of its optimization
+process. However, for debuggable code this is very confusing. This option prevents merging
+consecutive basic blocks.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--entry</span> <span class="pre">entry,...</span></code> (<code class="docutils literal notranslate"><span class="pre">-e</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify the entry functions for which code must be generated.</em></p>
+<p>Entry function names for this option must be specified in the mangled name.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--extensible-whole-program</span></code> (<code class="docutils literal notranslate"><span class="pre">-ewp</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate extensible whole program device code, which allows some calls to not be resolved until
+linking with libcudadevrt.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--fmad</span></code> (<code class="docutils literal notranslate"><span class="pre">-fmad</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Enables (disables) the contraction of floating-point multiplies and adds/subtracts into
+floating-point multiply-add operations (FMAD, FFMA, or DFMA)</em></p>
+<p>Default value: <code class="docutils literal notranslate"><span class="pre">true</span></code></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--force-load-cache</span></code> (<code class="docutils literal notranslate"><span class="pre">-flcm</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Force specified cache modifier on global/generic load.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--force-store-cache</span></code> (<code class="docutils literal notranslate"><span class="pre">-fscm</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Force specified cache modifier on global/generic store.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--generate-line-info</span></code> (<code class="docutils literal notranslate"><span class="pre">-lineinfo</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate line-number information for device code.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--gpu-name</span> <span class="pre">gpuname</span></code> (<code class="docutils literal notranslate"><span class="pre">-arch</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify name of NVIDIA GPU to generate code for.</em></p>
+<p>This option also takes virtual compute architectures, in which case code generation is
+suppressed. This can be used for parsing only.</p>
+<p>PTX for .target sm_XY can be compiled to all GPU targets sm_MN, sm_MNa, sm_MNf where MN &gt;= XY.
+PTX for .target sm_XYf can be compiled to GPU targets sm_XZ, sm_XZf, sm_XZa where Z &gt;= Y and
+sm_XY and sm_XZ belong in same family. PTX with .target sm_XYa can only be compiled to GPU
+target sm_XYa.</p>
+<p><strong>Allowed Values</strong></p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 25%">
+</colgroup>
+<tbody>
+<tr class="row-odd">
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_75</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_80</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_86</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_87</span></code></p></td>
+</tr>
+<tr class="row-even">
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_88</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_89</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_90</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_90a</span></code></p></td>
+</tr>
+<tr class="row-odd">
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_100</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_100f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_100a</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_103</span></code></p></td>
+</tr>
+<tr class="row-even">
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_103f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_103a</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_110</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_110f</span></code></p></td>
+</tr>
+<tr class="row-odd">
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_110a</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_120</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_120f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_120a</span></code></p></td>
+</tr>
+<tr class="row-even">
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_121</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_121f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compute_121a</span></code></p></td>
+<td></td>
+</tr>
+<tr class="row-odd">
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_75</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_80</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_86</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_87</span></code></p></td>
+</tr>
+<tr class="row-even">
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_88</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_89</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_90</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_90a</span></code></p></td>
+</tr>
+<tr class="row-odd">
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_100</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_100f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_100a</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_103</span></code></p></td>
+</tr>
+<tr class="row-even">
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_103f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_103a</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_110</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_110f</span></code></p></td>
+</tr>
+<tr class="row-odd">
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_110a</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_120</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_120f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_120a</span></code></p></td>
+</tr>
+<tr class="row-even">
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_121</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_121f</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">sm_121a</span></code></p></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Default value: <code class="docutils literal notranslate"><span class="pre">sm_75</span></code></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--maxrregcount</span> <span class="pre">N</span></code> (<code class="docutils literal notranslate"><span class="pre">-maxrregcount</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify the maximum amount of registers that GPU functions can use.</em></p>
+<p>Until a function-specific limit, a higher value will generally increase the performance of
+individual GPU threads that execute this function. However, because thread registers are allocated
+from a global register pool on each GPU, a higher value of this option will also reduce the
+maximum thread block size, thereby reducing the amount of thread parallelism. Hence, a good
+maxrregcount value is the result of a trade-off.</p>
+<p>If this option is not specified, then no maximum is assumed. Value less than the minimum registers
+required by ABI will be bumped up by the compiler to ABI minimum limit. User program may not be
+able to make use of all registers as some registers are reserved by compiler.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--opt-level</span> <span class="pre">N</span></code> (<code class="docutils literal notranslate"><span class="pre">-O</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify optimization level.</em></p>
+<p>Default value: <code class="docutils literal notranslate"><span class="pre">3</span></code>.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--position-independent-code</span></code> (<code class="docutils literal notranslate"><span class="pre">-pic</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate position-independent code.</em></p>
+<p>Default value:</p>
+<p>For whole-program compilation: <code class="docutils literal notranslate"><span class="pre">true</span></code>.</p>
+<p>Otherwise: <code class="docutils literal notranslate"><span class="pre">false</span></code>.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--preserve-relocs</span></code> (<code class="docutils literal notranslate"><span class="pre">-preserve-relocs</span></code>)</p>
+<blockquote>
+<div>
+<p><em>This option will make ptx compiler to generate relocatable references for variables and preserve
+relocations generated for them in linked executable.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--return-at-end</span></code> (<code class="docutils literal notranslate"><span class="pre">-ret-end</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Prevents optimizing return instruction at end of program</em></p>
+<p>Normally ptx compiler optimizes return at the end of program. However, for debuggable code this
+causes problems setting breakpoint at the end. This option prevents ptxas from optimizing this
+last return instruction.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--sanitize</span></code> (<code class="docutils literal notranslate"><span class="pre">-sanitize</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate instrumented code with specified compute-sanitizer tool.</em></p>
+<p>Currently, only the value <code class="docutils literal notranslate"><span class="pre">memcheck</span></code> (memory check) is supported. Binary needs to be
+executed using <code class="docutils literal notranslate"><span class="pre">compute-sanitizer</span></code> at runtime, otherwise behavior is undefined.
+For more informations about compile time instrumentation and the compute sanitizer,
+consult the <a class="reference external" href="https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer#compile-time-patching">corresponding documentation</a>.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--suppress-async-bulk-multicast-advisory-warning</span></code> (<code class="docutils literal notranslate"><span class="pre">-suppress-async-bulk-multicast-advisory-warning</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Suppress the warning on use of .multicast::cluster modifier on cp.async.bulk{.tensor} instruction with sm_90.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--suppress-stack-size-warning</span></code> (<code class="docutils literal notranslate"><span class="pre">-suppress-stack-size-warning</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Suppress the warning that otherwise is printed when stack size cannot be determined.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--verbose</span></code> (<code class="docutils literal notranslate"><span class="pre">-v</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Enable verbose mode which prints code generation statistics.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--warn-on-double-precision-use</span></code> (<code class="docutils literal notranslate"><span class="pre">-warn-double-usage</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Warning if double(s) are used in an instruction.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--warn-on-local-memory-usage</span></code> (<code class="docutils literal notranslate"><span class="pre">-warn-lmem-usage</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Warning if local memory is used.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--warn-on-spills</span></code> (<code class="docutils literal notranslate"><span class="pre">-warn-spills</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Warning if registers are spilled to local memory.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--warning-as-error</span></code> (<code class="docutils literal notranslate"><span class="pre">-Werror</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Make all warnings into errors.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--maxntid</span></code> (<code class="docutils literal notranslate"><span class="pre">-maxntid</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify the maximum number of threads that a thread block can have.</em></p>
+<p>This option will be ignored if used along with <code class="docutils literal notranslate"><span class="pre">-maxrregcount</span></code> option. This option is also ignored
+for entry functions that have <code class="docutils literal notranslate"><span class="pre">.maxntid</span></code> directive specified.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--minnctapersm</span></code> (<code class="docutils literal notranslate"><span class="pre">-minnctapersm</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify the minimum number of CTAs to be mapped to an SM.</em></p>
+<p>This option will be ignored if used along with <code class="docutils literal notranslate"><span class="pre">-maxrregcount</span></code> option. This option is also ignored
+for entry functions that have <code class="docutils literal notranslate"><span class="pre">.minnctapersm</span></code> directive specified.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--override-directive-values</span></code> (<code class="docutils literal notranslate"><span class="pre">-override-directive-values</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Override the PTX directives values by the corresponding option values.</em></p>
+<p>This option is effective only for <code class="docutils literal notranslate"><span class="pre">-minnctapersm</span></code>, <code class="docutils literal notranslate"><span class="pre">-maxntid</span></code> and <code class="docutils literal notranslate"><span class="pre">-maxregcount</span></code> options.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--make-errors-visible-at-exit</span></code> (<code class="docutils literal notranslate"><span class="pre">-make-errors-visible-at-exit</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Generate required instructions at exit point to make memory faults and errors visible at exit.</em></p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--oFast-compile</span></code> (<code class="docutils literal notranslate"><span class="pre">-Ofc</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify level to prefer device code compilation speed.</em></p>
+<p>Default value: <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--device-stack-protector</span></code> (<code class="docutils literal notranslate"><span class="pre">-device-stack-protector</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Enable or disable the generation of stack canaries in device code.</em></p>
+<p>Stack canaries make it more difficult to exploit certain types of memory safety bugs involving
+stack-local variables. The compiler uses heuristics to assess the risk of such a bug in each function.
+Only those functions which are deemed high-risk make use of a stack canary.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--g-tensor-memory-access-check</span></code> (<code class="docutils literal notranslate"><span class="pre">-g-tmem-access-check</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Enable tensor memory access checks for tcgen05 operations.</em></p>
+<p>This option is enabled by default with <code class="docutils literal notranslate"><span class="pre">--device-debug</span></code> (<code class="docutils literal notranslate"><span class="pre">-g</span></code>) option.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--gno-tensor-memory-access-check</span></code> (<code class="docutils literal notranslate"><span class="pre">-gno-tmem-access-check</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Disable tensor memory access checks for tcgen05 operations.</em></p>
+<p>This option will override the <code class="docutils literal notranslate"><span class="pre">--g-tensor-memory-access-check</span></code> option if both are specified.</p>
+</div>
+</blockquote>
+<p><code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> (<code class="docutils literal notranslate"><span class="pre">-split-compile</span></code>)</p>
+<blockquote>
+<div>
+<p><em>Specify the maximum amount of concurrent threads to be utilized when running compiler optimizations.</em></p>
+<p>If value specified is <code class="docutils literal notranslate"><span class="pre">1</span></code>, option will be ignored.
+If value specified is <code class="docutils literal notranslate"><span class="pre">0</span></code>, then the number of threads will be the number of CPUs on
+the underlying machine.</p>
+</div>
+</blockquote>
+</section>
+<section id="basic-usage">
+<h1>
+<span class="section-number">6. </span>Basic Usage<a class="headerlink" href="#basic-usage" title="Permalink to this headline"></a>
+</h1>
+<p>This section of the document uses a simple example, <em>Vector Addition</em>, shown in <a class="reference external" href="#ptx-source-string-for-simple-vector-addition">Figure 1</a> to explain how to use PTX Compiler
+APIs to compile this PTX program. For brevity and readability, error checks on the API return values
+are not shown.</p>
+<p id="ptx-source-string-for-simple-vector-addition"><em>Figure 1. PTX source string for a simple vector addition</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>const char *ptxCode = "                                    \n \
+   .version 7.0                                            \n \
+   .target sm_50                                           \n \
+   .address_size 64                                        \n \
+   .visible .entry simpleVectorAdd(                        \n \
+        .param .u64 simpleVectorAdd_param_0,               \n \
+        .param .u64 simpleVectorAdd_param_1,               \n \
+        .param .u64 simpleVectorAdd_param_2                \n \
+   ) {                                                     \n \
+        .reg .f32   %f&lt;4&gt;;                                 \n \
+        .reg .b32   %r&lt;5&gt;;                                 \n \
+        .reg .b64   %rd&lt;11&gt;;                               \n \
+        ld.param.u64    %rd1, [simpleVectorAdd_param_0];   \n \
+        ld.param.u64    %rd2, [simpleVectorAdd_param_1];   \n \
+        ld.param.u64    %rd3, [simpleVectorAdd_param_2];   \n \
+        cvta.to.global.u64      %rd4, %rd3;                \n \
+        cvta.to.global.u64      %rd5, %rd2;                \n \
+        cvta.to.global.u64      %rd6, %rd1;                \n \
+        mov.u32         %r1, %ctaid.x;                     \n \
+        mov.u32         %r2, %ntid.x;                      \n \
+        mov.u32         %r3, %tid.x;                       \n \
+        mad.lo.s32      %r4, %r2, %r1, %r3;                \n \
+        mul.wide.u32    %rd7, %r4, 4;                      \n \
+        add.s64         %rd8, %rd6, %rd7;                  \n \
+        ld.global.f32   %f1, [%rd8];                       \n \
+        add.s64         %rd9, %rd5, %rd7;                  \n \
+        ld.global.f32   %f2, [%rd9];                       \n \
+        add.f32         %f3, %f1, %f2;                     \n \
+        add.s64         %rd10, %rd4, %rd7;                 \n \
+        st.global.f32   [%rd10], %f3;                      \n \
+        ret;                                               \n \
+   } ";
+</pre></div>
+</div>
+<p>The CUDA code corresponding to this PTX program would look like:</p>
+<p><em>Figure 2. Equivalent CUDA source for the simple vector addition</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>extern "C"
+ __global__ void simpleVectorAdd(float *x, float *y, float *out)
+ {
+     size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+     out[tid] = x[tid] + y[tid];
+ }
+</pre></div>
+</div>
+<p>With this PTX program as a string, we can create the compiler and obtain a handle to it as shown in
+<a class="reference external" href="#compiler-creation-and-initialization-of-a-program">Figure 3</a>.</p>
+<p id="compiler-creation-and-initialization-of-a-program"><em>Figure 3. Compiler creation and initialization of a program</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>nvPTXCompilerHandle compiler;
+nvPTXCompilerCreate(&amp;compiler, (size_t)strlen(ptxCode), ptxCode);
+</pre></div>
+</div>
+<p>Compilation can now be done by specifying the compile options as shown in <a class="reference external" href="#compilation-of-ptx-program">Figure 4</a>.</p>
+<p id="compilation-of-ptx-program"><em>Figure 4. Compilation of the PTX program</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>const char* compile_options[] = { "--gpu-name=sm_80",
+                                  "--verbose"
+                                };
+
+nvPTXCompilerCompile(compiler, 2, compile_options);
+</pre></div>
+</div>
+<p>The compiled GPU assembly code can now be obtained. To obtain this we first allocate memory for
+it. And to allocate memory, we need to query the size of the image of the compiled GPU assembly code
+which is done as shown in <a class="reference external" href="#query-size-of-compiled-assembly-image">Figure 5</a>.</p>
+<p id="query-size-of-compiled-assembly-image"><em>Figure 5. Query size of the compiled assembly image</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>nvPTXCompilerGetCompiledProgramSize(compiler, &amp;elfSize);
+</pre></div>
+</div>
+<p>The image of the compiled GPU assembly code can now be queried as shown in <a class="reference external" href="#query-the-compiled-assembly-image">Figure 6</a>. This image can then be executed on the GPU by passing this
+image to the CUDA Driver APIs.</p>
+<p id="query-the-compiled-assembly-image"><em>Figure 6. Query the compiled assembly image</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>elf = (char*) malloc(elfSize);
+nvPTXCompilerGetCompiledProgram(compiler, (void*)elf);
+</pre></div>
+</div>
+<p>When the compiler is not needed anymore, it can be destroyed as shown in <a class="reference external" href="#destroy-the-compiler">Figure 7</a>.</p>
+<p id="destroy-the-compiler"><em>Figure 7. Destroy the compiler</em></p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>nvPTXCompilerDestroy(&amp;compiler);
+</pre></div>
+</div>
+</section>
+<section id="example-simple-vector-addition">
+<h1>
+<span class="section-number">7. </span>Example: Simple Vector Addition<a class="headerlink" href="#example-simple-vector-addition" title="Permalink to this headline"></a>
+</h1>
+<p>Code (simpleVectorAddition.c)</p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include "cuda.h"
+#include "nvPTXCompiler.h"
+
+#define NUM_THREADS 128
+#define NUM_BLOCKS 32
+#define SIZE NUM_THREADS * NUM_BLOCKS
+
+#define CUDA_SAFE_CALL(x)                                               \
+    do {                                                                \
+        CUresult result = x;                                            \
+        if (result != CUDA_SUCCESS) {                                   \
+            const char *msg;                                            \
+            cuGetErrorName(result, &amp;msg);                               \
+            printf("error: %s failed with error %s\n", #x, msg);        \
+            exit(1);                                                    \
+        }                                                               \
+    } while(0)
+
+#define NVPTXCOMPILER_SAFE_CALL(x)                                       \
+    do {                                                                 \
+        nvPTXCompileResult result = x;                                   \
+        if (result != NVPTXCOMPILE_SUCCESS) {                            \
+            printf("error: %s failed with error code %d\n", #x, result); \
+            exit(1);                                                     \
+        }                                                                \
+    } while(0)
+
+
+const char *ptxCode = "                                      \
+   .version 7.0                                           \n \
+   .target sm_50                                          \n \
+   .address_size 64                                       \n \
+   .visible .entry simpleVectorAdd(                       \n \
+        .param .u64 simpleVectorAdd_param_0,              \n \
+        .param .u64 simpleVectorAdd_param_1,              \n \
+        .param .u64 simpleVectorAdd_param_2               \n \
+   ) {                                                    \n \
+        .reg .f32   %f&lt;4&gt;;                                \n \
+        .reg .b32   %r&lt;5&gt;;                                \n \
+        .reg .b64   %rd&lt;11&gt;;                              \n \
+        ld.param.u64    %rd1, [simpleVectorAdd_param_0];  \n \
+        ld.param.u64    %rd2, [simpleVectorAdd_param_1];  \n \
+        ld.param.u64    %rd3, [simpleVectorAdd_param_2];  \n \
+        cvta.to.global.u64      %rd4, %rd3;               \n \
+        cvta.to.global.u64      %rd5, %rd2;               \n \
+        cvta.to.global.u64      %rd6, %rd1;               \n \
+        mov.u32         %r1, %ctaid.x;                    \n \
+        mov.u32         %r2, %ntid.x;                     \n \
+        mov.u32         %r3, %tid.x;                      \n \
+        mad.lo.s32      %r4, %r2, %r1, %r3;               \n \
+        mul.wide.u32    %rd7, %r4, 4;                     \n \
+        add.s64         %rd8, %rd6, %rd7;                 \n \
+        ld.global.f32   %f1, [%rd8];                      \n \
+        add.s64         %rd9, %rd5, %rd7;                 \n \
+        ld.global.f32   %f2, [%rd9];                      \n \
+        add.f32         %f3, %f1, %f2;                    \n \
+        add.s64         %rd10, %rd4, %rd7;                \n \
+        st.global.f32   [%rd10], %f3;                     \n \
+        ret;                                              \n \
+   } ";
+</pre></div>
+</div>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>int elfLoadAndKernelLaunch(void* elf, size_t elfSize)
+{
+    CUdevice cuDevice;
+    CUcontext context;
+    CUmodule module;
+    CUfunction kernel;
+    CUdeviceptr dX, dY, dOut;
+    size_t i;
+    size_t bufferSize = SIZE * sizeof(float);
+    float a;
+    float hX[SIZE], hY[SIZE], hOut[SIZE];
+    void* args[3];
+
+    CUDA_SAFE_CALL(cuInit(0));
+    CUDA_SAFE_CALL(cuDeviceGet(&amp;cuDevice, 0));
+
+    CUDA_SAFE_CALL(cuCtxCreate(&amp;context, NULL, 0, cuDevice));
+    CUDA_SAFE_CALL(cuModuleLoadDataEx(&amp;module, elf, 0, 0, 0));
+    CUDA_SAFE_CALL(cuModuleGetFunction(&amp;kernel, module, "simpleVectorAdd"));
+
+    // Generate input for execution, and create output buffers.
+    for (i = 0; i &lt; SIZE; ++i) {
+        hX[i] = (float)i;
+        hY[i] = (float)i * 2;
+    }
+    CUDA_SAFE_CALL(cuMemAlloc(&amp;dX,   bufferSize));
+    CUDA_SAFE_CALL(cuMemAlloc(&amp;dY,   bufferSize));
+    CUDA_SAFE_CALL(cuMemAlloc(&amp;dOut, bufferSize));
+
+    CUDA_SAFE_CALL(cuMemcpyHtoD(dX, hX, bufferSize));
+    CUDA_SAFE_CALL(cuMemcpyHtoD(dY, hY, bufferSize));
+
+    args[0] = &amp;dX;
+    args[1] = &amp;dY;
+    args[2] = &amp;dOut;
+
+    CUDA_SAFE_CALL( cuLaunchKernel(kernel,
+                                   NUM_BLOCKS,  1, 1, // grid dim
+                                   NUM_THREADS, 1, 1, // block dim
+                                   0, NULL, // shared mem and stream
+                                   args, 0)); // arguments
+    CUDA_SAFE_CALL(cuCtxSynchronize()); // Retrieve and print output.
+
+    CUDA_SAFE_CALL(cuMemcpyDtoH(hOut, dOut, bufferSize));
+    for (i = 0; i &lt; SIZE; ++i) {
+        printf("Result:[%ld]:%f\n", i, hOut[i]);
+    }
+
+    // Release resources.
+    CUDA_SAFE_CALL(cuMemFree(dX));
+    CUDA_SAFE_CALL(cuMemFree(dY));
+    CUDA_SAFE_CALL(cuMemFree(dOut));
+    CUDA_SAFE_CALL(cuModuleUnload(module));
+    CUDA_SAFE_CALL(cuCtxDestroy(context));
+    return 0;
+}
+</pre></div>
+</div>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>int main(int _argc, char *_argv[])
+{
+    nvPTXCompilerHandle compiler = NULL;
+    nvPTXCompileResult status;
+
+    size_t elfSize, infoSize, errorSize;
+    char *elf, *infoLog, *errorLog;
+    unsigned int minorVer, majorVer;
+
+    const char* compile_options[] = { "--gpu-name=sm_80",
+                                      "--verbose"
+                                    };
+
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetVersion(&amp;majorVer, &amp;minorVer));
+    printf("Current PTX Compiler API Version : %d.%d\n", majorVer, minorVer);
+
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerCreate(&amp;compiler,
+                                                (size_t)strlen(ptxCode),  /* ptxCodeLen */
+                                                ptxCode)                  /* ptxCode */
+                            );
+
+    status = nvPTXCompilerCompile(compiler,
+                                  2,                 /* numCompileOptions */
+                                  compile_options);  /* compileOptions */
+
+    if (status != NVPTXCOMPILE_SUCCESS) {
+        NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetErrorLogSize(compiler, &amp;errorSize));
+
+        if (errorSize != 0) {
+            errorLog = (char*)malloc(errorSize+1);
+            NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetErrorLog(compiler, errorLog));
+            printf("Error log: %s\n", errorLog);
+            free(errorLog);
+        }
+        exit(1);
+    }
+
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetCompiledProgramSize(compiler, &amp;elfSize));
+
+    elf = (char*) malloc(elfSize);
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetCompiledProgram(compiler, (void*)elf));
+
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetInfoLogSize(compiler, &amp;infoSize));
+
+    if (infoSize != 0) {
+        infoLog = (char*)malloc(infoSize+1);
+        NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetInfoLog(compiler, infoLog));
+        printf("Info log: %s\n", infoLog);
+        free(infoLog);
+    }
+
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerDestroy(&amp;compiler));
+
+    // Load the compiled GPU assembly code 'elf'
+    elfLoadAndKernelLaunch(elf, elfSize);
+
+    free(elf);
+    return 0;
+}
+</pre></div>
+</div>
+<section id="build-instruction">
+<h2>
+<span class="section-number">7.1. </span>Build Instruction<a class="headerlink" href="#build-instruction" title="Permalink to this headline"></a>
+</h2>
+<p>Assuming the environment variable <code class="docutils literal notranslate"><span class="pre">CUDA_PATH</span></code> points to CUDA Toolkit installation directory, build this example as:</p>
+<ul>
+<li>
+<p>Windows:</p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>cl.exe simpleVectorAddition.c /FesimpleVectorAddition ^
+          /I "%CUDA_PATH%"\include ^
+          "%CUDA_PATH%"\lib\x64\nvptxcompiler_static.lib
+          "%CUDA_PATH%"\lib\x64\cuda.lib
+</pre></div>
+</div>
+<p>OR</p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>nvcc simpleVectorAddition.c  -ccbin &lt;PATH_TO_cl.exe&gt;
+          -I $CUDA_PATH/include -L $CUDA_PATH/lib/x64/ -lcuda  nvptxcompiler_static.lib
+</pre></div>
+</div>
+</li>
+<li>
+<p>Linux:</p>
+<div class="highlight-text notranslate">
+<div class="highlight"><pre><span></span>gcc simpleVectorAddition.c -o simpleVectorAddition \
+             -I $CUDA_PATH/include \
+             -L $CUDA_PATH/lib64 \
+             libnvptxcompiler_static.a -lcuda -lm -lpthread \
+             -Wl,-rpath,$CUDA_PATH/lib64
+</pre></div>
+</div>
+</li>
+</ul>
+</section>
+<section id="notices">
+<h2>
+<span class="section-number">7.2. </span>Notices<a class="headerlink" href="#notices" title="Permalink to this headline"></a>
+</h2>
+<section id="notice">
+<h3>
+<span class="section-number">7.2.1. </span>Notice<a class="headerlink" href="#notice" title="Permalink to this headline"></a>
+</h3>
+<p>This document is provided for information purposes only and shall not be regarded as a warranty of a certain functionality, condition, or quality of a product. NVIDIA Corporation (“NVIDIA”) makes no representations or warranties, expressed or implied, as to the accuracy or completeness of the information contained in this document and assumes no responsibility for any errors contained herein. NVIDIA shall have no liability for the consequences or use of such information or for any infringement of patents or other rights of third parties that may result from its use. This document is not a commitment to develop, release, or deliver any Material (defined below), code, or functionality.</p>
+<p>NVIDIA reserves the right to make corrections, modifications, enhancements, improvements, and any other changes to this document, at any time without notice.</p>
+<p>Customer should obtain the latest relevant information before placing orders and should verify that such information is current and complete.</p>
+<p>NVIDIA products are sold subject to the NVIDIA standard terms and conditions of sale supplied at the time of order acknowledgement, unless otherwise agreed in an individual sales agreement signed by authorized representatives of NVIDIA and customer (“Terms of Sale”). NVIDIA hereby expressly objects to applying any customer general terms and conditions with regards to the purchase of the NVIDIA product referenced in this document. No contractual obligations are formed either directly or indirectly by this document.</p>
+<p>NVIDIA products are not designed, authorized, or warranted to be suitable for use in medical, military, aircraft, space, or life support equipment, nor in applications where failure or malfunction of the NVIDIA product can reasonably be expected to result in personal injury, death, or property or environmental damage. NVIDIA accepts no liability for inclusion and/or use of NVIDIA products in such equipment or applications and therefore such inclusion and/or use is at customer’s own risk.</p>
+<p>NVIDIA makes no representation or warranty that products based on this document will be suitable for any specified use. Testing of all parameters of each product is not necessarily performed by NVIDIA. It is customer’s sole responsibility to evaluate and determine the applicability of any information contained in this document, ensure the product is suitable and fit for the application planned by customer, and perform the necessary testing for the application in order to avoid a default of the application or the product. Weaknesses in customer’s product designs may affect the quality and reliability of the NVIDIA product and may result in additional or different conditions and/or requirements beyond those contained in this document. NVIDIA accepts no liability related to any default, damage, costs, or problem which may be based on or attributable to: (i) the use of the NVIDIA product in any manner that is contrary to this document or (ii) customer product designs.</p>
+<p>No license, either expressed or implied, is granted under any NVIDIA patent right, copyright, or other NVIDIA intellectual property right under this document. Information published by NVIDIA regarding third-party products or services does not constitute a license from NVIDIA to use such products or services or a warranty or endorsement thereof. Use of such information may require a license from a third party under the patents or other intellectual property rights of the third party, or a license from NVIDIA under the patents or other intellectual property rights of NVIDIA.</p>
+<p>Reproduction of information in this document is permissible only if approved in advance by NVIDIA in writing, reproduced without alteration and in full compliance with all applicable export laws and regulations, and accompanied by all associated conditions, limitations, and notices.</p>
+<p>THIS DOCUMENT AND ALL NVIDIA DESIGN SPECIFICATIONS, REFERENCE BOARDS, FILES, DRAWINGS, DIAGNOSTICS, LISTS, AND OTHER DOCUMENTS (TOGETHER AND SEPARATELY, “MATERIALS”) ARE BEING PROVIDED “AS IS.” NVIDIA MAKES NO WARRANTIES, EXPRESSED, IMPLIED, STATUTORY, OR OTHERWISE WITH RESPECT TO THE MATERIALS, AND EXPRESSLY DISCLAIMS ALL IMPLIED WARRANTIES OF NONINFRINGEMENT, MERCHANTABILITY, AND FITNESS FOR A PARTICULAR PURPOSE. TO THE EXTENT NOT PROHIBITED BY LAW, IN NO EVENT WILL NVIDIA BE LIABLE FOR ANY DAMAGES, INCLUDING WITHOUT LIMITATION ANY DIRECT, INDIRECT, SPECIAL, INCIDENTAL, PUNITIVE, OR CONSEQUENTIAL DAMAGES, HOWEVER CAUSED AND REGARDLESS OF THE THEORY OF LIABILITY, ARISING OUT OF ANY USE OF THIS DOCUMENT, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. Notwithstanding any damages that customer might incur for any reason whatsoever, NVIDIA’s aggregate and cumulative liability towards customer for the products described herein shall be limited in accordance with the Terms of Sale for the product.</p>
+</section>
+<section id="opencl">
+<h3>
+<span class="section-number">7.2.2. </span>OpenCL<a class="headerlink" href="#opencl" title="Permalink to this headline"></a>
+</h3>
+<p>OpenCL is a trademark of Apple Inc. used under license to the Khronos Group Inc.</p>
+</section>
+<section id="trademarks">
+<h3>
+<span class="section-number">7.2.3. </span>Trademarks<a class="headerlink" href="#trademarks" title="Permalink to this headline"></a>
+</h3>
+<p>NVIDIA and the NVIDIA logo are trademarks or registered trademarks of NVIDIA Corporation in the U.S. and other countries. Other company and product names may be trademarks of the respective companies with which they are associated.</p>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr>
+
+  <div role="contentinfo">
+<img src="../_static/NVIDIA-LogoBlack.svg" class="only-light">
+<img src="../_static/NVIDIA-LogoWhite.svg" class="only-dark">
+
+<p class="notices">
+<a href="https://www.nvidia.com/en-us/about-nvidia/privacy-policy/" target="_blank">Privacy Policy</a>
+|
+<a href="https://www.nvidia.com/en-us/about-nvidia/privacy-center/" target="_blank">Manage My Privacy</a>
+|
+<a href="https://www.nvidia.com/en-us/preferences/start/" target="_blank">Do Not Sell or Share My Data</a>
+|
+<a href="https://www.nvidia.com/en-us/about-nvidia/terms-of-service/" target="_blank">Terms of Service</a>
+|
+<a href="https://www.nvidia.com/en-us/about-nvidia/accessibility/" target="_blank">Accessibility</a>
+|
+<a href="https://www.nvidia.com/en-us/about-nvidia/company-policies/" target="_blank">Corporate Policies</a>
+|
+<a href="https://www.nvidia.com/en-us/product-security/" target="_blank">Product Security</a>
+|
+<a href="https://www.nvidia.com/en-us/contact/" target="_blank">Contact</a>
+</p>
+
+<p>
+  Copyright © 2020-2026, NVIDIA Corporation &amp; affiliates. All rights reserved.
+</p>
+
+    <p>
+      <span class="lastupdated">Last updated on Mar 05, 2026.
+      </span></p>
+
+  </div>
+
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(false);
+      });
+  </script>
+ 
+<script type="text/javascript">if (typeof _satellite !== "undefined"){_satellite.pageBottom();}</script>
+ 
+
+
+</body>
+</html>

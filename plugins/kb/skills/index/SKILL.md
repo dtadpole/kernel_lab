@@ -6,7 +6,7 @@ user-invocable: true
 
 # KB Index Management
 
-Download NVIDIA docs, parse into chunks, and build search indices.
+Download NVIDIA HTML docs, parse into chunks, and build search indices.
 
 ## Commands
 
@@ -19,23 +19,18 @@ cd /home/centos/kernel_lab
 ### Full rebuild (download → parse → index)
 
 ```bash
-doc_retrieval/.venv/bin/python -m doc_retrieval download --tier all && \
+doc_retrieval/.venv/bin/python -m doc_retrieval download && \
 doc_retrieval/.venv/bin/python -m doc_retrieval parse && \
 doc_retrieval/.venv/bin/python -m doc_retrieval index
 ```
 
-### Download raw docs from NVIDIA
+### Download HTML docs from NVIDIA
 
 ```bash
-doc_retrieval/.venv/bin/python -m doc_retrieval download --tier 1        # essential docs only
-doc_retrieval/.venv/bin/python -m doc_retrieval download --tier all      # everything
-doc_retrieval/.venv/bin/python -m doc_retrieval download --html-only     # skip PDFs
-doc_retrieval/.venv/bin/python -m doc_retrieval download --pdf-only      # skip HTML
+doc_retrieval/.venv/bin/python -m doc_retrieval download
 ```
 
-Tiers: 1 = essential (Programming Guide, PTX ISA, Best Practices), 2 = important (cuBLAS, tuning guides), 3 = remaining.
-
-Raw docs are saved to `doc_retrieval/data/raw/` (in-repo, single source of truth).
+Raw docs are saved to `data/nvidia-docs/html/` (in-repo, single source of truth).
 
 ### Parse into chunks
 
@@ -43,7 +38,7 @@ Raw docs are saved to `doc_retrieval/data/raw/` (in-repo, single source of truth
 doc_retrieval/.venv/bin/python -m doc_retrieval parse
 ```
 
-Parses PDFs (via Docling) and HTML (via BeautifulSoup) into search chunks, TOC trees, and full sections. Output: `~/.doc_retrieval/chunks/`.
+Parses HTML (via BeautifulSoup) into search chunks, TOC trees, and full sections. Output: `~/.doc_retrieval/chunks/`.
 
 ### Build search indices
 
@@ -58,16 +53,15 @@ Output: `~/.doc_retrieval/index/`.
 ### Nuke derived artifacts
 
 ```bash
-rm -rf ~/.doc_retrieval
+rm -rf ~/.doc_retrieval/chunks ~/.doc_retrieval/index
 ```
 
-This removes all chunks and indices. Raw docs in `doc_retrieval/data/raw/` are untouched. Re-run `parse && index` to rebuild.
+This removes parsed chunks and search indices. Raw docs in `data/nvidia-docs/` are untouched. Re-run `parse && index` to rebuild.
 
 ## Storage Layout
 
 ```
-doc_retrieval/data/raw/          # in-repo, committed
-  pdfs/*.pdf                     # raw PDFs from NVIDIA
+data/nvidia-docs/                # in-repo, committed
   html/{slug}/index.html         # Sphinx HTML pages
   html/{slug}/_images/           # referenced images
 

@@ -9,21 +9,13 @@ import sys
 def cmd_download(args: argparse.Namespace) -> None:
     from doc_retrieval.downloader import download_docs
 
-    download_docs(
-        tier=args.tier,
-        pdf_only=args.pdf_only,
-        html_only=args.html_only,
-        migrate=args.migrate,
-    )
+    download_docs()
 
 
 def cmd_parse(args: argparse.Namespace) -> None:
     from doc_retrieval.parser import parse_docs
 
-    parse_docs(
-        with_images=args.with_images,
-        vlm_captions=args.vlm_captions,
-    )
+    parse_docs()
 
 
 def cmd_index(args: argparse.Namespace) -> None:
@@ -78,31 +70,11 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --- download ---
-    dl = sub.add_parser("download", help="Download NVIDIA CUDA documentation")
-    dl.add_argument(
-        "--tier",
-        choices=["1", "2", "3", "all"],
-        default="all",
-        help="Which tier of PDFs to download (default: all)",
-    )
-    dl.add_argument("--pdf-only", action="store_true", help="Skip HTML crawling")
-    dl.add_argument("--html-only", action="store_true", help="Skip PDF downloads")
-    dl.add_argument(
-        "--migrate", action="store_true",
-        help="Migrate legacy flat .html/.json files to folder structure",
-    )
+    dl = sub.add_parser("download", help="Download NVIDIA CUDA HTML documentation")
     dl.set_defaults(func=cmd_download)
 
     # --- parse ---
-    pa = sub.add_parser("parse", help="Parse downloaded docs into chunks")
-    pa.add_argument(
-        "--with-images", action="store_true", help="Extract images from documents"
-    )
-    pa.add_argument(
-        "--vlm-captions",
-        action="store_true",
-        help="Generate image captions with Docling VLM",
-    )
+    pa = sub.add_parser("parse", help="Parse downloaded HTML docs into chunks")
     pa.set_defaults(func=cmd_parse)
 
     # --- index ---

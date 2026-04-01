@@ -286,6 +286,20 @@ def cmd_status(host_cfg: dict[str, Any]) -> bool:
     return state == "active"
 
 
+def cmd_health(host_cfg: dict[str, Any]) -> bool:
+    """Quick health check: is the API responding?"""
+    ssh_host = host_cfg["ssh_host"]
+    port = host_cfg["port"]
+
+    h = _ssh(ssh_host, f"curl -sf http://127.0.0.1:{port}/healthz", check=False)
+    if h.returncode == 0 and '"ok":true' in h.stdout:
+        print(f"{ssh_host}: healthy")
+        return True
+    else:
+        print(f"{ssh_host}: unhealthy ({h.stdout.strip() or 'unreachable'})")
+        return False
+
+
 def cmd_nuke(host_cfg: dict[str, Any], include_data: bool = False) -> bool:
     """Nuclear option: stop service, remove everything."""
     ssh_host = host_cfg["ssh_host"]
@@ -353,6 +367,11 @@ def main() -> int:
     p.add_argument("host", nargs="?", help="Host name")
     p.add_argument("--all", action="store_true", help="Status of all hosts")
 
+    # health
+    p = sub.add_parser("health", help="Quick health check: is the API responding?")
+    p.add_argument("host", nargs="?", help="Host name")
+    p.add_argument("--all", action="store_true", help="Health check all hosts")
+
     # nuke
     p = sub.add_parser("nuke", help="Nuclear option: stop + remove everything")
     p.add_argument("host", nargs="?", help="Host name")
@@ -383,6 +402,8 @@ def main() -> int:
             ok = cmd_stop(host_cfg)
         elif args.command == "status":
             ok = cmd_status(host_cfg)
+        elif args.command == "health":
+            ok = cmd_health(host_cfg)
         elif args.command == "nuke":
             ok = cmd_nuke(host_cfg, include_data=args.data)
         else:

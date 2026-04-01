@@ -51,19 +51,19 @@ ifeq ($(KERNEL),vecadd)
   _KERNEL_DIRECTION_SLUG := vecadd
   _KERNEL_CONFIG_SLUG    := vec1d-n16777216
   _KERNEL_CONFIG_JSON    := {"family":"integration-vector-add","rank":1,"shape":[16777216],"input_size":16777216,"shape_kind":"1d"}
-  _KERNEL_NCU_FILTER     := regex:"vector_add"
+  _KERNEL_NCU_FILTER     := regex:"vecadd"
 else ifeq ($(KERNEL),matmul)
   _KERNEL_DIRECTION_ID   := 2
   _KERNEL_DIRECTION_SLUG := matmul
   _KERNEL_CONFIG_SLUG    := mat-4096x4096
   _KERNEL_CONFIG_JSON    := {"family":"integration-matrix-multiplication","rank":2,"shape":[4096,4096],"input_size":16777216,"shape_kind":"2d"}
-  _KERNEL_NCU_FILTER     := regex:"matmul_bf16|cutlass"
+  _KERNEL_NCU_FILTER     := regex:"matmul"
 else ifeq ($(KERNEL),fa4)
   _KERNEL_DIRECTION_ID   := 3
   _KERNEL_DIRECTION_SLUG := fa4
   _KERNEL_CONFIG_SLUG    := mha-causal-b2-s16384
   _KERNEL_CONFIG_JSON    := {"family":"fa4-mha","batch_size":2,"seq_len":16384,"num_heads":16,"num_kv_heads":16,"head_dim":128,"causal":true,"total_tokens":32768,"input_size":67108864,"rank":4,"shape":[2,16384,16,128],"shape_kind":"4d"}
-  _KERNEL_NCU_FILTER     := regex:"flash_attention|flash_attn"
+  _KERNEL_NCU_FILTER     := regex:"fa4"
   export CUDA_EXEC_HARNESS_NUM_INPUTS := 3
 else
   # Unknown kernel — assume fixtures at conf/fixtures/$(KERNEL)/, generated at data/generated/
@@ -331,6 +331,7 @@ profile-ncu-generated: ensure-venv ## NCU profile the generated CUDA binary for 
 		--target "$$BINARY" \
 		--export-prefix "$$NCU_PREFIX" \
 		--set detailed \
+		--kernel-name $(NCU_KERNEL_FILTER) \
 		> "$(LOGS)/ncu.$(CONFIG_SLUG).stdout.log"
 	echo "--- profile-ncu-generated [$(KERNEL)]: done ---"
 	echo "NCU report: $$NCU_PREFIX.ncu-rep"

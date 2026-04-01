@@ -144,16 +144,22 @@ static void print_json(const HarnessConfig* cfg,
     printf("{\n");
     printf("  \"config_slug\": \"%s\",\n", cfg->config_slug);
 
-    /* output.result — flat list from first output buffer, bf16 -> float */
-    printf("  \"output\": {\n    \"result\": [");
-    if (!outputs.empty()) {
-        const auto& buf = outputs[0];
-        for (size_t i = 0; i < buf.size(); i++) {
-            if (i > 0) printf(",");
-            printf("%.6f", __bfloat162float(buf[i]));
+    /* output — write raw BF16 binary files to CUDA_EXEC_OUTPUT_DIR
+     * (set by evaluate.py).  JSON output.result is always empty. */
+    const char* output_dir = getenv("CUDA_EXEC_OUTPUT_DIR");
+    if (output_dir && output_dir[0] && !outputs.empty()) {
+        for (size_t i = 0; i < outputs.size(); i++) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/output_%zu.bin", output_dir, i);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fwrite(outputs[i].data(), sizeof(__nv_bfloat16),
+                       outputs[i].size(), f);
+                fclose(f);
+            }
         }
     }
-    printf("],\n");
+    printf("  \"output\": {\n    \"result\": [],\n");
     printf("    \"metadata\": {\n");
     printf("      \"rank\": %d,\n", cfg->rank);
     printf("      \"shape_kind\": \"%s\",\n", cfg->shape_kind);

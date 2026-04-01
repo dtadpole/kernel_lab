@@ -15,8 +15,10 @@ import argparse
 import json
 import os
 import signal
+import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -64,10 +66,14 @@ def _run_generated(
     workspace_path: str,
     timeout_seconds: int,
 ) -> dict[str, Any]:
+    # Create temp dir for binary output files from the harness
+    output_dir = tempfile.mkdtemp(prefix="cuda_exec_output_")
+    run_env = {**os.environ, **env, "CUDA_EXEC_OUTPUT_DIR": output_dir}
+
     completed = subprocess.run(
         [str(target_path)],
         cwd=workspace_path,
-        env={**os.environ, **env},
+        env=run_env,
         capture_output=True,
         text=True,
         timeout=timeout_seconds,
@@ -77,12 +83,38 @@ def _run_generated(
     if not stdout:
         raise RuntimeError("generated execution produced empty stdout")
     payload = json.loads(stdout)
+
+    # Read binary output files (raw BF16) and inject into payload
+    output_bin = Path(output_dir) / "output_0.bin"
+    if output_bin.exists():
+        raw = output_bin.read_bytes()
+        # BF16 -> float32: unpack as uint16, then reinterpret
+        n_elems = len(raw) // 2
+        bf16_ints = struct.unpack(f"<{n_elems}H", raw)
+        floats = [_bf16_to_float(v) for v in bf16_ints]
+        payload.setdefault("output", {})["result"] = floats
+        # Clean up
+        output_bin.unlink()
+
+    # Remove temp dir
+    try:
+        Path(output_dir).rmdir()
+    except OSError:
+        pass
+
     return {
         "returncode": completed.returncode,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "payload": payload,
     }
+
+
+def _bf16_to_float(bf16_uint16: int) -> float:
+    """Convert a BF16 value (as uint16) to Python float."""
+    # BF16 is the upper 16 bits of IEEE 754 float32
+    fp32_bits = bf16_uint16 << 16
+    return struct.unpack("<f", struct.pack("<I", fp32_bits))[0]
 
 
 # ---------------------------------------------------------------------------

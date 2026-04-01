@@ -153,10 +153,8 @@ __device__ inline void bar_arrive(int barrier_id, int num_threads) {
 /* Barrier IDs */
 static constexpr int BAR_K_FULL  = 1;  /* DMA signals K ready       */
 static constexpr int BAR_K_EMPTY = 2;  /* MMA signals K consumed    */
-static constexpr int BAR_V_FULL  = 3;  /* DMA signals V slot 0 ready    */
-static constexpr int BAR_V_EMPTY = 4;  /* MMA signals V slot 0 consumed */
-static constexpr int BAR_V_FULL1 = 5;  /* DMA signals V slot 1 ready    */
-static constexpr int BAR_V_EMPTY1= 6;  /* MMA signals V slot 1 consumed */
+static constexpr int BAR_V_FULL  = 3;  /* DMA signals V ready       */
+static constexpr int BAR_V_EMPTY = 4;  /* MMA signals V consumed    */
 static constexpr int BAR_THREADS = 160; /* all 5 warps participate   */
 
 /* ======================================================================
@@ -200,26 +198,20 @@ void dma_warp_fn(
         /* Signal K is ready */
         bar_arrive(BAR_K_FULL, BAR_THREADS);
 
-        /* Double-buffered V: select slot-specific barriers */
-        const int v_full_bar  = (kv_id % 2 == 0) ? BAR_V_FULL  : BAR_V_FULL1;
-        const int v_empty_bar = (kv_id % 2 == 0) ? BAR_V_EMPTY : BAR_V_EMPTY1;
+        /* Wait until MMA warps have consumed the previous V.
+         * Skip on first iteration — no previous tile to protect. */
+        if (kv_id > 0) bar_sync(BAR_V_EMPTY, BAR_THREADS);
 
-        /* Wait until MMA consumed the V in THIS slot (2 iters ago).
-         * Skip first two iterations — each slot is written for the first time. */
-        if (kv_id >= 2) bar_sync(v_empty_bar, BAR_THREADS);
-
-        /* Load V[kv_id] into double-buffered V_smem slot */
-        const uint32_t V_dst = V_smem +
-            (kv_id % 2) * (BLOCK_KV * DIM * (int)sizeof(nv_bfloat16));
+        /* Load V[kv_id] into single-buffered V_smem */
         global_to_shared_swizzle<BLOCK_KV, DIM, DMA_THREADS>(
-            V_dst, V_ptr, seq_stride, tid);
+            V_smem, V_ptr, seq_stride, tid);
         V_ptr += BLOCK_KV * seq_stride;
 
         asm volatile("cp.async.commit_group;");
         asm volatile("cp.async.wait_all;");
 
-        /* Signal V slot is ready */
-        bar_arrive(v_full_bar, BAR_THREADS);
+        /* Signal V is ready */
+        bar_arrive(BAR_V_FULL, BAR_THREADS);
     }
 }
 
@@ -328,30 +320,16 @@ void mma_warp_fn(
                     qaddr ^= (mma_id_d + 1) * MMA_K * sizeof(nv_bfloat16);
                     ldmatrix_x4(Q_next, qaddr);
                 }
-                /* Prefetch first K fragment for this d-step */
-                uint32_t K_cur_frag[2];
-                {
-                    uint32_t kaddr = K_cur;
-                    kaddr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
-                    ldmatrix_x2(K_cur_frag, kaddr);
-                }
-
                 #pragma unroll
                 for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-                    /* Prefetch K for next kv step while current MMA runs */
-                    uint32_t K_next_frag[2];
-                    if (mma_id_kv + 1 < BLOCK_KV / MMA_N) {
+                    uint32_t K_frag[2];
+                    {
                         uint32_t kaddr = K_cur;
-                        kaddr += (mma_id_kv + 1) * MMA_N * DIM * sizeof(nv_bfloat16);
+                        kaddr += mma_id_kv * MMA_N * DIM * sizeof(nv_bfloat16);
                         kaddr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);
-                        ldmatrix_x2(K_next_frag, kaddr);
+                        ldmatrix_x2(K_frag, kaddr);
                     }
-                    mma_m16n8k16(Q_cur, K_cur_frag, S_local[mma_id_kv]);
-                    /* Rotate: next becomes current */
-                    if (mma_id_kv + 1 < BLOCK_KV / MMA_N) {
-                        K_cur_frag[0] = K_next_frag[0];
-                        K_cur_frag[1] = K_next_frag[1];
-                    }
+                    mma_m16n8k16(Q_cur, K_frag, S_local[mma_id_kv]);
                 }
                 /* Swap current and next */
                 if (mma_id_d + 1 < DIM / MMA_K) {
@@ -488,20 +466,18 @@ void mma_warp_fn(
         /* Signal DMA that K buffer slot is free for next load */
         bar_arrive(BAR_K_EMPTY, BAR_THREADS);
 
-        /* Wait for DMA to signal V slot is ready */
-        const int v_full_bar  = (kv_id % 2 == 0) ? BAR_V_FULL  : BAR_V_FULL1;
-        bar_sync(v_full_bar, BAR_THREADS);
+        /* Wait for DMA to signal V is ready */
+        bar_sync(BAR_V_FULL, BAR_THREADS);
 
         /* O += P @ V  [BLOCK_Q, DIM]
          * Load V once per (mma_kv, mma_d) step, reuse across mma_id_q.
          * Pipelining: prefetch the V fragment for the next (kv,d) step. */
         {
             /* Prefetch V for the very first step (kv=0, d=0) */
-            const uint32_t V_smem_cur = V_smem_thread +
-                (kv_id % 2) * (BLOCK_KV * DIM * (int)sizeof(nv_bfloat16));
             uint32_t V_cur[2];
             {
-                ldmatrix_x2_trans(V_cur, V_smem_cur);
+                uint32_t addr = V_smem_thread;
+                ldmatrix_x2_trans(V_cur, addr);
             }
 
             #pragma unroll
@@ -513,12 +489,12 @@ void mma_warp_fn(
                     const bool has_next_d = (mma_id_d + 1 < DIM / MMA_N);
                     const bool has_next_kv = (mma_id_kv + 1 < BLOCK_KV / MMA_K);
                     if (has_next_d) {
-                        uint32_t addr = V_smem_cur;
+                        uint32_t addr = V_smem_thread;
                         addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);
                         addr ^= (mma_id_d + 1) * MMA_N * sizeof(nv_bfloat16);
                         ldmatrix_x2_trans(V_next, addr);
                     } else if (has_next_kv) {
-                        uint32_t addr = V_smem_cur;
+                        uint32_t addr = V_smem_thread;
                         addr += (mma_id_kv + 1) * MMA_K * DIM * sizeof(nv_bfloat16);
                         ldmatrix_x2_trans(V_next, addr);
                     }
@@ -535,9 +511,8 @@ void mma_warp_fn(
             }
         }
 
-        /* Signal DMA that V slot is consumed */
-        const int v_empty_bar = (kv_id % 2 == 0) ? BAR_V_EMPTY : BAR_V_EMPTY1;
-        bar_arrive(v_empty_bar, BAR_THREADS);
+        /* Signal DMA that V buffer is free for next load */
+        bar_arrive(BAR_V_EMPTY, BAR_THREADS);
 
     } /* end kv_id loop */
 
@@ -571,7 +546,7 @@ void mma_warp_fn(
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
-__launch_bounds__(160, 2)
+__launch_bounds__(160, 1)  /* 1 block/SM: let compiler use full 255 regs */
 __global__
 void flash_attention_kernel_ws(
     const nv_bfloat16 *Q,   /* [B, S, H, D] */
@@ -612,10 +587,10 @@ void flash_attention_kernel_ws(
                                   + q_block_id * BLOCK_Q * seq_stride;
 
     /* Shared memory layout:
-     *   Q region:  [BLOCK_Q=64, DIM] = 16KB (persistent)
+     *   Q region:  [BLOCK_Q, DIM] = 32KB (persistent)
      *   K region:  [2, BLOCK_KV, DIM] = 32KB (double-buffered)
-     *   V region:  [2, BLOCK_KV, DIM] = 32KB (double-buffered)
-     *   Total: 16KB + 32KB + 32KB = 80KB
+     *   V region:  [BLOCK_KV, DIM] = 16KB (single-buffered)
+     *   Total: 32KB + 32KB + 16KB = 80KB
      */
     extern __shared__ nv_bfloat16 smem[];
     const uint32_t smem_base = __cvta_generic_to_shared(smem);
@@ -625,7 +600,7 @@ void flash_attention_kernel_ws(
     const uint32_t V_smem  = KV_base + 2 * BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
     /* ---- Load Q [BLOCK_Q, DIM] from global -> shared (ALL threads) ----
-     * Only first 128 threads load (64*128 / (128*8) = 8 iters, divides evenly).
+     * Only first 128 threads load (128*128 / (128*8) = 16 iters, divides evenly).
      * DMA warp (32 threads) is idle during Q load to keep divisibility. */
     if (tid < 128) {
         global_to_shared_swizzle<BLOCK_Q, DIM, 128>(Q_smem, Q_base, seq_stride, tid);
@@ -753,7 +728,7 @@ extern "C" int kernel_run(
 
     /* ---- Launch warp-specialized Flash Attention on [B,S,H,D] layout ---- */
     {
-        const int BLOCK_Q   = 64;
+        const int BLOCK_Q   = 128;
         const int BLOCK_KV  = 64;
         const int DIM_CONST = 128;
         const int TB_SIZE   = 160;  /* 5 warps: 1 DMA + 4 MMA */
@@ -761,15 +736,15 @@ extern "C" int kernel_run(
         int effective_bs = B * H;
         int num_blocks = effective_bs * cdiv(S, BLOCK_Q);
 
-        /* SMEM budget: Q (persistent) + K (double-buffered) + V (double-buffered)
-         *   Q:  64*128*2 = 16384
+        /* SMEM budget: Q (persistent) + K (double-buffered) + V (single-buffered)
+         *   Q:  128*128*2 = 32768
          *   K:  2*64*128*2 = 32768
-         *   V:  2*64*128*2 = 32768
-         *   Total: 81920 (80KB, within SM120 limit)
+         *   V:  64*128*2 = 16384
+         *   Total: 81920 (80KB, within 99KB SM120 limit)
          */
         int smem_q  = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16);
         int smem_k  = 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);
-        int smem_v  = 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);
+        int smem_v  = BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);
         int smem_size = smem_q + smem_k + smem_v;
 
         auto kernel = flash_attention_kernel_ws<BLOCK_Q, BLOCK_KV, DIM_CONST>;

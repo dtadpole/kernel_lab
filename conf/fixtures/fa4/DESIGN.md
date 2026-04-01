@@ -2,7 +2,7 @@
 
 ## Overview
 
-Flash Attention 4 forward pass benchmark fixture for RTX 5090 (SM120).
+Flash Attention 4 forward pass benchmark fixture for SM120 (RTX 5090 / RTX PRO 6000 Blackwell).
 
 - **Reference:** FA4 CuTe DSL (`flash_attn.cute.flash_attn_func`) — SM80 base class path on SM120
 - **Configs:** 8 MHA configs from [AVO paper (arXiv 2603.24517)](https://arxiv.org/abs/2603.24517) — 4 causal + 4 non-causal, total tokens fixed at 32768
@@ -24,7 +24,7 @@ All configs: `num_heads=16`, `head_dim=128`, `dtype=BF16`, `batch_size × seq_le
 
 ## FA4 SM120 Patch
 
-`flash-attn-4==4.0.0b5` has 3 bugs on SM120. Patches from [Dao-AILab/flash-attention#2386](https://github.com/Dao-AILab/flash-attention/issues/2386) / [PR #2404](https://github.com/Dao-AILab/flash-attention/pull/2404) (open, not yet merged as of 2026-03-30).
+`flash-attn-4` (tested on 4.0.0b5 and 4.0.0b7) has 3 bugs on SM120 (affects both RTX 5090 and RTX PRO 6000 Blackwell). Patches from [Dao-AILab/flash-attention#2386](https://github.com/Dao-AILab/flash-attention/issues/2386) / [PR #2404](https://github.com/Dao-AILab/flash-attention/pull/2404) (open, not yet merged as of 2026-04-01).
 
 Patched files in `cuda_exec/.venv/lib/python3.12/site-packages/flash_attn/cute/`:
 

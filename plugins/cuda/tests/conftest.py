@@ -61,9 +61,10 @@ def sample_metadata() -> dict[str, Any]:
 def vecadd_fixtures() -> dict[str, Any]:
     """Load vecadd test fixtures."""
     fixtures_dir = _REPO_ROOT / "conf" / "fixtures" / "vecadd"
+    generated_dir = _REPO_ROOT / "data" / "generated" / "sm120" / "vecadd"
     return {
         "reference": (fixtures_dir / "reference.py").read_text(),
-        "generated": (fixtures_dir / "generated.cu").read_text(),
+        "generated": (generated_dir / "generated.cu").read_text(),
         "configs": json.loads((fixtures_dir / "configs.json").read_text()),
     }
 

@@ -66,7 +66,7 @@ else ifeq ($(KERNEL),fa4)
   _KERNEL_NCU_FILTER     := regex:"flash_attention|flash_attn"
   export CUDA_EXEC_HARNESS_NUM_INPUTS := 3
 else
-  # Unknown kernel — assume fixtures exist at conf/fixtures/$(KERNEL)/
+  # Unknown kernel — assume fixtures at conf/fixtures/$(KERNEL)/, generated at data/generated/
   _KERNEL_DIRECTION_ID   := 99
   _KERNEL_DIRECTION_SLUG := $(KERNEL)
   _KERNEL_CONFIG_SLUG    := default
@@ -76,6 +76,7 @@ endif
 
 # ---------------------------------------------------------------------------
 # Config selector — pick a config slug from conf/fixtures/$(KERNEL)/configs.json
+# Generated code is at data/generated/$(ARCH)/$(KERNEL)/generated.cu
 #   make evaluate KERNEL=matmul CONFIG=mat-1024x1024
 #   make evaluate KERNEL=fa4 CONFIG=mha-causal-b2-s16384
 # If CONFIG is not set, uses the per-kernel default from _KERNEL_CONFIG_SLUG.
@@ -95,11 +96,13 @@ CONFIG_SLUG    ?= $(if $(CONFIG),$(CONFIG),$(_KERNEL_CONFIG_SLUG))
 CONFIG_JSON    ?= $(if $(CONFIG),$(shell $(VENV_PYTHON) -c "import json,sys;d=json.load(open('$(_CONFIG_FILE)'));print(json.dumps(d['$(CONFIG)']))" 2>/dev/null),$(_KERNEL_CONFIG_JSON))
 
 # ---------------------------------------------------------------------------
-# Input files — derived from KERNEL
+# Input files — derived from KERNEL and ARCH
 # ---------------------------------------------------------------------------
+# SM architecture: auto-detect from GPU, override with ARCH=sm120
+ARCH          ?= sm$(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '.' | head -1)
 FIXTURE_DIR   ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)
 REFERENCE_PY  ?= $(FIXTURE_DIR)/reference.py
-GENERATED_CU  ?= $(FIXTURE_DIR)/generated.cu
+GENERATED_CU  ?= $(REPO_ROOT)/data/generated/$(ARCH)/$(KERNEL)/generated.cu
 
 # ---------------------------------------------------------------------------
 # Tuning parameters

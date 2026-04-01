@@ -91,7 +91,7 @@ Configs are kernel-specific. Each config_slug is a stable identifier across eval
 
 ## Available Fixtures
 
-Test workloads in `conf/fixtures/`:
+Test workloads — reference/configs in `conf/fixtures/`, generated code in `data/generated/{arch}/`:
 
 | Fixture | Description | Configs |
 |---------|-------------|---------|

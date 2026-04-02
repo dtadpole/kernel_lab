@@ -338,6 +338,13 @@ void mma_warp_fn(
                 }
             }
 
+            /* Signal K_EMPTY early: after the LAST mma_id_q's QK loop,
+             * K_smem is no longer read. Releasing K ~500 cycles earlier
+             * (before softmax) lets the DMA warp start K_{i+1} sooner. */
+            if (mma_id_q == WARP_Q / MMA_M - 1) {
+                bar_arrive(BAR_K_EMPTY, BAR_THREADS);
+            }
+
             /* ---- Softmax scale ---- */
             #pragma unroll
             for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
@@ -463,8 +470,7 @@ void mma_warp_fn(
 
         } /* end per-mma_id_q QK+softmax */
 
-        /* Signal DMA that K buffer slot is free for next load */
-        bar_arrive(BAR_K_EMPTY, BAR_THREADS);
+        /* K_EMPTY already signaled above, inside the mma_id_q loop. */
 
         /* Wait for DMA to signal V is ready */
         bar_sync(BAR_V_FULL, BAR_THREADS);

@@ -105,10 +105,20 @@ adding pipeline synchronization overhead that outweighs the occupancy improvemen
 3. **The generated kernel matches cuBLAS** at large sizes (1.00-1.01x) because it
    uses the same 256x128 tile, 8-warp, all-MMA architecture.
 
-4. **Closing the gap requires either**:
-   - Fixing CuTe DSL codegen for 256x128 tiles on SM120 (CUTLASS framework work)
-   - Implementing non-warp-specialized pipeline in CuTe DSL (cooperative TMA)
-   - Both are upstream CUTLASS improvements, not kernel-level tuning
+4. **Cooperative TMA (eliminating DMA warp) was implemented and tested**:
+   - `Sm120GemmCooperative` class: all 4 warps do MMA, warp 0 also issues TMA inline
+   - Produces bit-identical results to warp-specialized baseline
+   - **24% slower** (305 vs 400 TFLOPS at 4096, 332 vs 414 at 8192)
+   - Root cause: `PipelineTmaAsync.producer_acquire()` blocks warp 0 with a
+     mbarrier spin-wait during each K-tile boundary. With 4 MMA warps, losing
+     one warp's MMA for ~25% of each K-tile gives exactly the observed ~25% loss
+   - The generated CUDA kernel avoids this by using raw non-blocking
+     `mbarrier.arrive.expect_tx` PTX — a single instruction vs the pipeline
+     abstraction's multi-step acquire-wait-arrive sequence
+   - **Conclusion**: cooperative TMA cannot beat warp-specialized within the
+     `PipelineTmaAsync` framework. Matching generated/cuBLAS requires either
+     raw mbarrier PTX (bypassing the CuTe pipeline abstraction) or upstream
+     CUTLASS changes to support non-blocking producer operations
 
 ## Commit
 

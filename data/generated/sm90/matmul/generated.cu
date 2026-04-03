@@ -423,17 +423,20 @@ __global__ void wgmma_matmul(
     float acc[128];
     int tileIdx = blockIdx.x;
 
-    /* L2 super-tiling: 4×4 blocks */
+    /* CTA swizzle (CuTe DSL pattern): group_size_m=8 for L2 reuse */
     int tile_m, tile_n;
-    if (nTilesN >= 4 && nTilesM >= 4) {
-        int nSuperN = nTilesN / 4;
-        int superIdx = tileIdx / 16;
-        int localIdx = tileIdx % 16;
-        tile_m = (superIdx / nSuperN) * 4 + localIdx / 4;
-        tile_n = (superIdx % nSuperN) * 4 + localIdx % 4;
-    } else {
-        tile_m = tileIdx / nTilesN;
-        tile_n = tileIdx % nTilesN;
+    {
+        const int group_m = 8;
+        int groups_m = nTilesM / group_m;
+        if (groups_m > 0) {
+            int group_id = tileIdx / (group_m * nTilesN);
+            int within = tileIdx % (group_m * nTilesN);
+            tile_n = within / group_m;
+            tile_m = group_id * group_m + within % group_m;
+        } else {
+            tile_m = tileIdx / nTilesN;
+            tile_n = tileIdx % nTilesN;
+        }
     }
 
     int mBase = tile_m * TILE_M;

@@ -3,12 +3,14 @@
  *
  * Hand-written kernel with zero CUTLASS dependency.
  * Uses:
- *   - WGMMA (warpgroup MMA) m64n256k16 for compute — 2 warpgroups, SS mode
+ *   - WGMMA (warpgroup MMA) m64n256k16 for compute — SS mode
  *   - TMA (cp.async.bulk.tensor) for global→shared loads
  *   - mbarrier for pipeline synchronization
+ *   - Warp specialization: 3 warpgroups (1 producer + 2 consumers), 384 threads
+ *   - setmaxnreg: producer 24 regs, consumers 232 regs
  *   - Persistent tile scheduling with L2 super-tiling
  *
- * Tile: 128×256×64, 256 threads (2 warpgroups), 4-stage pipeline
+ * Tile: 128×256×64, 384 threads (3 warpgroups), 4-stage pipeline
  * SMEM: ~197KB (within H100's 228KB limit)
  *
  * kernel_run contract:
@@ -31,16 +33,17 @@
 #define TILE_N       256
 #define TILE_K       64
 #define STAGES       4
-#define THREADS      256    /* 2 warpgroups × 128 threads */
+#define THREADS      384    /* 3 warpgroups × 128 threads (1 producer + 2 consumers) */
 #define WG_SIZE      128    /* threads per warpgroup */
 #define N_SUB        128    /* N-subdivision per WGMMA call */
+#define NUM_CONSUMERS 2
 
 /* SMEM per stage */
 #define A_STAGE_BYTES   (TILE_M * TILE_K * 2)                   /* 16384 */
 #define B_SUB_BYTES     (N_SUB * TILE_K * 2)                    /* 16384 */
 #define B_STAGE_BYTES   (2 * B_SUB_BYTES)                       /* 32768 */
 #define SMEM_STAGE      (A_STAGE_BYTES + B_STAGE_BYTES)         /* 49152 */
-#define SMEM_BYTES      (STAGES * SMEM_STAGE + 256)             /* 196864 */
+#define SMEM_BYTES      (STAGES * SMEM_STAGE + 512)             /* 197120: +full[4]+empty[4] barriers */
 
 /* Epilogue: padded SMEM stride for bank-conflict-free R2S writes.
  * Pad by 8 (not 4) so row stride = 264*2 = 528 bytes is 16-byte aligned
@@ -123,6 +126,32 @@ void wgmma_wait_group_0() {
 __device__ __forceinline__
 void wgmma_wait_group_1() {
     asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(1) : "memory");
+}
+
+/* =========================================================================
+ * PTX helpers — plain mbarrier arrive (no tx_bytes, for empty barriers)
+ * ========================================================================= */
+__device__ __forceinline__
+void mbarrier_arrive(uint64_t* mbar) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.arrive.shared.b64 _, [%0];\n" :: "r"(addr));
+}
+
+/* =========================================================================
+ * PTX helpers — setmaxnreg (register redistribution between warpgroups)
+ *
+ * Producer: decrease to 24 regs, freeing registers for consumers.
+ * Consumer: increase to 232 regs for more accumulator + scheduling headroom.
+ * Budget: 128×40 + 256×216 = 60288 ≤ 65536 registers per SM. ✓
+ * ========================================================================= */
+__device__ __forceinline__
+void setmaxnreg_dec40() {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n");
+}
+
+__device__ __forceinline__
+void setmaxnreg_inc216() {
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 216;\n");
 }
 
 /* =========================================================================
@@ -400,10 +429,18 @@ void wgmma_tile_k64(float* acc,
 
 
 /* =========================================================================
- * Main WGMMA kernel: 128×256×64 tile, 256 threads, 4-stage pipeline
+ * Main WGMMA kernel: warp-specialized, 3 warpgroups (1 producer + 2 consumers)
+ *
+ * WG0 (128 threads): Producer — dedicated TMA loads, 24 registers
+ * WG1 (128 threads): Consumer0 — WGMMA rows 0-63, 232 registers
+ * WG2 (128 threads): Consumer1 — WGMMA rows 64-127, 232 registers
  *
  * B is pre-transposed to (N, K) with K contiguous (like CuTe DSL).
  * Both A and B are K-major in SMEM → tnspA=0, tnspB=0.
+ *
+ * Producer-consumer protocol:
+ *   full[STAGES]  — producer sets expect_tx, TMA completes it; consumers wait
+ *   empty[STAGES] — consumers arrive when done reading; producer waits
  * ========================================================================= */
 __launch_bounds__(THREADS, 1)
 __global__ void wgmma_matmul(
@@ -413,21 +450,19 @@ __global__ void wgmma_matmul(
         const __grid_constant__ CUtensorMap tma_B) {
 
     extern __shared__ char smem[];
-    uint64_t* mbar = reinterpret_cast<uint64_t*>(smem + STAGES * SMEM_STAGE);
+    uint64_t* full_bar  = reinterpret_cast<uint64_t*>(smem + STAGES * SMEM_STAGE);
+    uint64_t* empty_bar = full_bar + STAGES;
 
-    const int tid = threadIdx.x;
-    const int wg_id = tid / WG_SIZE;              /* 0 or 1 */
-    const int warp_in_wg = (tid / 32) % 4;       /* 0-3 within warpgroup */
-    const int lane = tid % 32;
-    const int groupID = lane / 4;                 /* 0-7 */
-    const int thread_in_group = lane % 4;         /* 0-3 */
+    const int tid     = threadIdx.x;
+    const int wg_id   = tid / WG_SIZE;              /* 0=producer, 1,2=consumers */
+    const int wg_tid  = tid % WG_SIZE;              /* thread index within WG */
+    const int warp_in_wg = wg_tid / 32;             /* 0-3 within warpgroup */
+    const int lane    = wg_tid % 32;
+    const int groupID = lane / 4;
+    const int thread_in_group = lane % 4;
 
     int numKTiles = K / TILE_K;
     int nTilesM = totalTiles / nTilesN;
-    int wg_a_offset = wg_id * 64 * TILE_K * 2;
-
-    /* 128 F32 accumulators for full 64×256 output per warpgroup (m64n256k16). */
-    float acc[128];
 
     /* TMA descriptor prefetch (warp 0 only, once) */
     if (tid < 32) {
@@ -435,16 +470,34 @@ __global__ void wgmma_matmul(
         tma_prefetch_descriptor(&tma_B);
     }
 
-    /* Initialize mbarriers (once, re-inval/init between tiles) */
-    if (tid == 0)
-        for (int s = 0; s < STAGES; s++)
-            mbarrier_init(&mbar[s], 1);
+    /* Initialize barriers:
+     *   full[s]:  arrive_count=1 (producer sets expect_tx, TMA completes)
+     *   empty[s]: arrive_count=NUM_CONSUMERS (both consumers must signal) */
+    if (tid == 0) {
+        for (int s = 0; s < STAGES; s++) {
+            mbarrier_init(&full_bar[s], 1);
+            mbarrier_init(&empty_bar[s], NUM_CONSUMERS);
+        }
+    }
     __syncthreads();
 
-    /* ============= Persistent tile loop =============
-     * Grid = min(totalTiles, numSMs). Each CTA loops over multiple tiles.
-     * Benefits: no wave-transition overhead, better L2 reuse, no tail effect.
-     * wgmma_wait_group_0() at tile boundary prevents ptxas C7515. */
+    /* Register redistribution: producer gives regs to consumers.
+     * Producer needs ~30 regs for context vars (function params, smem ptrs,
+     * loop vars). 40 is safe minimum. Consumers get 216 (128 acc + 88 extra). */
+    if (wg_id == 0) {
+        setmaxnreg_dec40();
+    } else {
+        setmaxnreg_inc216();
+    }
+
+    /* Consumers pre-signal empty barriers (all stages available initially).
+     * One thread per consumer WG arrives on each empty barrier. */
+    if (wg_id > 0 && wg_tid == 0) {
+        for (int s = 0; s < STAGES; s++)
+            mbarrier_arrive(&empty_bar[s]);
+    }
+
+    /* ============= Persistent tile loop ============= */
     for (int tileIdx = blockIdx.x; tileIdx < totalTiles; tileIdx += gridDim.x) {
 
         /* CTA swizzle (group_size_m=16 for L2 reuse) */
@@ -466,113 +519,135 @@ __global__ void wgmma_matmul(
         int mBase = tile_m * TILE_M;
         int nBase = tile_n * TILE_N;
 
-        /* ---- Prelude: pre-fill pipeline (warp 0 issues TMA) ---- */
-        int prelude = (numKTiles < STAGES) ? numKTiles : STAGES;
-        if (tid == 0) {
-            for (int s = 0; s < prelude; s++) {
-                int kc = s * TILE_K;
-                char* stage = smem + s * SMEM_STAGE;
-                mbarrier_arrive_expect_tx(&mbar[s],
-                    A_STAGE_BYTES + B_STAGE_BYTES);
-                tma_load_2d(stage, &tma_A, kc, mBase, &mbar[s]);
-                tma_load_2d(stage + A_STAGE_BYTES,
-                            &tma_B, kc, nBase, &mbar[s]);
-                tma_load_2d(stage + A_STAGE_BYTES + B_SUB_BYTES,
-                            &tma_B, kc, nBase + N_SUB, &mbar[s]);
-            }
-        }
+        if (wg_id == 0) {
+            /* ==================== PRODUCER ==================== */
+            /* Only thread 0 of producer WG issues TMA loads.
+             * Other 127 threads idle (their registers were donated). */
+            if (wg_tid == 0) {
+                for (int kb = 0; kb < numKTiles; kb++) {
+                    int qidx = kb % STAGES;
+                    int phase = (kb / STAGES) & 1;
 
-        /* ---- Prologue: first K-tile with scale_D=0 (overwrite) ---- */
-        {
-            mbarrier_wait_parity(&mbar[0], 0);
-            char* stage = smem;
-            uint64_t da_base = make_gmma_desc(stage + wg_a_offset);
-            uint64_t db_base = make_gmma_desc(stage + A_STAGE_BYTES);
-            wgmma_tile_k64(acc, da_base, db_base,
-                           gmma_desc_advance(da_base, 2), gmma_desc_advance(db_base, 2),
-                           gmma_desc_advance(da_base, 4), gmma_desc_advance(db_base, 4),
-                           gmma_desc_advance(da_base, 6), gmma_desc_advance(db_base, 6),
-                           0);  /* scale_D = 0: overwrite accumulators */
-        }
+                    /* Wait for consumers to finish with this stage */
+                    mbarrier_wait_parity(&empty_bar[qidx], phase);
 
-        /* ---- Mainloop: K-tiles 1..numKTiles-1, scale_D=1 (accumulate) ---- */
-        for (int kb = 1; kb < numKTiles; kb++) {
-            int sc = kb % STAGES;
-            int sl = (kb + STAGES - 1) % STAGES;
-            int phase = (kb / STAGES) & 1;
-
-            mbarrier_wait_parity(&mbar[sc], phase);
-
-            char* stage = smem + sc * SMEM_STAGE;
-            uint64_t da_base = make_gmma_desc(stage + wg_a_offset);
-            uint64_t db_base = make_gmma_desc(stage + A_STAGE_BYTES);
-            wgmma_tile_k64(acc, da_base, db_base,
-                           gmma_desc_advance(da_base, 2), gmma_desc_advance(db_base, 2),
-                           gmma_desc_advance(da_base, 4), gmma_desc_advance(db_base, 4),
-                           gmma_desc_advance(da_base, 6), gmma_desc_advance(db_base, 6),
-                           1);
-
-            wgmma_wait_group_1();
-
-            if (tid == 0 && kb + STAGES - 1 < numKTiles) {
-                int nk = (kb + STAGES - 1) * TILE_K;
-                char* next_stage = smem + sl * SMEM_STAGE;
-                mbarrier_arrive_expect_tx(&mbar[sl],
-                    A_STAGE_BYTES + B_STAGE_BYTES);
-                tma_load_2d(next_stage, &tma_A, nk, mBase, &mbar[sl]);
-                tma_load_2d(next_stage + A_STAGE_BYTES,
-                            &tma_B, nk, nBase, &mbar[sl]);
-                tma_load_2d(next_stage + A_STAGE_BYTES + B_SUB_BYTES,
-                            &tma_B, nk, nBase + N_SUB, &mbar[sl]);
-            }
-        }
-
-        /* Drain all WGMMA — prevents ptxas C7515 across loop iterations */
-        wgmma_wait_group_0();
-
-        /* ---- Epilogue: SMEM-buffered coalesced stores ---- */
-        __syncthreads();
-
-        __nv_bfloat16* epi_smem = reinterpret_cast<__nv_bfloat16*>(smem);
-
-        #pragma unroll
-        for (int j = 0; j < 64; j++) {
-            int p4 = j / 2;
-            int h  = j % 2;
-            int row = wg_id * 64 + warp_in_wg * 16 + h * 8 + groupID;
-            int col = p4 * 8 + thread_in_group * 2;
-            int idx = 4 * p4 + 2 * h;
-            int off = row * EPI_N_STRIDE + col;
-            *reinterpret_cast<__nv_bfloat162*>(&epi_smem[off]) =
-                __floats2bfloat162_rn(acc[idx], acc[idx + 1]);
-        }
-        __syncthreads();
-
-        {
-            int warp_epi = tid / 32;
-            int lane_epi = tid % 32;
-            #pragma unroll
-            for (int r = 0; r < 16; r++) {
-                int row = mBase + warp_epi * 16 + r;
-                int col = nBase + lane_epi * 8;
-                if (row < M && col + 7 < N) {
-                    uint4 data = *reinterpret_cast<const uint4*>(
-                        &epi_smem[(warp_epi * 16 + r) * EPI_N_STRIDE + lane_epi * 8]);
-                    *reinterpret_cast<uint4*>(&C[row * N + col]) = data;
+                    /* Set expected TMA bytes and issue loads */
+                    mbarrier_arrive_expect_tx(&full_bar[qidx],
+                        A_STAGE_BYTES + B_STAGE_BYTES);
+                    int kc = kb * TILE_K;
+                    char* stage = smem + qidx * SMEM_STAGE;
+                    tma_load_2d(stage, &tma_A, kc, mBase, &full_bar[qidx]);
+                    tma_load_2d(stage + A_STAGE_BYTES,
+                                &tma_B, kc, nBase, &full_bar[qidx]);
+                    tma_load_2d(stage + A_STAGE_BYTES + B_SUB_BYTES,
+                                &tma_B, kc, nBase + N_SUB, &full_bar[qidx]);
                 }
             }
-        }
+        } else {
+            /* ==================== CONSUMER ==================== */
+            int consumer_id = wg_id - 1;  /* 0 or 1 */
+            int wg_a_offset = consumer_id * 64 * TILE_K * 2;
+            float acc[128];  /* Declared in consumer scope — keeps producer at 24 regs */
 
-        /* Re-init mbarriers for next tile (if any) */
+            /* ---- Prologue: first K-tile, scale_D=0 (overwrite) ---- */
+            {
+                mbarrier_wait_parity(&full_bar[0], 0);
+                char* stage = smem;
+                uint64_t da_base = make_gmma_desc(stage + wg_a_offset);
+                uint64_t db_base = make_gmma_desc(stage + A_STAGE_BYTES);
+                wgmma_tile_k64(acc, da_base, db_base,
+                    gmma_desc_advance(da_base, 2), gmma_desc_advance(db_base, 2),
+                    gmma_desc_advance(da_base, 4), gmma_desc_advance(db_base, 4),
+                    gmma_desc_advance(da_base, 6), gmma_desc_advance(db_base, 6),
+                    0);
+                wgmma_wait_group_0();
+                if (wg_tid == 0)
+                    mbarrier_arrive(&empty_bar[0]);
+            }
+
+            /* ---- Mainloop: K-tiles 1..numKTiles-1, scale_D=1 ---- */
+            for (int kb = 1; kb < numKTiles; kb++) {
+                int qidx = kb % STAGES;
+                int phase = (kb / STAGES) & 1;
+
+                mbarrier_wait_parity(&full_bar[qidx], phase);
+
+                char* stage = smem + qidx * SMEM_STAGE;
+                uint64_t da_base = make_gmma_desc(stage + wg_a_offset);
+                uint64_t db_base = make_gmma_desc(stage + A_STAGE_BYTES);
+                wgmma_tile_k64(acc, da_base, db_base,
+                    gmma_desc_advance(da_base, 2), gmma_desc_advance(db_base, 2),
+                    gmma_desc_advance(da_base, 4), gmma_desc_advance(db_base, 4),
+                    gmma_desc_advance(da_base, 6), gmma_desc_advance(db_base, 6),
+                    1);
+                wgmma_wait_group_0();
+                if (wg_tid == 0)
+                    mbarrier_arrive(&empty_bar[qidx]);
+            }
+
+            /* ---- Epilogue: SMEM-buffered coalesced stores ----
+             * 256 consumer threads (WG1+WG2) cooperate to write 128×256 output.
+             * Step 1: each consumer writes its 64 rows of fragments to SMEM.
+             * Step 2: bar.sync consumer threads (256 of 384).
+             * Step 3: coalesced 128-bit stores from SMEM to GMEM. */
+
+            __nv_bfloat16* epi_smem = reinterpret_cast<__nv_bfloat16*>(smem);
+
+            /* Step 1: Write F32 → BF16 fragments to padded SMEM */
+            #pragma unroll
+            for (int j = 0; j < 64; j++) {
+                int p4 = j / 2;
+                int h  = j % 2;
+                int row = consumer_id * 64 + warp_in_wg * 16 + h * 8 + groupID;
+                int col = p4 * 8 + thread_in_group * 2;
+                int idx = 4 * p4 + 2 * h;
+                int off = row * EPI_N_STRIDE + col;
+                *reinterpret_cast<__nv_bfloat162*>(&epi_smem[off]) =
+                    __floats2bfloat162_rn(acc[idx], acc[idx + 1]);
+            }
+
+            /* Step 2: Sync 256 consumer threads (bar.sync 1 with 256 threads) */
+            asm volatile("bar.sync 1, 256;\n" ::: "memory");
+
+            /* Step 3: Coalesced 128-bit stores.
+             * 256 consumer threads: 8 warps × 16 rows × 32 threads per row. */
+            {
+                int consumer_tid = tid - WG_SIZE;  /* 0..255 */
+                int warp_epi = consumer_tid / 32;  /* 0..7 */
+                int lane_epi = consumer_tid % 32;  /* 0..31 */
+                #pragma unroll
+                for (int r = 0; r < 16; r++) {
+                    int row = mBase + warp_epi * 16 + r;
+                    int col = nBase + lane_epi * 8;
+                    if (row < M && col + 7 < N) {
+                        uint4 data = *reinterpret_cast<const uint4*>(
+                            &epi_smem[(warp_epi * 16 + r) * EPI_N_STRIDE + lane_epi * 8]);
+                        *reinterpret_cast<uint4*>(&C[row * N + col]) = data;
+                    }
+                }
+            }
+        } /* end consumer */
+
+        /* Tile boundary: sync ALL 384 threads.
+         * Ensures epilogue SMEM writes complete before producer reloads. */
+        __syncthreads();
+
+        /* Re-init barriers for next tile */
         if (tileIdx + gridDim.x < totalTiles) {
-            __syncthreads();
             if (tid == 0) {
                 for (int s = 0; s < STAGES; s++) {
-                    mbarrier_inval(&mbar[s]);
-                    mbarrier_init(&mbar[s], 1);
+                    mbarrier_inval(&full_bar[s]);
+                    mbarrier_inval(&empty_bar[s]);
+                    mbarrier_init(&full_bar[s], 1);
+                    mbarrier_init(&empty_bar[s], NUM_CONSUMERS);
                 }
             }
             __syncthreads();
+            /* Consumers re-signal empty for next tile */
+            if (wg_id > 0 && wg_tid == 0) {
+                for (int s = 0; s < STAGES; s++)
+                    mbarrier_arrive(&empty_bar[s]);
+            }
         }
     } /* end persistent tile loop */
 }

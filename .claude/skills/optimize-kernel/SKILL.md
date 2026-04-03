@@ -191,20 +191,34 @@ Use web search for **grounded, verifiable** information:
 reproducible benchmarks > blog posts > forum posts. Discard any advice that
 lacks measurable evidence or conflicts with official documentation.
 
-#### 2e. Study Previous Implementations
+#### 2e. Study Previous Implementations and Results
 
-Use `git log` to find earlier versions of the generated code:
-```bash
-git log --oneline --all -- data/generated/{arch}/{kernel}/generated.cu
-```
+Two key sources of institutional knowledge beyond docs and profiles:
 
-Read previous versions for ideas:
-```bash
-git show <commit>:data/generated/{arch}/{kernel}/generated.cu
-```
+**Previous implementations** — compare different implementations of the same
+kernel to understand what techniques each uses:
+- Compare CuTe DSL reference (`data/fixtures/{arch}/{kernel}/cutedsl.py`) vs
+  hand-written CUDA (`data/generated/{arch}/{kernel}/generated.cu`) — what
+  instructions, tile sizes, and pipeline strategies does each use?
+- Use `git log` to find earlier versions of the generated code:
+  ```bash
+  git log --oneline --all -- data/generated/{arch}/{kernel}/generated.cu
+  ```
+- Read previous versions for ideas:
+  ```bash
+  git show <commit>:data/generated/{arch}/{kernel}/generated.cu
+  ```
 
-Also check commit messages and result files for documented insights from
-previous optimization attempts.
+**Previous results** — the `results/{arch}/{gpu_name}/{kernel}/` folder is a
+knowledge base of past optimization attempts. Each results file documents:
+- What was tried and why
+- NCU profiling data before/after
+- What worked, what didn't, and root cause analysis
+- Architectural insights discovered during optimization
+
+Always read ALL results files for the target kernel before brainstorming.
+Failed experiments are especially valuable — they document constraints and
+dead ends that should not be revisited.
 
 ### Phase 3: Brainstorm Ideas
 

@@ -10,18 +10,18 @@
  * Compute: wgmma.mma_async.sync.aligned.m64n64k16 RS variant
  * Pipeline: 2-stage double-buffered K/V with mbarrier
  *
- * Tile sizes: BLOCK_Q=64, BLOCK_KV=64, DIM=128
+ * Tile sizes: BLOCK_Q=64, BLOCK_KV=128, DIM=128
  *
  * SMEM layout (split-DIM: each [DIM=128,BLOCK] tile → two [64,BLOCK] halves):
- *   Q_lo:    [64, 64] =  8KB at SMEM + 0
- *   Q_hi:    [64, 64] =  8KB at SMEM + 8KB
+ *   Q_lo:    [64, 64]  =  8KB at SMEM + 0
+ *   Q_hi:    [64, 64]  =  8KB at SMEM + 8KB
  *   K stage s:
- *     K_lo:  [64, 64] =  8KB at SMEM + 16KB + s*16KB
- *     K_hi:  [64, 64] =  8KB at SMEM + 16KB + s*16KB + 8KB
+ *     K_lo:  [64, 128] = 16KB at SMEM + 16KB + s*32KB
+ *     K_hi:  [64, 128] = 16KB at SMEM + 16KB + s*32KB + 16KB
  *   V stage s:
- *     V_lo:  [64, 64] =  8KB at SMEM + 48KB + s*16KB
- *     V_hi:  [64, 64] =  8KB at SMEM + 48KB + s*16KB + 8KB
- *   Barriers: 9 × 8B aligned at 80KB
+ *     V_lo:  [64, 128] = 16KB at SMEM + 80KB + s*32KB
+ *     V_hi:  [64, 128] = 16KB at SMEM + 80KB + s*32KB + 16KB
+ *   Barriers: 9 × 8B aligned at 144KB
  *
  * TMA uses boxDim=[64, BLOCK] with SWIZZLE_128B.
  * Each row = 64 bf16 = 128 bytes = exactly one 128B swizzle unit.
@@ -47,33 +47,39 @@
 
 static constexpr int WARP_SIZE   = 32;
 static constexpr int BLOCK_Q     = 64;
-static constexpr int BLOCK_KV    = 64;
+static constexpr int BLOCK_KV    = 128;
 static constexpr int DIM_CONST   = 128;
 static constexpr int HALF_DIM    = 64;
 static constexpr int NUM_STAGES  = 2;
 static constexpr int TB_SIZE     = 256;   /* 2 warp groups */
 static constexpr int WG_SIZE     = 128;   /* threads per warp group */
 
-/* Half-tile: [64 cols, BLOCK rows] in SMEM with 128B swizzle.
- * Each row = 64 bf16 = 128 bytes. */
-static constexpr int HALF_TILE_BYTES = HALF_DIM * BLOCK_KV * 2;  /* 8192 = 8KB */
-static constexpr int FULL_TILE_BYTES = 2 * HALF_TILE_BYTES;      /* 16384 = 16KB */
-
 /* Row stride within a half-tile: 64 bf16 = 128 bytes */
 static constexpr int HALF_ROW_STRIDE = HALF_DIM * 2;  /* 128 bytes */
 
+/* Q half-tile: [64 cols, BLOCK_Q rows] = [64, 64] = 8KB */
+static constexpr int Q_HALF_TILE_BYTES = HALF_DIM * BLOCK_Q * 2;   /* 8192 = 8KB */
+static constexpr int Q_FULL_TILE_BYTES = 2 * Q_HALF_TILE_BYTES;    /* 16384 = 16KB */
+
+/* K/V half-tile: [64 cols, BLOCK_KV rows] = [64, 128] = 16KB */
+static constexpr int KV_HALF_TILE_BYTES = HALF_DIM * BLOCK_KV * 2; /* 16384 = 16KB */
+static constexpr int KV_FULL_TILE_BYTES = 2 * KV_HALF_TILE_BYTES;  /* 32768 = 32KB */
+
+/* Offset to second 64 rows within a KV half-tile (for PV GEMM split) */
+static constexpr int KV_ROW_OFFSET_64  = 64 * HALF_ROW_STRIDE;    /* 8192 bytes */
+
 /* SMEM layout offsets */
-static constexpr int SMEM_Q_OFFSET   = 0;                                            /* 0 */
-static constexpr int SMEM_K_OFFSET   = FULL_TILE_BYTES;                              /* 16KB */
-static constexpr int SMEM_V_OFFSET   = SMEM_K_OFFSET + NUM_STAGES * FULL_TILE_BYTES; /* 48KB */
-static constexpr int SMEM_BAR_OFFSET = SMEM_V_OFFSET + NUM_STAGES * FULL_TILE_BYTES; /* 80KB */
+static constexpr int SMEM_Q_OFFSET   = 0;                                              /* 0 */
+static constexpr int SMEM_K_OFFSET   = Q_FULL_TILE_BYTES;                              /* 16KB */
+static constexpr int SMEM_V_OFFSET   = SMEM_K_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 80KB */
+static constexpr int SMEM_BAR_OFFSET = SMEM_V_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 144KB */
 
 /*
  * Barrier layout (9 barriers, 8 bytes each):
- *   0: Q_full        (producer arrives with tx=FULL_TILE_BYTES, consumer waits)
- *   1: K_full[0]     (producer arrives with tx=FULL_TILE_BYTES, consumer waits)
+ *   0: Q_full        (producer arrives with tx=Q_FULL_TILE_BYTES, consumer waits)
+ *   1: K_full[0]     (producer arrives with tx=KV_FULL_TILE_BYTES, consumer waits)
  *   2: K_full[1]
- *   3: V_full[0]     (producer arrives with tx=FULL_TILE_BYTES, consumer waits)
+ *   3: V_full[0]     (producer arrives with tx=KV_FULL_TILE_BYTES, consumer waits)
  *   4: V_full[1]
  *   5: K_empty[0]    (consumer arrives, producer waits)
  *   6: K_empty[1]
@@ -405,14 +411,14 @@ void producer_warp_group(
 
     /* Load Q tile via TMA: 2 half-loads */
     if (is_leader) {
-        mbarrier_arrive_expect_tx(&barriers[BAR_Q_FULL], FULL_TILE_BYTES);
+        mbarrier_arrive_expect_tx(&barriers[BAR_Q_FULL], Q_FULL_TILE_BYTES);
 
         /* Q_lo: columns [0:64) */
         tma_load_2d(smem_base + SMEM_Q_OFFSET,
                     tma_Q, coord_head, q_coord_seq,
                     &barriers[BAR_Q_FULL]);
         /* Q_hi: columns [64:128) */
-        tma_load_2d(smem_base + SMEM_Q_OFFSET + HALF_TILE_BYTES,
+        tma_load_2d(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES,
                     tma_Q, coord_head + HALF_DIM, q_coord_seq,
                     &barriers[BAR_Q_FULL]);
     }
@@ -430,14 +436,14 @@ void producer_warp_group(
 
         /* Load K tile: 2 half-loads */
         if (is_leader) {
-            mbarrier_arrive_expect_tx(&barriers[BAR_K_FULL + stage], FULL_TILE_BYTES);
+            mbarrier_arrive_expect_tx(&barriers[BAR_K_FULL + stage], KV_FULL_TILE_BYTES);
 
             /* K_lo: columns [0:64) */
-            tma_load_2d(smem_base + SMEM_K_OFFSET + stage * FULL_TILE_BYTES,
+            tma_load_2d(smem_base + SMEM_K_OFFSET + stage * KV_FULL_TILE_BYTES,
                         tma_K, coord_head, kv_coord_seq,
                         &barriers[BAR_K_FULL + stage]);
             /* K_hi: columns [64:128) */
-            tma_load_2d(smem_base + SMEM_K_OFFSET + stage * FULL_TILE_BYTES + HALF_TILE_BYTES,
+            tma_load_2d(smem_base + SMEM_K_OFFSET + stage * KV_FULL_TILE_BYTES + KV_HALF_TILE_BYTES,
                         tma_K, coord_head + HALF_DIM, kv_coord_seq,
                         &barriers[BAR_K_FULL + stage]);
         }
@@ -450,14 +456,14 @@ void producer_warp_group(
 
         /* Load V tile: 2 half-loads */
         if (is_leader) {
-            mbarrier_arrive_expect_tx(&barriers[BAR_V_FULL + stage], FULL_TILE_BYTES);
+            mbarrier_arrive_expect_tx(&barriers[BAR_V_FULL + stage], KV_FULL_TILE_BYTES);
 
             /* V_lo: columns [0:64) */
-            tma_load_2d(smem_base + SMEM_V_OFFSET + stage * FULL_TILE_BYTES,
+            tma_load_2d(smem_base + SMEM_V_OFFSET + stage * KV_FULL_TILE_BYTES,
                         tma_V, coord_head, kv_coord_seq,
                         &barriers[BAR_V_FULL + stage]);
             /* V_hi: columns [64:128) */
-            tma_load_2d(smem_base + SMEM_V_OFFSET + stage * FULL_TILE_BYTES + HALF_TILE_BYTES,
+            tma_load_2d(smem_base + SMEM_V_OFFSET + stage * KV_FULL_TILE_BYTES + KV_HALF_TILE_BYTES,
                         tma_V, coord_head + HALF_DIM, kv_coord_seq,
                         &barriers[BAR_V_FULL + stage]);
         }
@@ -472,13 +478,16 @@ void producer_warp_group(
  *  K, V from SMEM descriptors (B operand).
  *
  *  Split-DIM approach:
- *    QK: S[64,64] = Q[64,128] @ K^T[128,64]
- *      = Q_lo[64,64] @ K_lo^T[64,64] + Q_hi[64,64] @ K_hi^T[64,64]
- *      4 k-steps from lo half + 4 k-steps from hi half = 8 total
+ *    QK: S[64,128] = Q[64,128] @ K^T[128,128]
+ *      Two n-blocks (S_lo for KV 0-63, S_hi for KV 64-127).
+ *      Each n-block = 8 k-steps (4 from Q_lo×K_lo + 4 from Q_hi×K_hi).
+ *      K descriptor offset by 64 rows (8192 bytes) for second n-block.
  *
- *    PV: O[64,128] = P[64,64] @ V[64,128]
- *      = [P @ V_lo, P @ V_hi] where each is [64,64]
- *      4 k-steps each
+ *    PV: O[64,128] = P[64,128] @ V[128,128]
+ *      = [P @ V_lo, P @ V_hi] where each V half is [128,64].
+ *      Each V half split into top[64,64] + bot[64,64] (KV rows 0-63 and 64-127).
+ *      4 k-steps per KV-half, 2 KV-halves per DIM-half, 2 DIM-halves = 16 wgmma calls.
+ *      Uses tnspB=0 with column-advance (ks*32), bot offset = 8192 bytes.
  * ====================================================================== */
 
 __device__ __forceinline__
@@ -530,7 +539,7 @@ void consumer_warp_group(
 
     /* Q SMEM base addresses for lo and hi halves */
     uint32_t q_lo_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET);
-    uint32_t q_hi_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET + HALF_TILE_BYTES);
+    uint32_t q_hi_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES);
 
     /* ================================================================
      * Main KV loop with INTRA-WARPGROUP OVERLAP
@@ -547,17 +556,29 @@ void consumer_warp_group(
      * ================================================================ */
 
     /* Saved P registers for PV of the *previous* KV block */
-    uint32_t saved_p_regs[4][4];  /* [ks][4] for 4 k-steps */
+    uint32_t saved_p_regs[8][4];  /* [ks][4] for 8 k-steps (128 KV positions / 16) */
     int prev_v_stage = 0;
     int prev_v_phase = 0;
 
-    /* Helper lambdas (inlined by compiler) */
+    /* Helper macros (inlined by compiler) */
+
+    /*
+     * QK GEMM: S[m64, n128] = Q[m64, k128] @ K^T[k128, n128]
+     *
+     * Produces two n-blocks of 64:
+     *   S_lo[32]: KV positions 0..63  (K rows 0..63)
+     *   S_hi[32]: KV positions 64..127 (K rows 64..127)
+     *
+     * Each n-block: 8 k-steps (4 from Q_lo x K_dim_lo, 4 from Q_hi x K_dim_hi).
+     * K descriptor for second n-block is offset by 64 rows = 8192 bytes within
+     * each DIM half-tile.
+     */
     #define DO_QK_GEMM(kv_id_arg, stage_arg, is_first)                          \
     {                                                                            \
-        float* S_dst = S_acc;                                                    \
         uint32_t kl = __cvta_generic_to_shared(                                  \
-            smem_base + SMEM_K_OFFSET + (stage_arg) * FULL_TILE_BYTES);          \
-        uint32_t kh = kl + HALF_TILE_BYTES;                                      \
+            smem_base + SMEM_K_OFFSET + (stage_arg) * KV_FULL_TILE_BYTES);      \
+        uint32_t kh = kl + KV_HALF_TILE_BYTES;                                  \
+        /* n-block 0: S_lo — K rows 0..63 */                                    \
         wgmma_fence();                                                           \
         for (int kg = 0; kg < 8; kg++) {                                         \
             int khh = kg % 4;                                                    \
@@ -571,33 +592,84 @@ void consumer_warp_group(
             uint32_t ksk = ks + khh * 32;                                        \
             uint64_t kd = make_wgmma_desc(ksk, 0);                              \
             if (kg == 0)                                                         \
-                wgmma_m64n64k16_new(S_dst, qr, kd);                             \
+                wgmma_m64n64k16_new(S_lo, qr, kd);                              \
             else                                                                 \
-                wgmma_m64n64k16_acc(S_dst, qr, kd);                             \
+                wgmma_m64n64k16_acc(S_lo, qr, kd);                              \
+        }                                                                        \
+        /* n-block 1: S_hi — K rows 64..127 (offset 64*128=8192 bytes) */       \
+        for (int kg = 0; kg < 8; kg++) {                                         \
+            int khh = kg % 4;                                                    \
+            uint32_t qb = (kg < 4) ? q_lo_smem : q_hi_smem;                     \
+            uint32_t r = warp_in_wg * 16 + (lane_id % 16);                      \
+            uint32_t lc = khh * 2 + (lane_id / 16);                             \
+            uint32_t pc = lc ^ (r & 7);                                          \
+            uint32_t qa = qb + r * HALF_ROW_STRIDE + pc * 16;                   \
+            uint32_t qr[4]; ldmatrix_x4(qr, qa);                                \
+            uint32_t ks = (kg < 4) ? kl : kh;                                   \
+            uint32_t ksk = ks + KV_ROW_OFFSET_64 + khh * 32;                   \
+            uint64_t kd = make_wgmma_desc(ksk, 0);                              \
+            if (kg == 0)                                                         \
+                wgmma_m64n64k16_new(S_hi, qr, kd);                              \
+            else                                                                 \
+                wgmma_m64n64k16_acc(S_hi, qr, kd);                              \
         }                                                                        \
         wgmma_commit_group();                                                    \
     }
 
+    /*
+     * PV GEMM: O[m64, n128] = P[m64, k128] @ V[k128, n128]
+     *
+     * V is stored as two DIM-halves: V_lo[128, 64], V_hi[128, 64].
+     * Each DIM-half has 128 rows (KV positions) and 64 cols (DIM values).
+     *
+     * With tnspB=0: K = columns (DIM), N = rows (KV positions).
+     * Each wgmma m64n64k16 reads 16 columns (k-step) from 64 rows.
+     * But BLOCK_KV=128 > 64 rows per wgmma, so we split into two KV halves:
+     *   - KV rows 0-63 (top):   descriptor at vl + ks*32, P_regs[0..3]
+     *   - KV rows 64-127 (bot): descriptor at vl + 64*128 + ks*32, P_regs[4..7]
+     * 4 k-steps per KV-half = 8 k-steps total per DIM-half.
+     * Two DIM-halves (V_lo, V_hi) for full DIM=128 output.
+     */
     #define DO_PV_GEMM(v_stage_arg)                                              \
     {                                                                            \
         uint32_t vl = __cvta_generic_to_shared(                                  \
-            smem_base + SMEM_V_OFFSET + (v_stage_arg) * FULL_TILE_BYTES);        \
-        uint32_t vh = vl + HALF_TILE_BYTES;                                      \
+            smem_base + SMEM_V_OFFSET + (v_stage_arg) * KV_FULL_TILE_BYTES);    \
+        uint32_t vh = vl + KV_HALF_TILE_BYTES;                                  \
         wgmma_fence();                                                           \
+        /* O_lo: DIM cols 0-63 */                                               \
+        /* KV rows 0-63 (P_regs 0-3) */                                        \
         for (int ks = 0; ks < 4; ks++) {                                         \
-            uint64_t vd_lo = make_wgmma_desc(vl + ks * 32, 0);                  \
-            wgmma_m64n64k16_acc_nt(O_lo, saved_p_regs[ks], vd_lo);             \
+            uint64_t vd = make_wgmma_desc(vl + ks * 32, 0);                    \
+            wgmma_m64n64k16_acc_nt(O_lo, saved_p_regs[ks], vd);               \
         }                                                                        \
+        /* KV rows 64-127 (P_regs 4-7) */                                      \
         for (int ks = 0; ks < 4; ks++) {                                         \
-            uint64_t vd_hi = make_wgmma_desc(vh + ks * 32, 0);                  \
-            wgmma_m64n64k16_acc_nt(O_hi, saved_p_regs[ks], vd_hi);             \
+            uint64_t vd = make_wgmma_desc(vl + KV_ROW_OFFSET_64 + ks * 32, 0); \
+            wgmma_m64n64k16_acc_nt(O_lo, saved_p_regs[ks + 4], vd);           \
+        }                                                                        \
+        /* O_hi: DIM cols 64-127 */                                             \
+        /* KV rows 0-63 (P_regs 0-3) */                                        \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            uint64_t vd = make_wgmma_desc(vh + ks * 32, 0);                    \
+            wgmma_m64n64k16_acc_nt(O_hi, saved_p_regs[ks], vd);               \
+        }                                                                        \
+        /* KV rows 64-127 (P_regs 4-7) */                                      \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            uint64_t vd = make_wgmma_desc(vh + KV_ROW_OFFSET_64 + ks * 32, 0); \
+            wgmma_m64n64k16_acc_nt(O_hi, saved_p_regs[ks + 4], vd);           \
         }                                                                        \
         wgmma_commit_group();                                                    \
     }
 
+    /*
+     * Softmax over S_lo[32] + S_hi[32] = 128 KV positions.
+     * Each thread owns 2 rows. Per row, 16 groups × 2 values = 32 values
+     * (8 groups in S_lo + 8 groups in S_hi).
+     */
     #define DO_SOFTMAX(kv_id_arg, is_first)                                      \
     {                                                                            \
-        for (int i = 0; i < 32; i++) S_acc[i] *= softmax_scale_log2;            \
+        for (int i = 0; i < 32; i++) S_lo[i] *= softmax_scale_log2;            \
+        for (int i = 0; i < 32; i++) S_hi[i] *= softmax_scale_log2;            \
         if (is_causal) {                                                         \
             int r0 = q_block_id*BLOCK_Q + warp_in_wg*16 + (lane_id/4);         \
             int r1 = r0 + 8;                                                    \
@@ -605,16 +677,28 @@ void consumer_warp_group(
             for (int g = 0; g < 8; g++) {                                        \
                 int c0 = kvs + g*8 + (lane_id%4)*2;                             \
                 int c1 = c0 + 1;                                                \
-                if (c0 > r0) S_acc[g*4+0] = -FLT_MAX;                          \
-                if (c1 > r0) S_acc[g*4+1] = -FLT_MAX;                          \
-                if (c0 > r1) S_acc[g*4+2] = -FLT_MAX;                          \
-                if (c1 > r1) S_acc[g*4+3] = -FLT_MAX;                          \
+                if (c0 > r0) S_lo[g*4+0] = -FLT_MAX;                           \
+                if (c1 > r0) S_lo[g*4+1] = -FLT_MAX;                           \
+                if (c0 > r1) S_lo[g*4+2] = -FLT_MAX;                           \
+                if (c1 > r1) S_lo[g*4+3] = -FLT_MAX;                           \
+            }                                                                    \
+            for (int g = 0; g < 8; g++) {                                        \
+                int c0 = kvs + 64 + g*8 + (lane_id%4)*2;                        \
+                int c1 = c0 + 1;                                                \
+                if (c0 > r0) S_hi[g*4+0] = -FLT_MAX;                           \
+                if (c1 > r0) S_hi[g*4+1] = -FLT_MAX;                           \
+                if (c0 > r1) S_hi[g*4+2] = -FLT_MAX;                           \
+                if (c1 > r1) S_hi[g*4+3] = -FLT_MAX;                           \
             }                                                                    \
         }                                                                        \
         float nm[2] = {-FLT_MAX, -FLT_MAX};                                    \
         for (int g = 0; g < 8; g++) {                                            \
-            nm[0] = fmaxf(nm[0], fmaxf(S_acc[g*4+0], S_acc[g*4+1]));           \
-            nm[1] = fmaxf(nm[1], fmaxf(S_acc[g*4+2], S_acc[g*4+3]));           \
+            nm[0] = fmaxf(nm[0], fmaxf(S_lo[g*4+0], S_lo[g*4+1]));            \
+            nm[1] = fmaxf(nm[1], fmaxf(S_lo[g*4+2], S_lo[g*4+3]));            \
+        }                                                                        \
+        for (int g = 0; g < 8; g++) {                                            \
+            nm[0] = fmaxf(nm[0], fmaxf(S_hi[g*4+0], S_hi[g*4+1]));            \
+            nm[1] = fmaxf(nm[1], fmaxf(S_hi[g*4+2], S_hi[g*4+3]));            \
         }                                                                        \
         nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 1));           \
         nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 2));           \
@@ -635,12 +719,20 @@ void consumer_warp_group(
         rowmax[0] = nm[0]; rowmax[1] = nm[1];                                   \
         float ns[2] = {0.0f, 0.0f};                                             \
         for (int g = 0; g < 8; g++) {                                            \
-            S_acc[g*4+0] = fast_exp2f(S_acc[g*4+0] - rowmax[0]);               \
-            S_acc[g*4+1] = fast_exp2f(S_acc[g*4+1] - rowmax[0]);               \
-            S_acc[g*4+2] = fast_exp2f(S_acc[g*4+2] - rowmax[1]);               \
-            S_acc[g*4+3] = fast_exp2f(S_acc[g*4+3] - rowmax[1]);               \
-            ns[0] += S_acc[g*4+0] + S_acc[g*4+1];                              \
-            ns[1] += S_acc[g*4+2] + S_acc[g*4+3];                              \
+            S_lo[g*4+0] = fast_exp2f(S_lo[g*4+0] - rowmax[0]);                \
+            S_lo[g*4+1] = fast_exp2f(S_lo[g*4+1] - rowmax[0]);                \
+            S_lo[g*4+2] = fast_exp2f(S_lo[g*4+2] - rowmax[1]);                \
+            S_lo[g*4+3] = fast_exp2f(S_lo[g*4+3] - rowmax[1]);                \
+            ns[0] += S_lo[g*4+0] + S_lo[g*4+1];                               \
+            ns[1] += S_lo[g*4+2] + S_lo[g*4+3];                               \
+        }                                                                        \
+        for (int g = 0; g < 8; g++) {                                            \
+            S_hi[g*4+0] = fast_exp2f(S_hi[g*4+0] - rowmax[0]);                \
+            S_hi[g*4+1] = fast_exp2f(S_hi[g*4+1] - rowmax[0]);                \
+            S_hi[g*4+2] = fast_exp2f(S_hi[g*4+2] - rowmax[1]);                \
+            S_hi[g*4+3] = fast_exp2f(S_hi[g*4+3] - rowmax[1]);                \
+            ns[0] += S_hi[g*4+0] + S_hi[g*4+1];                               \
+            ns[1] += S_hi[g*4+2] + S_hi[g*4+3];                               \
         }                                                                        \
         ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 1);                         \
         ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 2);                         \
@@ -655,7 +747,8 @@ void consumer_warp_group(
      * where O is being written by PV GEMM in tensor cores. */
     #define DO_SOFTMAX_NO_RESCALE(kv_id_arg, is_first)                           \
     {                                                                            \
-        for (int i = 0; i < 32; i++) S_acc[i] *= softmax_scale_log2;            \
+        for (int i = 0; i < 32; i++) S_lo[i] *= softmax_scale_log2;            \
+        for (int i = 0; i < 32; i++) S_hi[i] *= softmax_scale_log2;            \
         if (is_causal) {                                                         \
             int r0 = q_block_id*BLOCK_Q + warp_in_wg*16 + (lane_id/4);         \
             int r1 = r0 + 8;                                                    \
@@ -663,16 +756,28 @@ void consumer_warp_group(
             for (int g = 0; g < 8; g++) {                                        \
                 int c0 = kvs + g*8 + (lane_id%4)*2;                             \
                 int c1 = c0 + 1;                                                \
-                if (c0 > r0) S_acc[g*4+0] = -FLT_MAX;                          \
-                if (c1 > r0) S_acc[g*4+1] = -FLT_MAX;                          \
-                if (c0 > r1) S_acc[g*4+2] = -FLT_MAX;                          \
-                if (c1 > r1) S_acc[g*4+3] = -FLT_MAX;                          \
+                if (c0 > r0) S_lo[g*4+0] = -FLT_MAX;                           \
+                if (c1 > r0) S_lo[g*4+1] = -FLT_MAX;                           \
+                if (c0 > r1) S_lo[g*4+2] = -FLT_MAX;                           \
+                if (c1 > r1) S_lo[g*4+3] = -FLT_MAX;                           \
+            }                                                                    \
+            for (int g = 0; g < 8; g++) {                                        \
+                int c0 = kvs + 64 + g*8 + (lane_id%4)*2;                        \
+                int c1 = c0 + 1;                                                \
+                if (c0 > r0) S_hi[g*4+0] = -FLT_MAX;                           \
+                if (c1 > r0) S_hi[g*4+1] = -FLT_MAX;                           \
+                if (c0 > r1) S_hi[g*4+2] = -FLT_MAX;                           \
+                if (c1 > r1) S_hi[g*4+3] = -FLT_MAX;                           \
             }                                                                    \
         }                                                                        \
         float nm[2] = {-FLT_MAX, -FLT_MAX};                                    \
         for (int g = 0; g < 8; g++) {                                            \
-            nm[0] = fmaxf(nm[0], fmaxf(S_acc[g*4+0], S_acc[g*4+1]));           \
-            nm[1] = fmaxf(nm[1], fmaxf(S_acc[g*4+2], S_acc[g*4+3]));           \
+            nm[0] = fmaxf(nm[0], fmaxf(S_lo[g*4+0], S_lo[g*4+1]));            \
+            nm[1] = fmaxf(nm[1], fmaxf(S_lo[g*4+2], S_lo[g*4+3]));            \
+        }                                                                        \
+        for (int g = 0; g < 8; g++) {                                            \
+            nm[0] = fmaxf(nm[0], fmaxf(S_hi[g*4+0], S_hi[g*4+1]));            \
+            nm[1] = fmaxf(nm[1], fmaxf(S_hi[g*4+2], S_hi[g*4+3]));            \
         }                                                                        \
         nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 1));           \
         nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 2));           \
@@ -686,12 +791,20 @@ void consumer_warp_group(
         rowmax[0] = nm[0]; rowmax[1] = nm[1];                                   \
         float ns[2] = {0.0f, 0.0f};                                             \
         for (int g = 0; g < 8; g++) {                                            \
-            S_acc[g*4+0] = fast_exp2f(S_acc[g*4+0] - rowmax[0]);               \
-            S_acc[g*4+1] = fast_exp2f(S_acc[g*4+1] - rowmax[0]);               \
-            S_acc[g*4+2] = fast_exp2f(S_acc[g*4+2] - rowmax[1]);               \
-            S_acc[g*4+3] = fast_exp2f(S_acc[g*4+3] - rowmax[1]);               \
-            ns[0] += S_acc[g*4+0] + S_acc[g*4+1];                              \
-            ns[1] += S_acc[g*4+2] + S_acc[g*4+3];                              \
+            S_lo[g*4+0] = fast_exp2f(S_lo[g*4+0] - rowmax[0]);                \
+            S_lo[g*4+1] = fast_exp2f(S_lo[g*4+1] - rowmax[0]);                \
+            S_lo[g*4+2] = fast_exp2f(S_lo[g*4+2] - rowmax[1]);                \
+            S_lo[g*4+3] = fast_exp2f(S_lo[g*4+3] - rowmax[1]);                \
+            ns[0] += S_lo[g*4+0] + S_lo[g*4+1];                               \
+            ns[1] += S_lo[g*4+2] + S_lo[g*4+3];                               \
+        }                                                                        \
+        for (int g = 0; g < 8; g++) {                                            \
+            S_hi[g*4+0] = fast_exp2f(S_hi[g*4+0] - rowmax[0]);                \
+            S_hi[g*4+1] = fast_exp2f(S_hi[g*4+1] - rowmax[0]);                \
+            S_hi[g*4+2] = fast_exp2f(S_hi[g*4+2] - rowmax[1]);                \
+            S_hi[g*4+3] = fast_exp2f(S_hi[g*4+3] - rowmax[1]);                \
+            ns[0] += S_hi[g*4+0] + S_hi[g*4+1];                               \
+            ns[1] += S_hi[g*4+2] + S_hi[g*4+3];                               \
         }                                                                        \
         ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 1);                         \
         ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 2);                         \
@@ -701,23 +814,42 @@ void consumer_warp_group(
         rowsumexp[1] = rowsumexp[1] * rs[1] + ns[1];                            \
     }
 
+    /*
+     * Pack P registers for wgmma RS A operand.
+     * 8 k-steps for K_PV = BLOCK_KV = 128:
+     *   ks 0-3: from S_lo groups 0-7 (KV positions 0-63)
+     *   ks 4-7: from S_hi groups 0-7 (KV positions 64-127)
+     */
     #define PACK_P_REGS()                                                        \
     {                                                                            \
         for (int ks = 0; ks < 4; ks++) {                                         \
             nv_bfloat162 t;                                                      \
             int g0 = ks*2, g1 = ks*2+1;                                         \
-            t = __float22bfloat162_rn({S_acc[g0*4+0], S_acc[g0*4+1]});          \
+            t = __float22bfloat162_rn({S_lo[g0*4+0], S_lo[g0*4+1]});           \
             saved_p_regs[ks][0] = reinterpret_cast<uint32_t&>(t);               \
-            t = __float22bfloat162_rn({S_acc[g1*4+0], S_acc[g1*4+1]});          \
+            t = __float22bfloat162_rn({S_lo[g1*4+0], S_lo[g1*4+1]});           \
             saved_p_regs[ks][1] = reinterpret_cast<uint32_t&>(t);               \
-            t = __float22bfloat162_rn({S_acc[g0*4+2], S_acc[g0*4+3]});          \
+            t = __float22bfloat162_rn({S_lo[g0*4+2], S_lo[g0*4+3]});           \
             saved_p_regs[ks][2] = reinterpret_cast<uint32_t&>(t);               \
-            t = __float22bfloat162_rn({S_acc[g1*4+2], S_acc[g1*4+3]});          \
+            t = __float22bfloat162_rn({S_lo[g1*4+2], S_lo[g1*4+3]});           \
             saved_p_regs[ks][3] = reinterpret_cast<uint32_t&>(t);               \
+        }                                                                        \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            nv_bfloat162 t;                                                      \
+            int g0 = ks*2, g1 = ks*2+1;                                         \
+            t = __float22bfloat162_rn({S_hi[g0*4+0], S_hi[g0*4+1]});           \
+            saved_p_regs[ks+4][0] = reinterpret_cast<uint32_t&>(t);             \
+            t = __float22bfloat162_rn({S_hi[g1*4+0], S_hi[g1*4+1]});           \
+            saved_p_regs[ks+4][1] = reinterpret_cast<uint32_t&>(t);             \
+            t = __float22bfloat162_rn({S_hi[g0*4+2], S_hi[g0*4+3]});           \
+            saved_p_regs[ks+4][2] = reinterpret_cast<uint32_t&>(t);             \
+            t = __float22bfloat162_rn({S_hi[g1*4+2], S_hi[g1*4+3]});           \
+            saved_p_regs[ks+4][3] = reinterpret_cast<uint32_t&>(t);             \
         }                                                                        \
     }
 
-    float S_acc[32];
+    float S_lo[32];  /* QK output: KV positions 0..63 */
+    float S_hi[32];  /* QK output: KV positions 64..127 */
 
     /* === FIRST HALF-BLOCK: QK[0] + softmax, save P for later PV === */
     {
@@ -764,7 +896,7 @@ void consumer_warp_group(
         DO_PV_GEMM(prev_v_stage);
 
         /* Wait for QK to finish (group 1). PV (group 2) may still be running.
-         * S_acc is now readable. O_lo/O_hi are NOT readable (PV writing). */
+         * S_lo/S_hi are now readable. O_lo/O_hi are NOT readable (PV writing). */
         wgmma_wait_group_1();
 
         /* Release K[cur] */

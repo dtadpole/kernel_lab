@@ -246,8 +246,34 @@ Each arch folder contains kernels optimized for that SM version — **do not cop
 **CuTe DSL venv compatibility:**
 - The service venv (`~/.cuda_exec_service/.venv`) has `cuda-python==13.2.0` → requires CUDA 13.x driver.
 - h8_3 has driver 550.90.07 (CUDA 12.4) → CuTe DSL **fails** with `cudaErrorInsufficientDriver`.
-- Workaround: create a local venv with `cuda-bindings==12.8.0` + `nvidia-cutlass-dsl==4.4.2 --no-deps` + `torch==2.6.0+cu124`. Set `CUTE_DSL_ARCH=sm_90a`.
 - _one/_two have driver 595.45.04 (CUDA 13.2) → CuTe DSL works natively.
+
+**FA4 CuTe DSL venv on h8_3/h8_4 (driver 550.90.07):**
+
+A dedicated venv at `~/.fa4_venv` is required to run FA4 CuTe DSL on H100 hosts with CUDA 12.x drivers.
+
+Setup (requires internet — run on h8_3, then rsync to h8_4):
+```bash
+# Create venv
+python3.12 -m venv ~/.fa4_venv
+# Install compatible packages (order matters)
+~/.fa4_venv/bin/pip install torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+~/.fa4_venv/bin/pip install cuda-bindings==12.8.0
+~/.fa4_venv/bin/pip install nvidia-cutlass-dsl==4.4.2 --no-deps
+~/.fa4_venv/bin/pip install flash-attn-4>=4.0.0b5
+```
+
+Key constraints:
+- `cuda-bindings==12.8.0` (NOT `cuda-python==13.x` which requires CUDA 13 driver)
+- `nvidia-cutlass-dsl==4.4.2 --no-deps` (prevents pulling cuda-python 13.x)
+- `torch==2.6.0+cu124` (matches driver's CUDA 12.4)
+
+Usage:
+```bash
+CUDA_VISIBLE_DEVICES=4 CUTE_DSL_ARCH=sm_90a ~/.fa4_venv/bin/python cutedsl.py
+```
+
+Verified: 2026-04-03, h8_3 (devvm8490), GPU 4, FA4 CuTe DSL 397–750 TFLOPS on SM90.
 
 ### 9. GPU allocation on multi-GPU hosts (h8_3, h8_4)
 

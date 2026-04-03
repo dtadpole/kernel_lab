@@ -1,0 +1,20 @@
+# FA4 CuTe DSL venv — frozen versions for H100 (CUDA 12.x driver)
+# Created: 2026-04-03, verified on devvm8490 (H100 SXM5, driver 550.90.07)
+#
+# Install:
+#   pip install torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+#   pip install cuda-bindings==12.8.0
+#   pip install nvidia-cutlass-dsl==4.4.2 --no-deps
+#   pip install flash-attn-4==4.0.0b7
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=4 CUTE_DSL_ARCH=sm_90a ~/.fa4_venv/bin/python cutedsl.py
+#
+# NOTE: nvidia-cutlass-dsl MUST be installed with --no-deps to prevent
+#       pulling cuda-python>=13.2.0 which requires CUDA 13.x driver.
+
+torch==2.6.0+cu124
+cuda-bindings==12.8.0
+nvidia-cutlass-dsl==4.4.2
+nvidia-cutlass-dsl-libs-base==4.4.2
+flash-attn-4==4.0.0b7

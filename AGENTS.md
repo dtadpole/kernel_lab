@@ -283,21 +283,23 @@ Worktrees provide isolated copies of the repo for parallel or experimental work 
 
 - **Location:** all worktrees live under `.worktrees/` in the project root
 - **`.worktrees/`** is git-ignored — ephemeral working copies, not project data
-- **Branch naming:** `worktree-<name>` (e.g. `worktree-fa4-optimize`, `worktree-matmul-tiling`)
-- **Directory naming:** `.worktrees/<name>` — the `<name>` matches the branch suffix
+- **Branch naming:** `worktree-<host>-<name>` — include the host short name so branches stay unique across machines (e.g. `worktree-h8_3-matmul`, `worktree-h8_4-fa4-optimize`)
+- **Directory naming:** `.worktrees/<name>` — local directory does not need the host prefix (the branch carries it)
+
+Host short names are defined in section 8 (`h8_3`, `h8_4`, `_one`, `_two`, etc.).
 
 #### Creating a worktree
 
 ```bash
 # From the project root:
 mkdir -p .worktrees
-git worktree add .worktrees/<name> -b worktree-<name>
+git worktree add .worktrees/<name> -b worktree-<host>-<name>
 ```
 
-Example:
+Example (on h8_3):
 
 ```bash
-git worktree add .worktrees/fa4-optimize -b worktree-fa4-optimize
+git worktree add .worktrees/matmul -b worktree-h8_3-matmul
 ```
 
 #### Listing worktrees
@@ -311,7 +313,7 @@ git worktree list
 ```bash
 git worktree remove .worktrees/<name>
 # Then optionally delete the branch:
-git branch -d worktree-<name>
+git branch -d worktree-<host>-<name>
 ```
 
 #### Rules

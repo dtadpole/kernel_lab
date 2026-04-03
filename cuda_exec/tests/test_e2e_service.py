@@ -14,7 +14,7 @@ from urllib import error, request
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CUDA_EXEC_DIR = REPO_ROOT / "cuda_exec"
 PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
-FIXTURES = REPO_ROOT / "conf" / "fixtures"
+FIXTURES = REPO_ROOT / "data" / "fixtures"
 GENERATED = REPO_ROOT / "data" / "generated"
 CONFIG_FIXTURE = FIXTURES / "sm120" / "vecadd" / "configs.json"
 SUITE_RUN_DIR: Path | None = None

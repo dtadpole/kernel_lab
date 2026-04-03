@@ -22,9 +22,9 @@ MCP-based CUDA kernel optimization agent. Uses the `cuda_exec` service via MCP t
        --version v1 \
        --direction-id 7 \
        --direction-slug vector-add \
-       --reference-dir conf/fixtures/vecadd/ \
+       --reference-dir data/fixtures/sm120/vecadd/ \
        --generated-file data/generated/sm120/vecadd/generated.cu \
-       --configs-file conf/fixtures/vecadd/configs.json
+       --configs-file data/fixtures/sm120/vecadd/configs.json
    ```
 
 ## Prerequisites

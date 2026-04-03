@@ -164,10 +164,6 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - Plugins work in both Claude Code CLI (`--plugin-dir`) and Agent SDK (`mcp_servers={}`)
 - MCP servers use the project's `.venv/bin/python` and `PYTHONPATH` set to repo root
 
-## Owner
-
-- d.t.p
-
 ## License
 
 MIT — see `LICENSE`.

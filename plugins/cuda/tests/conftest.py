@@ -60,7 +60,7 @@ def sample_metadata() -> dict[str, Any]:
 @pytest.fixture(scope="session")
 def vecadd_fixtures() -> dict[str, Any]:
     """Load vecadd test fixtures."""
-    fixtures_dir = _REPO_ROOT / "conf" / "fixtures" / "sm120" / "vecadd"
+    fixtures_dir = _REPO_ROOT / "data" / "fixtures" / "sm120" / "vecadd"
     generated_dir = _REPO_ROOT / "data" / "generated" / "sm120" / "vecadd"
     return {
         "reference": (fixtures_dir / "cutedsl.py").read_text(),

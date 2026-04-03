@@ -1,8 +1,8 @@
-"""FastMCP stdio server wrapping the cuda_exec HTTP API as MCP tools.
+"""FastMCP stdio server exposing cuda_exec as MCP tools.
 
 Exposes 5 action tools (compile, evaluate, profile, execute, read_file)
-that proxy to the cuda_exec HTTP service and 4 data retrieval tools
-(get_compile_data, get_evaluate_data, get_profile_data, get_data_point)
+that dispatch to local or remote cuda_exec endpoints and 4 data retrieval
+tools (get_compile_data, get_evaluate_data, get_profile_data, get_data_point)
 that read from a local data store of raw request/response JSON.
 
 Every action tool call (except read_file) is persisted to the local
@@ -10,14 +10,6 @@ data store before response compaction, so the full unmodified data
 is always available for later retrieval.
 
 Configuration (environment variables):
-    CUDA_EXEC_URL                       Base URL of the cuda_exec service.
-                                        Default: http://127.0.0.1:8000
-    CUDA_EXEC_KEY_PATH                  Path to the bearer token key file.
-                                        Default: ~/.keys/cuda_exec.key
-    CUDA_AGENT_MCP_REQUEST_TIMEOUT      Overall HTTP request timeout (seconds).
-                                        Default: 300.0
-    CUDA_AGENT_MCP_CONNECT_TIMEOUT      TCP connect timeout (seconds).
-                                        Default: 10.0
     CUDA_AGENT_MCP_MAX_CONTENT_CHARS    Max chars for inline content truncation.
                                         Default: 4000
     CUDA_AGENT_MCP_TOOL_TIMEOUT         Default timeout per tool call (seconds).
@@ -31,53 +23,21 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
+
+from plugins.cuda.dispatch import (
+    dispatch_local,
+    dispatch_remote,
+    validate_target,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-_BASE_URL = os.environ.get("CUDA_EXEC_URL", "http://127.0.0.1:8000")
-_DEFAULT_KEY_PATH = Path.home() / ".keys" / "cuda_exec.key"
-
-
-def _load_bearer_token() -> str:
-    key_path = Path(os.environ.get("CUDA_EXEC_KEY_PATH") or str(_DEFAULT_KEY_PATH))
-    try:
-        token = key_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        print(f"cuda-toolkit-exec mcp_server: key file not found: {key_path}", file=sys.stderr)
-        raise SystemExit(1)
-    except OSError as exc:
-        print(f"cuda-toolkit-exec mcp_server: cannot read key file {key_path}: {exc}", file=sys.stderr)
-        raise SystemExit(1)
-    if not token:
-        print(f"cuda-toolkit-exec mcp_server: key file is empty: {key_path}", file=sys.stderr)
-        raise SystemExit(1)
-    return token
-
-
-_BEARER_TOKEN: str = _load_bearer_token()
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_TIMEOUT = httpx.Timeout(
-    float(os.environ.get("CUDA_AGENT_MCP_REQUEST_TIMEOUT", "300.0")),
-    connect=float(os.environ.get("CUDA_AGENT_MCP_CONNECT_TIMEOUT", "10.0")),
-)
-
-
-def _auth_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {_BEARER_TOKEN}"}
-
 
 _MAX_CONTENT_CHARS = int(os.environ.get("CUDA_AGENT_MCP_MAX_CONTENT_CHARS", "4000"))
 _DEFAULT_TOOL_TIMEOUT = int(os.environ.get("CUDA_AGENT_MCP_TOOL_TIMEOUT", "180"))
@@ -196,16 +156,18 @@ def _compact_response(obj: Any, *, _endpoint: str = "") -> Any:
     return obj
 
 
-async def _post(endpoint: str, body: dict[str, Any]) -> str:
-    """POST to a cuda_exec endpoint and return the response as JSON text."""
+async def _dispatch(endpoint: str, body: dict[str, Any], *, target: dict[str, Any]) -> str:
+    """Route to local or remote execution, save data, compact, return JSON."""
+    validate_target(target)
 
-    async with httpx.AsyncClient(base_url=_BASE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(endpoint, json=body, headers=_auth_headers())
-        resp.raise_for_status()
-        raw = resp.json()
-        _save_data_point(endpoint, body, raw)
-        data = _compact_response(raw)
-        return json.dumps(data, indent=2)
+    if target["mode"] == "local":
+        raw = dispatch_local(endpoint, body, gpu_index=target["gpu_index"])
+    else:
+        raw = await dispatch_remote(endpoint, body, host=target["host"])
+
+    _save_data_point(endpoint, body, raw)
+    data = _compact_response(raw)
+    return json.dumps(data, indent=2)
 
 # ---------------------------------------------------------------------------
 # MCP Server
@@ -217,6 +179,7 @@ mcp = FastMCP("cuda")
 @mcp.tool()
 async def compile(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    target: Annotated[dict[str, Any], Field(description='Execution target. REQUIRED. Either {"mode": "local", "gpu_index": N} or {"mode": "remote", "host": "hostname"}')],
     reference_files: Annotated[dict[str, str], Field(description="Map of relative_path -> file content for reference source inputs")],
     generated_files: Annotated[dict[str, str], Field(description="Map of relative_path -> file content; must contain exactly one .cu file")],
     timeout_seconds: Annotated[int, Field(description="Max seconds for compile")] = _DEFAULT_TOOL_TIMEOUT,
@@ -249,17 +212,18 @@ async def compile(
         tool_outputs: Inline stdout/stderr from each compile tool stage.
     """
 
-    return await _post("/compile", {
+    return await _dispatch("/compile", {
         "metadata": metadata,
         "reference_files": reference_files,
         "generated_files": generated_files,
         "timeout_seconds": timeout_seconds,
-    })
+    }, target=target)
 
 
 @mcp.tool()
 async def evaluate(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    target: Annotated[dict[str, Any], Field(description='Execution target. REQUIRED. Either {"mode": "local", "gpu_index": N} or {"mode": "remote", "host": "hostname"}')],
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads, e.g. {'tensor2d-1024x1024': {shape: [1024,1024]}}")],
     timeout_seconds: Annotated[int, Field(description="Max seconds for evaluate")] = _DEFAULT_TOOL_TIMEOUT,
 ) -> str:
@@ -292,16 +256,17 @@ async def evaluate(
     read_file to fetch full details on demand.
     """
 
-    return await _post("/evaluate", {
+    return await _dispatch("/evaluate", {
         "metadata": metadata,
         "configs": configs,
         "timeout_seconds": timeout_seconds,
-    })
+    }, target=target)
 
 
 @mcp.tool()
 async def profile(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    target: Annotated[dict[str, Any], Field(description='Execution target. REQUIRED. Either {"mode": "local", "gpu_index": N} or {"mode": "remote", "host": "hostname"}')],
     configs: Annotated[dict[str, dict[str, Any]], Field(description="Slug-keyed runtime config payloads")],
     side: Annotated[Literal["generated", "reference"], Field(description="Which side to NCU-profile")] = "generated",
     timeout_seconds: Annotated[int, Field(description="Max seconds for profile")] = _DEFAULT_TOOL_TIMEOUT,
@@ -333,17 +298,18 @@ async def profile(
     output. Use read_file to fetch the .ncu-rep binary report on demand.
     """
 
-    return await _post("/profile", {
+    return await _dispatch("/profile", {
         "metadata": metadata,
         "configs": configs,
         "side": side,
         "timeout_seconds": timeout_seconds,
-    })
+    }, target=target)
 
 
 @mcp.tool()
 async def execute(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    target: Annotated[dict[str, Any], Field(description='Execution target. REQUIRED. Either {"mode": "local", "gpu_index": N} or {"mode": "remote", "host": "hostname"}')],
     command: Annotated[list[str], Field(description="Executable plus arguments, e.g. ['/usr/local/cuda/bin/nvcc', '--version']")],
     env: Annotated[dict[str, str], Field(description="Extra environment variables")] = {},
     timeout_seconds: Annotated[int, Field(description="Max seconds for execute")] = _DEFAULT_TOOL_TIMEOUT,
@@ -368,17 +334,18 @@ async def execute(
                  combined log files from the command execution.
     """
 
-    return await _post("/execute", {
+    return await _dispatch("/execute", {
         "metadata": metadata,
         "command": command,
         "env": env,
         "timeout_seconds": timeout_seconds,
-    })
+    }, target=target)
 
 
 @mcp.tool()
 async def read_file(
     metadata: Annotated[dict[str, Any], Field(description="Turn identity: {run_tag, version, direction_id, direction_slug, turn}")],
+    target: Annotated[dict[str, Any], Field(description='Execution target. REQUIRED. Either {"mode": "local", "gpu_index": N} or {"mode": "remote", "host": "hostname"}')],
     path: Annotated[str, Field(description="Relative path under the turn root (must start with artifacts/, logs/, or state/)")],
     max_bytes: Annotated[int | None, Field(description="Optional max bytes to read")] = None,
 ) -> str:
@@ -414,7 +381,7 @@ async def read_file(
     body: dict[str, Any] = {"metadata": metadata, "path": path}
     if max_bytes is not None:
         body["max_bytes"] = max_bytes
-    return await _post("/files/read", body)
+    return await _dispatch("/files/read", body, target=target)
 
 
 @mcp.tool()

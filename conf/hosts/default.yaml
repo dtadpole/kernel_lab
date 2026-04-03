@@ -1,36 +1,81 @@
-# Remote GPU host configuration for cuda_exec service deployment.
+# GPU host inventory and service deployment map.
 #
-# Each host entry defines an SSH target where cuda_exec can be deployed
-# and managed via the cuda:service skill.
+# This is the single source of truth for:
+#   1. Hardware — SSH targets, GPU specs, network topology
+#   2. Deployment map — which service runs on which host:GPU
 #
-# Remote directory convention:
-#   ~/.cuda_exec_service/  — service code, venv, config
-#   ~/.cuda_exec/          — runtime data (turns, artifacts, logs)
-#   ~/.keys/cuda_exec.key  — bearer token for API auth
+# Each host has a `hardware` section (immutable facts about the machine)
+# and a `services` section (what's deployed where, including GPU pin).
 #
 # Network topology:
-#   Both hosts are behind 1and1 (66.179.249.233) with port forwarding.
-#   _one: internet-visible port range 41000-41999
-#   _two: internet-visible port range 42000-42999
-#   SSH ports: _one=41922, _two=42922
-#   Service ports must be within the host's internet-visible range.
-
-host_defaults:
-  service_dir: ".cuda_exec_service"
-  data_dir: ".cuda_exec"
-  key_path: ".keys/cuda_exec.key"
-  service_name: "cuda-exec"
+#   _one/_two are behind 1and1 (66.179.249.233) with port forwarding.
+#     _one: internet-visible port range 41000-41999
+#     _two: internet-visible port range 42000-42999
+#     SSH ports: _one=41922, _two=42922
+#     Service ports must be within the host's internet-visible range.
+#   h8_3/h8_4 are directly accessible Meta devvms (no gateway).
+#
+# Internet access:
+#   _one/_two: full internet (direct)
+#   h8_3: full internet via fwdproxy
+#   h8_4: NO internet — fwdproxy blocks CONNECT tunnels.
+#         Deploy via rsync from h8_3 (venvs + HF model cache).
+#         kb_embed systemd unit must set HF_HUB_OFFLINE=1.
+#
+# SSH alias availability:
+#   _one/_two SSH aliases are in personal ~/.ssh/config only,
+#   not resolvable from Meta devvms.
+#
+# Shared-devvm port conflicts:
+#   Check port availability before deploying: sudo ss -tlnp | grep <port>
 
 hosts:
   _one:
     ssh_host: "_one"
-    port: 41980
-    internet_host: "66.179.249.233"
-    internet_port_range: "41000-41999"
-    description: "RTX PRO 6000 Blackwell #1"
+    hardware:
+      gpu: "RTX PRO 6000 Blackwell"
+      gpu_count: 1
+      internet_host: "66.179.249.233"
+      internet_port_range: "41000-41999"
+    services:
+      cuda_exec:
+        port: 41980
+      kb_embed:
+        port: 46982
+
   _two:
     ssh_host: "_two"
-    port: 42980
-    internet_host: "66.179.249.233"
-    internet_port_range: "42000-42999"
-    description: "RTX PRO 6000 Blackwell #2"
+    hardware:
+      gpu: "RTX PRO 6000 Blackwell"
+      gpu_count: 1
+      internet_host: "66.179.249.233"
+      internet_port_range: "42000-42999"
+    services:
+      cuda_exec:
+        port: 42980
+
+  h8_3:
+    ssh_host: "devvm8490.cco0.facebook.com"
+    hardware:
+      gpu: "NVIDIA H100"
+      gpu_count: 8
+    services:
+      cuda_exec:
+        port: 8980
+        cuda_visible_devices: "7"
+      kb_embed:
+        port: 46983
+        cuda_visible_devices: "6"
+
+  h8_4:
+    ssh_host: "devvm8491.cco0.facebook.com"
+    hardware:
+      gpu: "NVIDIA H100"
+      gpu_count: 8
+    services:
+      cuda_exec:
+        port: 8980
+        cuda_visible_devices: "7"
+      kb_embed:
+        port: 46984          # was 46982, changed due to port conflict (aarontao's MCP server)
+        cuda_visible_devices: "6"

@@ -141,10 +141,10 @@ def watchdog_handler(signum: int, frame: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def load_reference_entry(reference_root: Path) -> Path:
-    candidates = sorted(reference_root.rglob("reference.py"))
+    candidates = sorted(reference_root.rglob("cutedsl.py"))
     if len(candidates) != 1:
         raise RuntimeError(
-            f"reference execution requires exactly one reference.py under {reference_root}; found {len(candidates)}"
+            f"reference execution requires exactly one cutedsl.py under {reference_root}; found {len(candidates)}"
         )
     return candidates[0]
 

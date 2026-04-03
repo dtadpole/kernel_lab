@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Profile harness for reference Python kernels under NCU.
+"""Profile harness for CuTe DSL reference kernels under NCU.
 
-Wraps a reference.py module with L2 cache flush and controlled
+Wraps a cutedsl.py module with L2 cache flush and controlled
 warmup/trial counts.  Used by the Makefile's profile-ncu-reference
 target so that NCU profiling gets the same measurement environment
 as evaluate (L2 flush before each trial).
 
 Usage:
-    python profile_reference.py /path/to/reference.py
+    python profile_reference.py /path/to/cutedsl.py
 
 Environment variables (same as eval_harness.cu):
     CUDA_EXEC_PARAM_SHAPE, CUDA_EXEC_PARAM_INPUT_SIZE, etc.
@@ -25,7 +25,7 @@ import torch
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: profile_reference.py <reference.py>", file=sys.stderr)
+        print("Usage: profile_reference.py <cutedsl.py>", file=sys.stderr)
         return 2
 
     ref_path = sys.argv[1]
@@ -36,7 +36,7 @@ def main() -> int:
     ref_dir = os.path.dirname(os.path.abspath(ref_path))
     if ref_dir not in sys.path:
         sys.path.insert(0, ref_dir)
-    spec = importlib.util.spec_from_file_location("reference", ref_path)
+    spec = importlib.util.spec_from_file_location("cutedsl", ref_path)
     ref = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ref)
 
@@ -44,7 +44,7 @@ def main() -> int:
     model = ref.Model(*ref.get_init_inputs())
     model = model.cuda(device=device)
 
-    # Build config from env (same as reference.py's _config_from_env)
+    # Build config from env (same as cutedsl.py's _config_from_env)
     config = ref._config_from_env() if hasattr(ref, "_config_from_env") else {}
     inputs = list(ref.get_inputs(config))
     inputs = [x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs]

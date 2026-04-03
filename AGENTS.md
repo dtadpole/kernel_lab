@@ -143,7 +143,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed `.venv` is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 - current integration config coverage should include roughly 4–6 configs spanning multiple 1D sizes plus representative 2D and 3D shape metadata
-- prefer storing integration config sets in fixture files under `conf/fixtures/` instead of embedding them directly in the main test module
+- prefer storing integration config sets in fixture files under `data/fixtures/` instead of embedding them directly in the main test module
 - fixture config slugs should make semantic sense for the sample workload; for vector-add fixtures, prefer size/shape/rank-based slugs rather than unrelated causal/noncausal labels
 - for vector-add integration fixtures, the config body itself should stay pertinent: shape/rank/input_size metadata is enough, and unrelated transformer-style fields should be omitted
 
@@ -157,16 +157,193 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - the agent (`agent.py`) uses `claude-agent-sdk` to run a single long optimization session
 - the agent manages its own iteration loop internally — Claude decides when to compile, evaluate, modify, and converge
 
-### 8. Plugins
+### 8. Service deployment
+
+#### Infrastructure
+
+- Host inventory and service-to-host mapping live in `conf/hosts/default.yaml` (single source of truth)
+- Deploy CLIs: `plugins/cuda/deploy/cli.py` (cuda_exec), `plugins/kb/deploy/cli.py` (kb_embed)
+- Deploy CLIs require PyYAML — run with `.venv/bin/python`, not system `python3` (Meta devvms lack PyYAML and block pip)
+
+#### Host-specific constraints
+
+| Host | Internet | Notes |
+|------|----------|-------|
+| _one, _two | yes | SSH aliases in personal `~/.ssh/config` only — not resolvable from devvms |
+| h8_3 (devvm8490) | yes | fwdproxy works for PyPI and HuggingFace |
+| h8_4 (devvm8491) | **no** | fwdproxy blocks CONNECT tunnels — `uv pip install` and HF model downloads fail |
+
+#### Deploying to an online host
+
+```bash
+.venv/bin/python plugins/cuda/deploy/cli.py deploy <host>
+.venv/bin/python plugins/cuda/deploy/cli.py start <host>
+.venv/bin/python plugins/kb/deploy/cli.py deploy <host>
+.venv/bin/python plugins/kb/deploy/cli.py start <host>
+```
+
+#### Deploying to an offline host (e.g., h8_4)
+
+The deploy CLI assumes internet on the target. For offline hosts:
+
+1. Run deploy CLI — code sync succeeds, dependency install fails at step 3:
+   `.venv/bin/python plugins/cuda/deploy/cli.py deploy h8_4`
+2. Rsync venvs from an online host (e.g., h8_3):
+   ```bash
+   rsync -az ~/.cuda_exec_service/.venv/ devvm8491:~/.cuda_exec_service/.venv/
+   rsync -az ~/.kb_embed_service/.venv/ devvm8491:~/.kb_embed_service/.venv/
+   ```
+3. Rsync HuggingFace model cache for kb_embed:
+   ```bash
+   rsync -az ~/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-4B/ \
+     devvm8491:~/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-4B/
+   ```
+4. Add `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` to the kb-embed systemd unit on the target
+5. Manually install the systemd unit if the CLI didn't complete steps 4-5, then start
+
+#### Pre-flight checks for shared devvms
+
+Before deploying, verify the configured port is not occupied by another user:
+
+```bash
+sudo ss -tlnp | grep <port>
+sudo lsof -i :<port>
+```
+
+If occupied, update the port in `conf/hosts/default.yaml` and redeploy.
+
+Known conflict: port 46982 on h8_4 is used by another user — kb_embed moved to 46984.
+
+#### Health endpoints
+
+- cuda_exec: `GET /healthz` → `{"ok":true,"service":"cuda_exec"}`
+- kb_embed: `GET /health` → `{"status":"ok"}`
+- kb_embed functional: `POST /v1/embeddings` with `{"input":"test"}` → OpenAI-compatible response
+
+#### SM-architecture-specific code and environments
+
+Generated kernels are architecture-specific: `data/generated/<arch>/matmul/generated.cu`.
+Each arch folder contains kernels optimized for that SM version — **do not copy between arches**.
+
+| Host | GPU | SM arch | `data/generated/` folder |
+|------|-----|---------|--------------------------|
+| h8_3, h8_4 | H100 | SM90 (Hopper) | `sm90/` |
+| _one, _two | RTX PRO 6000 | SM120 (Blackwell) | `sm120/` |
+
+**Key architecture differences:**
+- SM90 (H100): optimal MMA is **WGMMA** (warpgroup, 4 warps, 64×N×K shapes). Per-warp `mma.sync m16n8k16` runs but achieves only ~40% of cuBLAS.
+- SM120 (Blackwell GeForce): uses per-warp `mma.sync m16n8k16`. WGMMA not available on GeForce SM120.
+- TMA (`cp.async.bulk.tensor`) works on both SM90+ and SM120.
+
+**SM90 generated kernel (data/generated/sm90/matmul/generated.cu):**
+- Uses CUTLASS 3.x C++ API (CollectiveBuilder) with `KernelTmaWarpSpecializedCooperative`
+- Tile: 128×256×64 (big) / 128×128×64 (small), auto stage count, persistent scheduler
+- Compile: `nvcc -arch=sm_90a -std=c++17 -O3 -I<cutlass>/include -I<cutlass>/tools/util/include --expt-relaxed-constexpr -lcuda`
+- CUTLASS headers: `/home/zhenc/workspace1/third-party/cutlass/4.3.5/`
+- Performance at 8192×8192: **668 TFLOPS (95% of cuBLAS 715)**
+- Remaining 5% gap: ptxas `wgmma pipeline crossing function boundary` — CUTLASS template generates cross-function wgmma ops that nvcc can't fully pipeline. cuBLAS is NVIDIA-internal compiled with better instruction scheduling.
+
+**CuTe DSL venv compatibility:**
+- The service venv (`~/.cuda_exec_service/.venv`) has `cuda-python==13.2.0` → requires CUDA 13.x driver.
+- h8_3 has driver 550.90.07 (CUDA 12.4) → CuTe DSL **fails** with `cudaErrorInsufficientDriver`.
+- Workaround: create a local venv with `cuda-bindings==12.8.0` + `nvidia-cutlass-dsl==4.4.2 --no-deps` + `torch==2.6.0+cu124`. Set `CUTE_DSL_ARCH=sm_90a`.
+- _one/_two have driver 595.45.04 (CUDA 13.2) → CuTe DSL works natively.
+
+### 9. Plugins
 
 - Plugins live in `plugins/` — each is a Claude Code plugin with `.claude-plugin/plugin.json`
 - Each plugin can contain: MCP servers (`.mcp.json`), Skills (`skills/`), hooks, agents
 - Plugins work in both Claude Code CLI (`--plugin-dir`) and Agent SDK (`mcp_servers={}`)
 - MCP servers use the project's `.venv/bin/python` and `PYTHONPATH` set to repo root
 
-## Owner
+### 9. Git worktrees
 
-- d.t.p
+Worktrees provide isolated copies of the repo for parallel or experimental work without disturbing `main`.
+
+#### Convention
+
+- **Location:** all worktrees live under `.worktrees/` in the project root
+- **`.worktrees/`** is git-ignored — ephemeral working copies, not project data
+- **Branch naming:** `worktree-<name>` (e.g. `worktree-fa4-optimize`, `worktree-matmul-tiling`)
+- **Directory naming:** `.worktrees/<name>` — the `<name>` matches the branch suffix
+
+#### Creating a worktree
+
+```bash
+# From the project root:
+mkdir -p .worktrees
+git worktree add .worktrees/<name> -b worktree-<name>
+```
+
+Example:
+
+```bash
+git worktree add .worktrees/fa4-optimize -b worktree-fa4-optimize
+```
+
+#### Listing worktrees
+
+```bash
+git worktree list
+```
+
+#### Removing a worktree
+
+```bash
+git worktree remove .worktrees/<name>
+# Then optionally delete the branch:
+git branch -d worktree-<name>
+```
+
+#### Rules
+
+- Do not create worktrees outside `.worktrees/` — the old locations (`.claude/worktrees/`, sibling directories like `kernel_lab-worktrees/`) are deprecated
+- Worktrees are ephemeral — merge or rebase work back to `main`, then remove the worktree
+- Do not commit `.worktrees/` to git — it is in `.gitignore`
+- Each worktree has its own working tree but shares the same `.git` object store
+
+### 10. Results file naming
+
+Results are stored under `results/<arch>/<device>/matmul/` (or other kernel family).
+
+**Filename format:** `YYYYMMDD_HHMM_<hash>_<slug>.md`
+
+| Component | Description | Example |
+|-----------|-------------|---------|
+| Date+time | `YYYYMMDD_HHMM` | `20260403_0200` |
+| Hash | Short commit hash | `e732f2d` |
+| Slug | Kebab-case description | `sm90-wgmma-benchmark` |
+| Extension | Always `.md` | `.md` |
+
+**Example:** `20260403_0200_e732f2d_sm90-wgmma-benchmark.md`
+
+### 11. Data directory layout
+
+```text
+data/
+├── fixtures/           # Reference implementations and configs, by arch
+│   ├── sm80/
+│   ├── sm90/
+│   ├── sm100/
+│   └── sm120/
+│       ├── devices.json          # SM120 device registry (RTX 5090 vs RTX PRO 6000)
+│       ├── vecadd/               # cutedsl.py, cudnn.py, configs.json
+│       ├── matmul/               # cutedsl.py, cute_gemm.py, cudnn.py, configs*.json
+│       └── fa4/                  # cutedsl.py, cudnn.py, configs*.json
+├── generated/          # Generated CUDA kernels, by arch
+│   └── sm120/
+│       ├── vecadd/generated.cu
+│       ├── matmul/generated.cu
+│       └── fa4/generated.cu
+└── nvidia-docs/        # Cached NVIDIA documentation
+
+.worktrees/             # Git worktrees for isolated development (git-ignored)
+```
+
+- `data/` is tracked in git — project data (fixtures, generated code, docs)
+- `.worktrees/` is git-ignored — ephemeral working copies for parallel development
+- Fixture entry point files are named `cutedsl.py` (CuTe DSL reference implementations)
+- Device-specific configs use `configs_<device>.json` naming (e.g. `configs_rtx5090.json`)
 
 ## License
 

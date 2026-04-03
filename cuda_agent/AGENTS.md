@@ -16,9 +16,9 @@ cd /home/centos/kernel_lab
     --version v1 \
     --direction-id 7 \
     --direction-slug vector-add \
-    --reference-dir conf/fixtures/vecadd/ \
+    --reference-dir data/fixtures/sm120/vecadd/ \
     --generated-file data/generated/sm120/vecadd/generated.cu \
-    --configs-file conf/fixtures/vecadd/configs.json \
+    --configs-file data/fixtures/sm120/vecadd/configs.json \
     --max-iterations 5
 ```
 

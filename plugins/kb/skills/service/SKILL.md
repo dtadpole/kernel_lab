@@ -72,11 +72,14 @@ python3 plugins/kb/deploy/cli.py nuke _one --data    # remove everything includi
 
 ## Hosts
 
-Configured in `conf/kb/default.yaml`:
+Configured in `conf/hosts/default.yaml` under each host's `services.kb_embed`.
+KB-specific defaults (model, cache dir) in `conf/kb/default.yaml`.
 
-| Host | GPU | Port | Description |
-|------|-----|------|-------------|
-| `_one` | RTX PRO 6000 Blackwell (98GB) | 46982 | Embedding service |
+| Host | GPU | Port | GPU pin |
+|------|-----|------|---------|
+| `_one` | 1x RTX PRO 6000 Blackwell | 46982 | — |
+| `h8_3` | 8x NVIDIA H100 | 46982 | GPU 6 |
+| `h8_4` | 8x NVIDIA H100 | 46982 | GPU 6 |
 
 ## Access from Dev Machine
 

@@ -206,7 +206,7 @@ async def run_optimization(
 
     # Edit/Write restriction: default to the fixture directory for this task.
     edit_allowed_dir = str(
-        _REPO_ROOT / "conf" / "fixtures" / task.direction_slug
+        _REPO_ROOT / "data" / "fixtures" / task.direction_slug
     )
 
     options = ClaudeAgentOptions(

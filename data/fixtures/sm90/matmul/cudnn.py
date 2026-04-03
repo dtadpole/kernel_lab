@@ -1,14 +1,14 @@
-"""Blackwell GeForce CuTe DSL BF16 GEMM reference fixture for cuda_exec evaluation.
+"""cuBLAS BF16 GEMM vendor baseline for cuda_exec evaluation.
 
-Wraps ``Sm120Gemm`` from ``cute_gemm.py`` into the ``Model(nn.Module)`` contract
-expected by the evaluation harness.  All inputs are ``torch.bfloat16``; the
-accumulator is ``torch.float32`` and FP32->BF16 conversion is done in the kernel
-epilogue (no host-side conversion).  Output buffer is pre-allocated and reused.
+Uses torch.mm() which dispatches directly to cuBLAS cublasGemmEx on CUDA.
+cuBLAS is NVIDIA's most optimized GEMM implementation — cuDNN does not add
+value for pure matrix multiplication (cuDNN internally calls cuBLAS for GEMM).
 
-Convention for all inputs/outputs:
-    A: (M, K)  row-major BF16  — passed directly, zero-copy
-    B: (K, N)  row-major BF16  — B.t() view (zero-copy) gives (N, K) N-major
-    C: (M, N)  row-major BF16  — FP32->BF16 conversion in kernel epilogue
+This file serves as the vendor-optimized baseline to compare against
+hand-written CUDA kernels and CuTe DSL implementations.
+
+Input layout: A (M, K), B (K, N) — BF16
+Output layout: C (M, N) — BF16 (FP32 accumulation is automatic in cuBLAS)
 
 Contract for cuda_exec reference Python files:
 - export ``class Model(torch.nn.Module)``
@@ -25,11 +25,9 @@ from typing import Any
 import torch
 from torch import nn
 
-from cute_gemm import Sm120Gemm
-
 
 # ---------------------------------------------------------------------------
-#  Config helpers (unchanged from the original fixture contract)
+#  Config helpers
 # ---------------------------------------------------------------------------
 
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -46,7 +44,6 @@ def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
 
     normalized_shape = [int(v) for v in shape]
     input_size = int(config["input_size"])
-    # For square matrices: shape is [N, N], input_size is N*N per tensor
     shape_size = 1
     for dim in normalized_shape:
         shape_size *= dim
@@ -85,60 +82,20 @@ def _config_from_env() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-#  Model — nn.Module wrapper around Sm120Gemm (cute_gemm.py)
+#  Model — cuBLAS GEMM via torch.mm
 # ---------------------------------------------------------------------------
 
 class Model(nn.Module):
-    """CuTe DSL BF16 GEMM reference kernel for Blackwell (SM120).
+    """cuBLAS BF16 GEMM vendor baseline.
 
     Computes C = A @ B where A is M×K, B is K×N, C is M×N.
-    Inputs are BF16 with FP32 accumulation; output is BF16 (converted in-kernel).
-
-    Zero-copy from row-major PyTorch tensors:
-        - A passed directly as (M, K) K-major CuTe tensor
-        - B passed as B.t() (zero-copy view) giving (N, K) N-major CuTe tensor
-        - C is BF16 row-major — FP32->BF16 conversion done in the kernel epilogue
-
-    The kernel is JIT-compiled once per unique (A.shape, B.shape) via
-    ``cute.compile()`` and reused for subsequent calls with the same shape.
-    Output buffer C is pre-allocated and reused across calls.
+    torch.mm dispatches to cublasGemmEx with BF16 inputs and FP32
+    internal accumulation. cuBLAS automatically selects the best
+    Tensor Core kernel for the current GPU architecture.
     """
 
     def __init__(self):
         super().__init__()
-        self._gemm = Sm120Gemm(output_bf16=True)
-        self._compiled = None
-        self._stream = None
-        self._cached_shape = None
-        self._cached_ptrs = None  # (A.data_ptr, B.data_ptr)
-        self._a_cute = None
-        self._b_cute = None
-        self._c_cute = None
-        self._C = None
-
-    def _ensure_compiled(self, A: torch.Tensor, B: torch.Tensor) -> None:
-        """JIT-compile the kernel on first call or when the matrix shape changes."""
-        shape_key = (A.shape, B.shape)
-        if self._compiled is not None and self._cached_shape == shape_key:
-            return
-
-        import cuda.bindings.driver as cuda_driver
-        import cutlass.cute as cute
-        from cutlass.cute.runtime import from_dlpack
-
-        M, K = A.shape
-        _, N = B.shape
-        self._C = torch.empty(M, N, dtype=torch.bfloat16, device=A.device)
-
-        self._a_cute = from_dlpack(A, assumed_align=16)
-        self._b_cute = from_dlpack(B.t(), assumed_align=16)
-        self._c_cute = from_dlpack(self._C, assumed_align=16)
-
-        self._stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
-        self._compiled = cute.compile(self._gemm, self._a_cute, self._b_cute,
-                                      self._c_cute, stream=self._stream)
-        self._cached_shape = shape_key
-        self._cached_ptrs = (A.data_ptr(), B.data_ptr())
 
     def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
         if A.ndim != 2 or B.ndim != 2:
@@ -150,21 +107,9 @@ class Model(nn.Module):
         if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
             raise ValueError(f"expected bfloat16 inputs, got {A.dtype} and {B.dtype}")
         if not A.is_cuda or not B.is_cuda:
-            raise ValueError("Sm120Gemm reference kernel requires CUDA tensors")
+            raise ValueError("cuBLAS GEMM requires CUDA tensors")
 
-        self._ensure_compiled(A, B)
-
-        # Reuse cached CuTe tensors if input pointers haven't changed
-        ptr_key = (A.data_ptr(), B.data_ptr())
-        if ptr_key != self._cached_ptrs:
-            from cutlass.cute.runtime import from_dlpack
-            self._a_cute = from_dlpack(A, assumed_align=16)
-            self._b_cute = from_dlpack(B.t(), assumed_align=16)
-            self._cached_ptrs = ptr_key
-
-        self._compiled(self._a_cute, self._b_cute, self._c_cute, self._stream)
-
-        return self._C
+        return torch.mm(A, B)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +124,6 @@ def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
     cfg = _normalize_config(config)
     shape = tuple(int(v) for v in cfg["shape"])
     device = torch.device("cuda")
-    # For square matrices: shape = [N, N], M = N = K = shape[0]
     M = shape[0]
     K = shape[1] if len(shape) > 1 else shape[0]
     N = shape[1] if len(shape) > 1 else shape[0]
@@ -207,7 +151,7 @@ def main() -> int:
     model = model.cuda(device=device)
     A, B = get_inputs(config)
 
-    # Warmup — 5 runs to JIT-compile and warm GPU caches
+    # Warmup — 5 runs
     for _ in range(5):
         model(A, B)
     torch.cuda.synchronize(device)

@@ -31,6 +31,16 @@ _REPO_ROOT = _SCRIPT_DIR.parents[2]
 _SERVICE_FILE = _SCRIPT_DIR / "cuda-exec.service"
 _REQUIREMENTS_FILE = _SCRIPT_DIR / "requirements.txt"
 
+_SERVICE_KEY = "cuda_exec"  # key in hosts.services map
+
+# Host-level defaults (not in YAML — these are service-specific conventions)
+_HOST_DEFAULTS = {
+    "service_dir": ".cuda_exec_service",
+    "data_dir": ".cuda_exec",
+    "key_path": ".keys/cuda_exec.key",
+    "service_name": "cuda-exec",
+}
+
 
 def _load_hosts_config() -> dict[str, Any]:
     """Load host configuration from conf/hosts/default.yaml."""
@@ -43,18 +53,34 @@ def _load_hosts_config() -> dict[str, Any]:
 
 
 def _resolve_host(cfg: dict[str, Any], name: str) -> dict[str, Any]:
-    """Resolve a host name to its config, merged with defaults."""
+    """Resolve a host name to a flat config dict for this service."""
     hosts = cfg.get("hosts", {})
     if name not in hosts:
         available = ", ".join(sorted(hosts.keys()))
         print(f"ERROR: unknown host '{name}'. Available: {available}", file=sys.stderr)
         sys.exit(1)
-    defaults = cfg.get("host_defaults", {})
-    return {**defaults, **hosts[name]}
+
+    host = hosts[name]
+    svc = (host.get("services") or {}).get(_SERVICE_KEY)
+    if svc is None:
+        print(f"ERROR: host '{name}' has no {_SERVICE_KEY} service configured.", file=sys.stderr)
+        sys.exit(1)
+
+    hw = host.get("hardware") or {}
+    return {
+        **_HOST_DEFAULTS,
+        "ssh_host": host["ssh_host"],
+        "description": f"{hw.get('gpu', 'GPU')} ({hw.get('gpu_count', '?')}x)",
+        **svc,
+    }
 
 
-def _all_host_names(cfg: dict[str, Any]) -> list[str]:
-    return sorted(cfg.get("hosts", {}).keys())
+def _deployable_host_names(cfg: dict[str, Any]) -> list[str]:
+    """Return host names that have cuda_exec configured."""
+    return sorted(
+        name for name, h in cfg.get("hosts", {}).items()
+        if (h.get("services") or {}).get(_SERVICE_KEY)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +205,14 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
     # 5. Install systemd unit
     print("[5/5] Installing systemd service...")
     service_content = _SERVICE_FILE.read_text().replace("--port 8000", f"--port {port}")
+    cuda_devices = host_cfg.get("cuda_visible_devices")
+    if cuda_devices is not None:
+        service_content = service_content.replace("__CUDA_VISIBLE_DEVICES__", cuda_devices)
+    else:
+        service_content = "\n".join(
+            line for line in service_content.split("\n")
+            if "__CUDA_VISIBLE_DEVICES__" not in line
+        )
     _ssh(ssh_host, f"""
         mkdir -p $HOME/.config/systemd/user
         cat > $HOME/.config/systemd/user/{svc_name}.service << 'UNIT_EOF'
@@ -259,6 +293,11 @@ def cmd_status(host_cfg: dict[str, Any]) -> bool:
         print(f"  Health:   {health}")
     else:
         print(f"  Health:   (service not running)")
+
+    # GPU pin
+    cuda_devices = host_cfg.get("cuda_visible_devices")
+    if cuda_devices is not None:
+        print(f"  GPU pin:  CUDA_VISIBLE_DEVICES={cuda_devices}")
 
     # GPU
     r = _ssh(ssh_host,
@@ -388,7 +427,7 @@ def main() -> int:
     # Resolve target hosts
     use_all = getattr(args, "all", False)
     if use_all:
-        targets = _all_host_names(cfg)
+        targets = _deployable_host_names(cfg)
     elif args.host:
         targets = [args.host]
     else:

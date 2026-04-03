@@ -11,6 +11,7 @@ RestartSec=5
 
 # Environment
 Environment=PYTHONPATH=%h/.kb_embed_service
+Environment=CUDA_VISIBLE_DEVICES=__CUDA_VISIBLE_DEVICES__
 Environment=EMBED_MODEL_ID=Qwen/Qwen3-Embedding-4B
 Environment=TRANSFORMERS_CACHE=%h/.cache/huggingface
 Environment=HF_HOME=%h/.cache/huggingface

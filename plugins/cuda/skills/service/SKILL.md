@@ -70,12 +70,14 @@ python plugins/cuda/deploy/cli.py nuke _one --data    # remove everything
 
 ## Hosts
 
-Configured in `conf/hosts/default.yaml`:
+Configured in `conf/hosts/default.yaml` under each host's `services.cuda_exec`:
 
-| Host | GPU | Port |
-|------|-----|------|
-| `_one` | RTX PRO 6000 Blackwell (98GB) | 41980 |
-| `_two` | RTX PRO 6000 Blackwell (98GB) | 42980 |
+| Host | GPU | Port | GPU pin |
+|------|-----|------|---------|
+| `_one` | 1x RTX PRO 6000 Blackwell | 41980 | — |
+| `_two` | 1x RTX PRO 6000 Blackwell | 42980 | — |
+| `h8_3` | 8x NVIDIA H100 | 8980 | GPU 7 |
+| `h8_4` | 8x NVIDIA H100 | 8980 | GPU 7 |
 
 ## Remote Layout
 

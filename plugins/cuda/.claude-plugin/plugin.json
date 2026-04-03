@@ -1,7 +1,7 @@
 {
   "name": "cuda",
-  "description": "Remote CUDA kernel compilation, evaluation, profiling, and execution via the cuda_exec service",
-  "version": "0.1.0",
+  "description": "CUDA kernel compilation, evaluation, profiling, and execution — local GPU or remote cuda_exec service",
+  "version": "0.2.0",
   "author": {
     "name": "D.Tadpole"
   }

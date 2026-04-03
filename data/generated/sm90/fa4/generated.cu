@@ -2,26 +2,34 @@
  * Flash Attention forward pass — TMA + wgmma, BF16, SM90a (H100).
  *
  * Architecture:
- *   256 threads = 2 warp groups (WG0=producer, WG1=consumer)
- *   Producer (warps 0-3, 128 threads, 56 regs): TMA loads Q/K/V
- *   Consumer (warps 4-7, 128 threads, 256 regs): wgmma.mma_async QK/PV + softmax
+ *   384 threads = 3 warp groups (WG0=producer, WG1=consumer0, WG2=consumer1)
+ *   Producer (warps 0-3, 128 threads, 24 regs): TMA loads Q/K/V
+ *   Consumer0 (warps 4-7, 128 threads, 240 regs): wgmma QK/PV + softmax (Q rows 0-63)
+ *   Consumer1 (warps 8-11, 128 threads, 240 regs): wgmma QK/PV + softmax (Q rows 64-127)
  *
  * Data movement: TMA (cp.async.bulk.tensor) with 128B swizzle
  * Compute: wgmma.mma_async RS variant — m64n128k16 for QK, m64n64k16 for PV
  * Pipeline: 2-stage double-buffered K/V with mbarrier
  *
- * Tile sizes: BLOCK_Q=64, BLOCK_KV=128, DIM=128
+ * Tile sizes: BLOCK_Q=128, BLOCK_KV=128, DIM=128
+ *
+ * Inter-WG synchronization: CuTe DSL barrier protocol with intra_wg_overlap.
+ *   Named barrier 2 = WarpSchedulerWG0 (consumer0's barrier)
+ *   Named barrier 3 = WarpSchedulerWG1 (consumer1's barrier)
+ *   Each WG syncs on its OWN barrier, arrives at the OTHER's.
+ *   bar.sync/bar.arrive num_threads = 256 (2 consumer WGs × 128 threads).
  *
  * SMEM layout (split-DIM: each [DIM=128,BLOCK] tile → two [64,BLOCK] halves):
- *   Q_lo:    [64, 64]  =  8KB at SMEM + 0
- *   Q_hi:    [64, 64]  =  8KB at SMEM + 8KB
+ *   Q (BLOCK_Q=128):
+ *     Q_lo:    [64, 128] = 16KB at SMEM + 0
+ *     Q_hi:    [64, 128] = 16KB at SMEM + 16KB
  *   K stage s:
- *     K_lo:  [64, 128] = 16KB at SMEM + 16KB + s*32KB
- *     K_hi:  [64, 128] = 16KB at SMEM + 16KB + s*32KB + 16KB
+ *     K_lo:  [64, 128] = 16KB at SMEM + 32KB + s*32KB
+ *     K_hi:  [64, 128] = 16KB at SMEM + 32KB + s*32KB + 16KB
  *   V stage s:
- *     V_lo:  [64, 128] = 16KB at SMEM + 80KB + s*32KB
- *     V_hi:  [64, 128] = 16KB at SMEM + 80KB + s*32KB + 16KB
- *   Barriers: 9 × 8B aligned at 144KB
+ *     V_lo:  [64, 128] = 16KB at SMEM + 96KB + s*32KB
+ *     V_hi:  [64, 128] = 16KB at SMEM + 96KB + s*32KB + 16KB
+ *   mbarriers: 9 × 8B aligned at 160KB
  *
  * TMA uses boxDim=[64, BLOCK] with SWIZZLE_128B.
  * Each row = 64 bf16 = 128 bytes = exactly one 128B swizzle unit.
@@ -46,20 +54,20 @@
  * ====================================================================== */
 
 static constexpr int WARP_SIZE   = 32;
-static constexpr int BLOCK_Q     = 64;
+static constexpr int BLOCK_Q     = 128;
 static constexpr int BLOCK_KV    = 128;
 static constexpr int DIM_CONST   = 128;
 static constexpr int HALF_DIM    = 64;
 static constexpr int NUM_STAGES  = 2;
-static constexpr int TB_SIZE     = 256;   /* 2 warp groups */
+static constexpr int TB_SIZE     = 384;   /* 3 warp groups */
 static constexpr int WG_SIZE     = 128;   /* threads per warp group */
 
 /* Row stride within a half-tile: 64 bf16 = 128 bytes */
 static constexpr int HALF_ROW_STRIDE = HALF_DIM * 2;  /* 128 bytes */
 
-/* Q half-tile: [64 cols, BLOCK_Q rows] = [64, 64] = 8KB */
-static constexpr int Q_HALF_TILE_BYTES = HALF_DIM * BLOCK_Q * 2;   /* 8192 = 8KB */
-static constexpr int Q_FULL_TILE_BYTES = 2 * Q_HALF_TILE_BYTES;    /* 16384 = 16KB */
+/* Q half-tile: [64 cols, BLOCK_Q rows] = [64, 128] = 16KB */
+static constexpr int Q_HALF_TILE_BYTES = HALF_DIM * BLOCK_Q * 2;   /* 16384 = 16KB */
+static constexpr int Q_FULL_TILE_BYTES = 2 * Q_HALF_TILE_BYTES;    /* 32768 = 32KB */
 
 /* K/V half-tile: [64 cols, BLOCK_KV rows] = [64, 128] = 16KB */
 static constexpr int KV_HALF_TILE_BYTES = HALF_DIM * BLOCK_KV * 2; /* 16384 = 16KB */
@@ -68,23 +76,32 @@ static constexpr int KV_FULL_TILE_BYTES = 2 * KV_HALF_TILE_BYTES;  /* 32768 = 32
 /* Offset to second 64 rows within a KV half-tile (for PV GEMM split) */
 static constexpr int KV_ROW_OFFSET_64  = 64 * HALF_ROW_STRIDE;    /* 8192 bytes */
 
+/* Per-WG Q half-tile size: each WG processes 64 of 128 Q rows */
+static constexpr int Q_WG_HALF_TILE_BYTES = HALF_DIM * (BLOCK_Q / 2) * 2;  /* 8192 = 8KB */
+
 /* SMEM layout offsets */
 static constexpr int SMEM_Q_OFFSET   = 0;                                              /* 0 */
-static constexpr int SMEM_K_OFFSET   = Q_FULL_TILE_BYTES;                              /* 16KB */
-static constexpr int SMEM_V_OFFSET   = SMEM_K_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 80KB */
-static constexpr int SMEM_BAR_OFFSET = SMEM_V_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 144KB */
+static constexpr int SMEM_K_OFFSET   = Q_FULL_TILE_BYTES;                              /* 32KB */
+static constexpr int SMEM_V_OFFSET   = SMEM_K_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 96KB */
+static constexpr int SMEM_BAR_OFFSET = SMEM_V_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 160KB */
 
 /*
- * Barrier layout (9 barriers, 8 bytes each):
- *   0: Q_full        (producer arrives with tx=Q_FULL_TILE_BYTES, consumer waits)
- *   1: K_full[0]     (producer arrives with tx=KV_FULL_TILE_BYTES, consumer waits)
+ * mbarrier layout (9 mbarriers, 8 bytes each, in SMEM):
+ *   0: Q_full          (producer arrives with tx=Q_FULL_TILE_BYTES, consumers wait)
+ *   1: K_full[0]       (producer arrives with tx=KV_FULL_TILE_BYTES, consumers wait)
  *   2: K_full[1]
- *   3: V_full[0]     (producer arrives with tx=KV_FULL_TILE_BYTES, consumer waits)
+ *   3: V_full[0]       (producer arrives with tx=KV_FULL_TILE_BYTES, consumers wait)
  *   4: V_full[1]
- *   5: K_empty[0]    (consumer arrives, producer waits)
+ *   5: K_empty[0]      (consumer arrives, producer waits) — only WG0 signals
  *   6: K_empty[1]
- *   7: V_empty[0]    (consumer arrives, producer waits)
+ *   7: V_empty[0]      (consumer arrives, producer waits) — only WG0 signals
  *   8: V_empty[1]
+ *
+ * Named barrier layout (bar.sync/bar.arrive, separate HW namespace):
+ *   0: reserved (__syncthreads)
+ *   1: reserved (Epilogue)
+ *   2: WarpSchedulerWG0 (consumer0 syncs, consumer1 arrives) — 256 threads
+ *   3: WarpSchedulerWG1 (consumer1 syncs, consumer0 arrives) — 256 threads
  */
 static constexpr int NUM_BARRIERS   = 9;
 static constexpr int SMEM_TOTAL     = SMEM_BAR_OFFSET + NUM_BARRIERS * 8 + 128;
@@ -94,6 +111,12 @@ static constexpr int BAR_K_FULL     = 1;  /* + stage */
 static constexpr int BAR_V_FULL     = 3;  /* + stage */
 static constexpr int BAR_K_EMPTY    = 5;  /* + stage */
 static constexpr int BAR_V_EMPTY    = 7;  /* + stage */
+
+/* Named barrier IDs (bar.sync/bar.arrive hardware, NOT mbarrier).
+ * Use high IDs (14,15) to avoid conflicts with compiler-injected
+ * warpgroup.arrive barriers which use low IDs. */
+static constexpr int BAR_SCHED_WG0  = 14;  /* consumer0's scheduler barrier */
+static constexpr int BAR_SCHED_WG1  = 15;  /* consumer1's scheduler barrier */
 
 __device__ __host__ constexpr
 int cdiv(int a, int b) { return (a + b - 1) / b; }
@@ -162,6 +185,26 @@ __device__ __forceinline__
 void mbarrier_inval(uint64_t* mbar) {
     uint32_t addr = __cvta_generic_to_shared(mbar);
     asm volatile("mbarrier.inval.shared.b64 [%0];" :: "r"(addr));
+}
+
+/* ======================================================================
+ *  Named barrier helpers for inter-WG scheduler synchronization
+ *
+ *  bar.sync:   block calling threads until `num_threads` have arrived at barrier `id`
+ *  bar.arrive: contribute `num_threads` arrival count to barrier `id` without blocking
+ *
+ *  For 2 consumer WGs (256 threads total), num_threads = 256.
+ *  Named barrier IDs 2 (BAR_SCHED_WG0) and 3 (BAR_SCHED_WG1).
+ * ====================================================================== */
+
+__device__ __forceinline__
+void named_barrier_sync(int barrier_id, int num_threads) {
+    asm volatile("bar.sync %0, %1;" :: "r"(barrier_id), "r"(num_threads));
+}
+
+__device__ __forceinline__
+void named_barrier_arrive(int barrier_id, int num_threads) {
+    asm volatile("bar.arrive %0, %1;" :: "r"(barrier_id), "r"(num_threads));
 }
 
 /* ======================================================================
@@ -452,13 +495,13 @@ void wgmma_wait_group_1() {
  * ====================================================================== */
 
 __device__ __forceinline__
-void setmaxnreg_dec_56() {
-    asm volatile("setmaxnreg.dec.sync.aligned.u32 56;\n");
+void setmaxnreg_dec_24() {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 24;\n");
 }
 
 __device__ __forceinline__
-void setmaxnreg_inc_256() {
-    asm volatile("setmaxnreg.inc.sync.aligned.u32 256;\n");
+void setmaxnreg_inc_240() {
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 240;\n");
 }
 
 /* ======================================================================
@@ -476,8 +519,8 @@ void ldmatrix_x4(uint32_t regs[4], uint32_t smem_addr) {
 /* ======================================================================
  *  Producer warp group (warps 0-3, threads 0-127)
  *
- *  Loads Q once via TMA (2 half-loads), then loops K/V with 2-stage
- *  pipeline. Each tile load = 2 TMA calls (lo + hi halves).
+ *  Loads Q once via TMA (4 half-loads for BLOCK_Q=128), then loops K/V
+ *  with 2-stage pipeline. Each tile load = 2 TMA calls (lo + hi halves).
  *  Only thread 0 (elected leader) issues TMA loads.
  * ====================================================================== */
 
@@ -494,21 +537,38 @@ void producer_warp_group(
     int max_kv_iter,
     int tid_in_wg)
 {
-    setmaxnreg_dec_56();
+    setmaxnreg_dec_24();
 
     const bool is_leader = (tid_in_wg == 0);
 
-    /* Load Q tile via TMA: 2 half-loads */
+    /* Load Q tile via TMA: 4 half-loads for BLOCK_Q=128
+     *   Q_lo rows 0-63:    boxDim=[64,64] at coord (head, q_coord_seq)
+     *   Q_lo rows 64-127:  boxDim=[64,64] at coord (head, q_coord_seq+64)
+     *   Q_hi rows 0-63:    boxDim=[64,64] at coord (head+64, q_coord_seq)
+     *   Q_hi rows 64-127:  boxDim=[64,64] at coord (head+64, q_coord_seq+64)
+     *
+     * TMA box is [64, 64] (matching boxDim in TMA descriptor).
+     * Q_lo covers DIM cols [0:64), Q_hi covers DIM cols [64:128).
+     * Within each half, rows 0-63 are WG0's, rows 64-127 are WG1's.
+     */
     if (is_leader) {
         mbarrier_arrive_expect_tx(&barriers[BAR_Q_FULL], Q_FULL_TILE_BYTES);
 
-        /* Q_lo: columns [0:64) */
+        /* Q_lo rows 0-63: [64, 64] at offset 0 */
         tma_load_2d(smem_base + SMEM_Q_OFFSET,
                     tma_Q, coord_head, q_coord_seq,
                     &barriers[BAR_Q_FULL]);
-        /* Q_hi: columns [64:128) */
+        /* Q_lo rows 64-127: [64, 64] at offset 8KB */
+        tma_load_2d(smem_base + SMEM_Q_OFFSET + Q_WG_HALF_TILE_BYTES,
+                    tma_Q, coord_head, q_coord_seq + 64,
+                    &barriers[BAR_Q_FULL]);
+        /* Q_hi rows 0-63: [64, 64] at offset 16KB */
         tma_load_2d(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES,
                     tma_Q, coord_head + HALF_DIM, q_coord_seq,
+                    &barriers[BAR_Q_FULL]);
+        /* Q_hi rows 64-127: [64, 64] at offset 24KB */
+        tma_load_2d(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES + Q_WG_HALF_TILE_BYTES,
+                    tma_Q, coord_head + HALF_DIM, q_coord_seq + 64,
                     &barriers[BAR_Q_FULL]);
     }
 
@@ -560,7 +620,7 @@ void producer_warp_group(
 }
 
 /* ======================================================================
- *  Consumer warp group (warps 4-7, threads 128-255)
+ *  Consumer warp group (2 instances: WG1 handles Q rows 0-63, WG2 handles 64-127)
  *
  *  wgmma.mma_async for QK^T and PV, with online softmax.
  *  Q from SMEM via ldmatrix (RS variant: A=registers).
@@ -577,6 +637,12 @@ void producer_warp_group(
  *      Each V half split into top[64,64] + bot[64,64] (KV rows 0-63 and 64-127).
  *      4 k-steps per KV-half, 2 KV-halves per DIM-half, 2 DIM-halves = 16 wgmma calls.
  *      Uses tnspB=0 with column-advance (ks*32), bot offset = 8192 bytes.
+ *
+ *  Inter-WG barrier protocol (CuTe DSL style):
+ *    - First half-block: NO sync, NO arrive
+ *    - Middle blocks: sync own barrier BEFORE QK, arrive other's barrier AFTER PV issued
+ *    - Last half-block: NO sync, NO arrive
+ *    - mma_init: WG1 primes WG0's barrier once before the KV loop
  * ====================================================================== */
 
 __device__ __forceinline__
@@ -589,26 +655,17 @@ void consumer_warp_group(
     int q_block_id,
     int is_causal,
     int tid_in_wg,
-    int lane_id)
+    int lane_id,
+    int wg_idx)       /* 0 for consumer0 (Q rows 0-63), 1 for consumer1 (Q rows 64-127) */
 {
-    setmaxnreg_inc_256();
+    setmaxnreg_inc_240();
 
     const int warp_in_wg = tid_in_wg / WARP_SIZE;  /* 0..3 */
 
-    /*
-     * wgmma output register layout:
-     *
-     * m64n128k16 (QK GEMM, per thread, 64 floats = S_acc[64]):
-     *   16 groups of 4 regs. Group g (0..15) covers N-columns [g*8, g*8+8).
-     *   Within group g:
-     *     d[g*4+0]: (row = warp*16 + lane/4,     col = g*8 + (lane%4)*2)
-     *     d[g*4+1]: (row = warp*16 + lane/4,     col = g*8 + (lane%4)*2 + 1)
-     *     d[g*4+2]: (row = warp*16 + lane/4 + 8, col = g*8 + (lane%4)*2)
-     *     d[g*4+3]: (row = warp*16 + lane/4 + 8, col = g*8 + (lane%4)*2 + 1)
-     *
-     * m64n64k16 (PV GEMM, per thread, 32 floats = O_lo/O_hi):
-     *   8 groups of 4 regs. Same layout as above but g in 0..7.
-     */
+    /* Scheduler barrier IDs for this WG */
+    const int my_sched_bar    = (wg_idx == 0) ? BAR_SCHED_WG0 : BAR_SCHED_WG1;
+    const int other_sched_bar = (wg_idx == 0) ? BAR_SCHED_WG1 : BAR_SCHED_WG0;
+    const int sched_num_threads = 2 * WG_SIZE;  /* 256: both consumer WGs */
 
     /* O accumulator: 2 n-halves of m64n64 for DIM=128 output */
     float O_lo[32];  /* columns 0..63 */
@@ -631,22 +688,28 @@ void consumer_warp_group(
     /* Wait for Q to be loaded */
     mbarrier_wait_parity(&barriers[BAR_Q_FULL], 0);
 
-    /* Q SMEM base addresses for lo and hi halves */
-    uint32_t q_lo_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET);
-    uint32_t q_hi_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES);
+    /* Q SMEM base addresses for this WG's 64 Q rows.
+     * Q layout: Q_lo[64, 128] at SMEM+0, Q_hi[64, 128] at SMEM+16KB.
+     * WG0 uses rows 0-63 (offset 0), WG1 uses rows 64-127 (offset 8KB within each half).
+     */
+    int q_smem_wg_offset = wg_idx * Q_WG_HALF_TILE_BYTES;  /* 0 or 8192 */
+    uint32_t q_lo_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET + q_smem_wg_offset);
+    uint32_t q_hi_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES + q_smem_wg_offset);
+
+    /* Causal masking row offset: this WG's Q rows start at wg_idx * 64 within the block */
+    const int causal_row_offset = wg_idx * 64;
 
     /* ================================================================
-     * Main KV loop with INTRA-WARPGROUP OVERLAP
+     * Main KV loop with INTRA-WARPGROUP OVERLAP + INTER-WG BARRIERS
      *
-     * Key idea: QK GEMM for block N overlaps with PV GEMM for block N-1.
-     * Both are async wgmma calls. We use wgmma.wait_group(1) to wait for
-     * only the older group (QK), letting PV continue in the background
-     * while we do softmax on the QK result.
+     * Intra-WG overlap: QK GEMM for block N overlaps with PV GEMM for block N-1.
+     * Inter-WG barriers: CuTe DSL protocol for 2 consumer WGs.
      *
      * Structure:
-     *   First half-block:  QK[0] only (no previous PV)
-     *   Middle blocks:     QK[n] + PV[n-1] overlapped
-     *   Last half-block:   PV[last] only (no next QK)
+     *   mma_init:         WG1 primes WG0's barrier
+     *   First half-block: QK[0] + softmax + pack P (NO barriers)
+     *   Middle blocks:    sync own, QK[n], rescale, PV[n-1], arrive other, softmax, pack P
+     *   Last half-block:  rescale O, PV[last] (NO barriers)
      * ================================================================ */
 
     /* Saved P registers for PV of the *previous* KV block */
@@ -658,14 +721,6 @@ void consumer_warp_group(
 
     /*
      * QK GEMM: S[m64, n128] = Q[m64, k128] @ K^T[k128, n128]
-     *
-     * Single n-block using wgmma.m64n128k16 with 64 output registers.
-     * S_acc[64]: 16 groups covering all 128 KV positions.
-     *   Groups 0-7 = KV positions 0..63, groups 8-15 = KV positions 64..127.
-     *
-     * 8 k-steps: 4 from Q_lo × K_dim_lo + 4 from Q_hi × K_dim_hi.
-     * K descriptor for m64n128k16 tnspB=1: B^T[N=128, K=16], covers all 128
-     * K rows using the same LBO/SBO pattern as m64n64k16.
      */
     #define DO_QK_GEMM(kv_id_arg, stage_arg, is_first)                          \
     {                                                                            \
@@ -694,17 +749,6 @@ void consumer_warp_group(
 
     /*
      * PV GEMM: O[m64, n128] = P[m64, k128] @ V[k128, n128]
-     *
-     * V is stored as two DIM-halves: V_lo[128, 64], V_hi[128, 64].
-     * Each DIM-half has 128 rows (KV positions) and 64 cols (DIM values).
-     *
-     * With tnspB=0: K = columns (DIM), N = rows (KV positions).
-     * Each wgmma m64n64k16 reads 16 columns (k-step) from 64 rows.
-     * But BLOCK_KV=128 > 64 rows per wgmma, so we split into two KV halves:
-     *   - KV rows 0-63 (top):   descriptor at vl + ks*32, P_regs[0..3]
-     *   - KV rows 64-127 (bot): descriptor at vl + 64*128 + ks*32, P_regs[4..7]
-     * 4 k-steps per KV-half = 8 k-steps total per DIM-half.
-     * Two DIM-halves (V_lo, V_hi) for full DIM=128 output.
      */
     #define DO_PV_GEMM(v_stage_arg)                                              \
     {                                                                            \
@@ -739,14 +783,14 @@ void consumer_warp_group(
 
     /*
      * Softmax over S_acc[64] = 128 KV positions (16 groups of 4 regs).
-     * Each thread owns 2 rows. Per row, 16 groups × 2 values = 32 values.
-     * Groups 0-7 = KV positions 0..63, groups 8-15 = KV positions 64..127.
+     * Each thread owns 2 rows. Per row, 16 groups x 2 values = 32 values.
+     * Uses causal_row_offset to adjust row indices for this WG's Q rows.
      */
     #define DO_SOFTMAX(kv_id_arg, is_first)                                      \
     {                                                                            \
         for (int i = 0; i < 64; i++) S_acc[i] *= softmax_scale_log2;            \
         if (is_causal) {                                                         \
-            int r0 = q_block_id*BLOCK_Q + warp_in_wg*16 + (lane_id/4);         \
+            int r0 = q_block_id*BLOCK_Q + causal_row_offset + warp_in_wg*16 + (lane_id/4); \
             int r1 = r0 + 8;                                                    \
             int kvs = (kv_id_arg) * BLOCK_KV;                                   \
             for (int g = 0; g < 16; g++) {                                       \
@@ -804,7 +848,7 @@ void consumer_warp_group(
     {                                                                            \
         for (int i = 0; i < 64; i++) S_acc[i] *= softmax_scale_log2;            \
         if (is_causal) {                                                         \
-            int r0 = q_block_id*BLOCK_Q + warp_in_wg*16 + (lane_id/4);         \
+            int r0 = q_block_id*BLOCK_Q + causal_row_offset + warp_in_wg*16 + (lane_id/4); \
             int r1 = r0 + 8;                                                    \
             int kvs = (kv_id_arg) * BLOCK_KV;                                   \
             for (int g = 0; g < 16; g++) {                                       \
@@ -872,32 +916,42 @@ void consumer_warp_group(
 
     float S_acc[64];  /* QK output: 128 KV positions in 16 groups of 4 regs */
 
-    /* === FIRST HALF-BLOCK: QK[0] + softmax, save P for later PV === */
+    /* No mma_init priming needed — we use bar.sync (symmetric) instead of
+     * bar.sync + bar.arrive (asymmetric), which avoids re-entrance races. */
+
+    /* === FIRST HALF-BLOCK: QK[0] + softmax + pack P === */
+    /* NO sync, NO arrive — both WGs proceed independently */
     {
         int stage = 0;
         int phase = 0;
         mbarrier_wait_parity(&barriers[BAR_K_FULL + stage], phase);
         DO_QK_GEMM(0, stage, true);
         wgmma_wait_group_0();
-        if (tid_in_wg == 0) mbarrier_arrive(&barriers[BAR_K_EMPTY + stage]);
+        /* Only WG0 signals K_empty (both WGs are roughly synchronized) */
+        if (wg_idx == 0 && tid_in_wg == 0)
+            mbarrier_arrive(&barriers[BAR_K_EMPTY + stage]);
         DO_SOFTMAX(0, true);
         PACK_P_REGS();
         prev_v_stage = stage;
         prev_v_phase = phase;
     }
 
-    /* === MIDDLE BLOCKS: overlap QK[n] with PV[n-1] === */
+    /* === MIDDLE BLOCKS: overlap QK[n] with PV[n-1], inter-WG barriers === */
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
         int stage = kv_id % NUM_STAGES;
         int phase = (kv_id / NUM_STAGES) & 1;
 
-        /* Wait for V[prev] and K[cur] */
-        mbarrier_wait_parity(&barriers[BAR_V_FULL + prev_v_stage], prev_v_phase);
+        /* Clone V state (save for PV), advance K state (for QK) */
+        int this_v_stage = prev_v_stage;
+        int this_v_phase = prev_v_phase;
+
+        /* Wait for K[cur] to be loaded */
         mbarrier_wait_parity(&barriers[BAR_K_FULL + stage], phase);
 
+        /* Issue QK[cur] (commit group) */
+        DO_QK_GEMM(kv_id, stage, false);
+
         /* === Rescale O BEFORE PV starts (O is idle, safe to modify) === */
-        /* Apply the scale from the PREVIOUS softmax iteration.
-         * On the first middle iteration (kv_id=1), the scale is from first-block softmax. */
         {
             float rs0 = saved_rescale[0], rs1 = saved_rescale[1];
             #pragma unroll
@@ -909,31 +963,32 @@ void consumer_warp_group(
             }
         }
 
-        /* Issue QK[cur] (commit group 1) */
-        DO_QK_GEMM(kv_id, stage, false);
+        /* Wait for V[prev] to be loaded */
+        mbarrier_wait_parity(&barriers[BAR_V_FULL + this_v_stage], this_v_phase);
 
-        /* Issue PV[prev] (commit group 2) — overlaps with QK in tensor cores.
-         * O was just rescaled, so PV accumulates at the correct scale. */
-        DO_PV_GEMM(prev_v_stage);
+        /* Issue PV[prev] (commit group) — overlaps with QK in tensor cores */
+        DO_PV_GEMM(this_v_stage);
 
-        /* Wait for QK to finish (group 1). PV (group 2) may still be running.
-         * S_acc is now readable. O_lo/O_hi are NOT readable (PV writing). */
+        /* Wait for QK to finish (group 1). PV may still be running. */
         wgmma_wait_group_1();
 
-        /* Release K[cur] */
-        if (tid_in_wg == 0)
-            mbarrier_arrive(&barriers[BAR_K_EMPTY + stage]);
-
-        /* Softmax on QK result — does NOT touch O_lo/O_hi.
-         * Computes rescale factors and saves them for next iteration. */
+        /* Softmax on QK result — does NOT touch O_lo/O_hi */
         DO_SOFTMAX_NO_RESCALE(kv_id, false);
 
-        /* Wait for PV to finish — now safe to touch O */
+        /* Wait for PV to finish */
         wgmma_wait_group_0();
 
-        /* Release V[prev] */
-        if (tid_in_wg == 0)
-            mbarrier_arrive(&barriers[BAR_V_EMPTY + prev_v_stage]);
+        /* --- Inter-WG sync: both WGs synchronize AFTER PV is done.
+         * This ensures both WGs have consumed K[cur] and V[prev]
+         * before the producer can reuse those buffers.
+         * Use a single shared barrier (BAR_SCHED_WG0=14) with bar.sync. */
+        named_barrier_sync(BAR_SCHED_WG0, sched_num_threads);
+
+        /* Release K[cur] and V[prev] — only WG0 signals */
+        if (wg_idx == 0 && tid_in_wg == 0) {
+            mbarrier_arrive(&barriers[BAR_K_EMPTY + stage]);
+            mbarrier_arrive(&barriers[BAR_V_EMPTY + this_v_stage]);
+        }
 
         /* Pack P for next PV iteration */
         PACK_P_REGS();
@@ -942,6 +997,7 @@ void consumer_warp_group(
     }
 
     /* === LAST HALF-BLOCK: rescale O, then PV[last] === */
+    /* NO sync, NO arrive */
     {
         /* Apply the saved rescale from the last softmax */
         float rs0 = saved_rescale[0], rs1 = saved_rescale[1];
@@ -956,7 +1012,8 @@ void consumer_warp_group(
         mbarrier_wait_parity(&barriers[BAR_V_FULL + prev_v_stage], prev_v_phase);
         DO_PV_GEMM(prev_v_stage);
         wgmma_wait_group_0();
-        if (tid_in_wg == 0)
+        /* Only WG0 signals V_empty */
+        if (wg_idx == 0 && tid_in_wg == 0)
             mbarrier_arrive(&barriers[BAR_V_EMPTY + prev_v_stage]);
     }
 
@@ -970,7 +1027,8 @@ void consumer_warp_group(
     float inv_sum0 = fast_rcp(rowsumexp[0]);
     float inv_sum1 = fast_rcp(rowsumexp[1]);
 
-    int base_row0 = warp_in_wg * 16 + (lane_id / 4);
+    /* This WG's rows within the Q block: wg_idx * 64 + warp/lane offsets */
+    int base_row0 = causal_row_offset + warp_in_wg * 16 + (lane_id / 4);
     int base_row1 = base_row0 + 8;
 
     /* Write O_lo (columns 0..63) */
@@ -1058,6 +1116,8 @@ void flash_attention_tma_wgmma(
             mbarrier_init(&barriers[BAR_K_EMPTY + s], 1);
             mbarrier_init(&barriers[BAR_V_EMPTY + s], 1);
         }
+        /* Scheduler barriers are named barriers (bar.sync/bar.arrive),
+         * not mbarriers. They do not need explicit initialization. */
     }
     __syncthreads();
 
@@ -1066,7 +1126,7 @@ void flash_attention_tma_wgmma(
         ? min(num_kv_iter, cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
         : num_kv_iter;
 
-    const int warp_group = tid / WG_SIZE;  /* 0=producer, 1=consumer */
+    const int warp_group = tid / WG_SIZE;  /* 0=producer, 1=consumer0, 2=consumer1 */
     const int tid_in_wg  = tid % WG_SIZE;
     const int lane_id    = tid % WARP_SIZE;
 
@@ -1077,11 +1137,13 @@ void flash_attention_tma_wgmma(
             q_coord_seq, batch_seq_off, coord_head,
             max_kv_iter, tid_in_wg);
     } else {
+        int wg_idx = warp_group - 1;  /* 0 for WG1 (Q rows 0-63), 1 for WG2 (Q rows 64-127) */
         consumer_warp_group(
             smem, barriers,
             O_base, seq_stride,
             max_kv_iter, q_block_id, is_causal,
-            tid_in_wg, lane_id);
+            tid_in_wg, lane_id,
+            wg_idx);
     }
 }
 
@@ -1174,9 +1236,11 @@ extern "C" int kernel_run(
      * For bf16 (2 bytes): boxDim[0] = 64.
      *
      * One TMA descriptor per matrix with box=[64, BLOCK].
-     * Producer issues 2 TMA loads per tile:
-     *   lo half: coord0 = head_id * DIM + 0
-     *   hi half: coord0 = head_id * DIM + 64
+     * Producer issues 4 TMA loads for Q (BLOCK_Q=128, split DIM and split rows):
+     *   lo rows 0-63:   coord0 = head*DIM,      coord1 = q_seq
+     *   lo rows 64-127: coord0 = head*DIM,      coord1 = q_seq+64
+     *   hi rows 0-63:   coord0 = head*DIM+64,   coord1 = q_seq
+     *   hi rows 64-127: coord0 = head*DIM+64,   coord1 = q_seq+64
      */
     int seq_stride = H_val * D_val;
     cuuint64_t globalDim[2]    = {(cuuint64_t)seq_stride, (cuuint64_t)(B_val * S_val)};
@@ -1185,9 +1249,9 @@ extern "C" int kernel_run(
 
     CUtensorMap tma_Q, tma_K, tma_V;
 
-    /* Q: box [64, BLOCK_Q] */
+    /* Q: box [64, 64] — each TMA load covers half-DIM x half-BLOCK_Q */
     {
-        cuuint32_t boxDim[2] = {(cuuint32_t)HALF_DIM, (cuuint32_t)BLOCK_Q};
+        cuuint32_t boxDim[2] = {(cuuint32_t)HALF_DIM, (cuuint32_t)(BLOCK_Q / 2)};
         CUresult res = cuTensorMapEncodeTiled(
             &tma_Q, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
             (void*)inputs[0],

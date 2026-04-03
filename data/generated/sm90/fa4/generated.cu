@@ -48,35 +48,60 @@ float fast_rcp(float x) {
     return r;
 }
 
-/* --- Swizzle --------------------------------------------------------- */
+/* --- Swizzle<3,4,3> (128B swizzle) for B128 WGMMA layout ------------- */
 
-template <int STRIDE>
-__device__
-uint32_t swizzle(uint32_t index) {
-    if constexpr (STRIDE == 16)
-        return index;
-    uint32_t row_idx = (index / STRIDE) % 8;
-    uint32_t bits_to_xor = row_idx / max(64 / STRIDE, 1);
-    return index ^ (bits_to_xor << 4);
+__device__ __forceinline__
+uint32_t swizzle_B128(uint32_t byte_offset) {
+    /* Swizzle<3,4,3>: XOR bits [4:6] with bits [7:9] of byte address.
+     * Equivalent to: idx128[2:0] ^= idx128[5:3] where idx128 = byte/16. */
+    uint32_t idx = byte_offset >> 4;
+    idx ^= (idx >> 3) & 7;
+    return (idx << 4) | (byte_offset & 0xF);
 }
 
-/* --- cp.async global -> shared (swizzled) ----------------------------- */
+/* --- cp.async global -> shared (B128 swizzle layout) ----------------- */
+/*
+ * Store a [HEIGHT, WIDTH] bf16 tile from GMEM to SMEM in B128 swizzle
+ * layout.  The layout uses 128-byte-wide atoms (64 bf16 per row within
+ * each atom).  For WIDTH=128, two atoms are placed per 8-row group:
+ *
+ *   Group g: atom 0 (cols 0-63)  at SMEM offset g * 2048
+ *            atom 1 (cols 64-127) at SMEM offset g * 2048 + 1024
+ *
+ * Within each atom: 8 rows × 128 bytes/row = 1024 bytes, swizzled.
+ * Total SMEM per tile: HEIGHT/8 * 2 * 1024 = HEIGHT * 256 = HEIGHT*WIDTH*2.
+ */
 
 template <int HEIGHT, int WIDTH, int TB_SIZE>
 __device__ inline
-void global_to_shared_swizzle(uint32_t dst, const nv_bfloat16 *src,
-                              int src_stride, int tid) {
-    constexpr int num_elems = 16 / sizeof(nv_bfloat16);
+void global_to_shared_B128(uint32_t dst, const nv_bfloat16 *src,
+                           int src_stride, int tid) {
+    constexpr int ATOM_COLS  = 64;                          /* 64 bf16 = 128B */
+    constexpr int ATOM_BYTES = 8 * ATOM_COLS * (int)sizeof(nv_bfloat16); /* 1024 */
+    constexpr int GROUP_BYTES = (WIDTH / ATOM_COLS) * ATOM_BYTES;        /* 2048 for W=128 */
+
+    constexpr int num_elems = 16 / sizeof(nv_bfloat16);     /* 8 bf16 per 16B */
     constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
 
+    #pragma unroll
     for (int iter = 0; iter < num_iters; iter++) {
-        const int idx = (iter * TB_SIZE + tid) * num_elems;
-        const int row = idx / WIDTH;
-        const int col = idx % WIDTH;
+        const int idx  = (iter * TB_SIZE + tid) * num_elems;
+        const int row  = idx / WIDTH;
+        const int col  = idx % WIDTH;
 
-        const uint32_t dst_addr =
-            swizzle<WIDTH * sizeof(nv_bfloat16)>(
-                dst + (row * WIDTH + col) * sizeof(nv_bfloat16));
+        /* Atom-local coordinates */
+        const int atom        = col / ATOM_COLS;
+        const int col_in_atom = col % ATOM_COLS;
+        const int group       = row / 8;
+        const int row_in_grp  = row % 8;
+
+        /* Byte offset within atom, then swizzle */
+        const uint32_t atom_byte = row_in_grp * ATOM_COLS * (int)sizeof(nv_bfloat16)
+                                 + col_in_atom * (int)sizeof(nv_bfloat16);
+        const uint32_t dst_addr = dst + group * GROUP_BYTES
+                                      + atom  * ATOM_BYTES
+                                      + swizzle_B128(atom_byte);
+
         const nv_bfloat16 *src_addr = src + (row * src_stride + col);
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
                      :: "r"(dst_addr), "l"(src_addr));
@@ -310,7 +335,7 @@ void flash_attention_wgmma(
         : num_kv_iter;
 
     /* ---- Load Q to shared memory (all 128 threads) ---- */
-    global_to_shared_swizzle<BLOCK_Q, DIM, TB_SIZE>(
+    global_to_shared_B128<BLOCK_Q, DIM, TB_SIZE>(
         Q_smem, Q_base, seq_stride, tid);
     asm volatile("cp.async.commit_group;");
     asm volatile("cp.async.wait_all;");
@@ -335,7 +360,7 @@ void flash_attention_wgmma(
 
     /* ---- Prelude: load K[0] into stage 0 ---- */
     if (max_kv_iter > 0) {
-        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
             K_smem_0, K_base, seq_stride, tid);
         asm volatile("cp.async.commit_group;");
         asm volatile("cp.async.wait_all;");
@@ -353,7 +378,7 @@ void flash_attention_wgmma(
 
         /* == Step 1a: Start loading V[kv_id] into V_smem (non-blocking) == */
         const nv_bfloat16 *V_cur = V_base + kv_id * BLOCK_KV * seq_stride;
-        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
             V_smem, V_cur, seq_stride, tid);
         asm volatile("cp.async.commit_group;");
         /* V load is now group 0 (newest) — will become group 1 if K is committed */
@@ -362,7 +387,7 @@ void flash_attention_wgmma(
         const bool has_next_k = (kv_id + 1 < max_kv_iter);
         if (has_next_k) {
             const nv_bfloat16 *K_next = K_base + (kv_id + 1) * BLOCK_KV * seq_stride;
-            global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+            global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
                 next_K_smem, K_next, seq_stride, tid);
             asm volatile("cp.async.commit_group;");
             /* Now: group 0 = K[kv_id+1], group 1 = V[kv_id] */
@@ -379,10 +404,15 @@ void flash_attention_wgmma(
 
         wgmma_fence();
 
+        /* B128 layout: 128-byte-wide atoms (64 bf16 cols).  DIM=128 needs
+         * 2 atoms per row.  k-steps 0-3 → atom 0, k-steps 4-7 → atom 1.
+         * Atom offset = 1024 bytes = 64 units of 16B. */
         #pragma unroll
         for (int ks = 0; ks < DIM / 16; ks++) {
-            uint64_t desc_q = gmma_desc_advance(desc_q_base, ks * 2);
-            uint64_t desc_k = gmma_desc_advance(desc_k_base, ks * 2);
+            const int atom_off = (ks / 4) * 64;   /* 0 or 64 */
+            const int k_off    = (ks % 4) * 2;    /* 0, 2, 4, 6 */
+            uint64_t desc_q = gmma_desc_advance(desc_q_base, atom_off + k_off);
+            uint64_t desc_k = gmma_desc_advance(desc_k_base, atom_off + k_off);
             wgmma_m64n64k16_f32_bf16(S_acc, desc_q, desc_k,
                                       (ks == 0) ? 0 : 1);
         }
@@ -497,13 +527,19 @@ void flash_attention_wgmma(
          */
         wgmma_fence();
 
+        /* V K-stepping with tnspB=1: each K-step processes 16 ROWS of V.
+         * In B128 layout: 16 rows = 2 groups of 8 rows.
+         * Advance per K-step = 2 × group_bytes / 16 = 2 × 2048 / 16 = 256.
+         * (NOT ks*2 which advances 32B along columns — wrong axis!) */
+        constexpr int V_KS_ADVANCE = 2 * QKV_stride_bytes / 16;  /* 256 */
+
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
             uint32_t a0 = pack_bf16(S_acc[ks*8 + 0], S_acc[ks*8 + 1]);
             uint32_t a1 = pack_bf16(S_acc[ks*8 + 2], S_acc[ks*8 + 3]);
             uint32_t a2 = pack_bf16(S_acc[ks*8 + 4], S_acc[ks*8 + 5]);
             uint32_t a3 = pack_bf16(S_acc[ks*8 + 6], S_acc[ks*8 + 7]);
-            uint64_t desc_v = gmma_desc_advance(desc_v_base, ks * 2);
+            uint64_t desc_v = gmma_desc_advance(desc_v_base, ks * V_KS_ADVANCE);
             wgmma_m64n128k16_f32_bf16_RS(O_acc, a0, a1, a2, a3, desc_v, 1);
         }
 

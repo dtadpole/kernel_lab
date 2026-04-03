@@ -561,6 +561,249 @@ __global__ void wgmma_matmul(
         }
 }
 
+/* fence + 4x m64n128k16 + commit for small tile (128x128x64) */
+__device__ __forceinline__
+void wgmma_tile_k64_small(float* acc,
+                    uint64_t da0, uint64_t db0, uint64_t da1, uint64_t db1,
+                    uint64_t da2, uint64_t db2, uint64_t da3, uint64_t db3,
+                    int scale_D) {
+    asm volatile(
+    "wgmma.fence.sync.aligned;\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, %72, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " %64, %65, p, 1, 1, 0, 0;\n}\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, 1, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " %66, %67, p, 1, 1, 0, 0;\n}\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, 1, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " %68, %69, p, 1, 1, 0, 0;\n}\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, 1, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " %70, %71, p, 1, 1, 0, 0;\n}\n"
+    "wgmma.commit_group.sync.aligned;\n"
+    :
+      "+f"(acc[0]),
+      "+f"(acc[1]),
+      "+f"(acc[2]),
+      "+f"(acc[3]),
+      "+f"(acc[4]),
+      "+f"(acc[5]),
+      "+f"(acc[6]),
+      "+f"(acc[7]),
+      "+f"(acc[8]),
+      "+f"(acc[9]),
+      "+f"(acc[10]),
+      "+f"(acc[11]),
+      "+f"(acc[12]),
+      "+f"(acc[13]),
+      "+f"(acc[14]),
+      "+f"(acc[15]),
+      "+f"(acc[16]),
+      "+f"(acc[17]),
+      "+f"(acc[18]),
+      "+f"(acc[19]),
+      "+f"(acc[20]),
+      "+f"(acc[21]),
+      "+f"(acc[22]),
+      "+f"(acc[23]),
+      "+f"(acc[24]),
+      "+f"(acc[25]),
+      "+f"(acc[26]),
+      "+f"(acc[27]),
+      "+f"(acc[28]),
+      "+f"(acc[29]),
+      "+f"(acc[30]),
+      "+f"(acc[31]),
+      "+f"(acc[32]),
+      "+f"(acc[33]),
+      "+f"(acc[34]),
+      "+f"(acc[35]),
+      "+f"(acc[36]),
+      "+f"(acc[37]),
+      "+f"(acc[38]),
+      "+f"(acc[39]),
+      "+f"(acc[40]),
+      "+f"(acc[41]),
+      "+f"(acc[42]),
+      "+f"(acc[43]),
+      "+f"(acc[44]),
+      "+f"(acc[45]),
+      "+f"(acc[46]),
+      "+f"(acc[47]),
+      "+f"(acc[48]),
+      "+f"(acc[49]),
+      "+f"(acc[50]),
+      "+f"(acc[51]),
+      "+f"(acc[52]),
+      "+f"(acc[53]),
+      "+f"(acc[54]),
+      "+f"(acc[55]),
+      "+f"(acc[56]),
+      "+f"(acc[57]),
+      "+f"(acc[58]),
+      "+f"(acc[59]),
+      "+f"(acc[60]),
+      "+f"(acc[61]),
+      "+f"(acc[62]),
+      "+f"(acc[63])
+    :
+      "l"(da0), "l"(db0), "l"(da1), "l"(db1),
+      "l"(da2), "l"(db2), "l"(da3), "l"(db3),
+      "r"(scale_D));
+}
+
+
+/* =========================================================================
+ * Small kernel: 128×128×64 tile, 256 threads, 4-stage pipeline
+ * For matrices with N < 256 (can't use the big 128×256 tile).
+ * ========================================================================= */
+#define SMALL_TILE_M    128
+#define SMALL_TILE_N    128
+#define SMALL_TILE_K    64
+#define SMALL_STAGES    4
+#define SMALL_A_STAGE   (SMALL_TILE_M * SMALL_TILE_K * 2)           /* 16384 */
+#define SMALL_B_STAGE   (SMALL_TILE_N * SMALL_TILE_K * 2)           /* 16384 */
+#define SMALL_SMEM_STAGE (SMALL_A_STAGE + SMALL_B_STAGE)            /* 32768 */
+#define SMALL_SMEM_BYTES (SMALL_STAGES * SMALL_SMEM_STAGE + 256)    /* 131328 */
+
+__device__ __forceinline__
+uint64_t make_gmma_desc_small(const void* smem_ptr) {
+    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    const int stride_16B = (8 * SMALL_TILE_K * 2) >> 4;  /* 64 */
+    uint64_t desc = 0;
+    desc |= (uint64_t)((addr >> 4) & 0x3FFF);
+    desc |= (uint64_t)(1) << 16;
+    desc |= (uint64_t)(stride_16B & 0x3FFF) << 32;
+    desc |= (uint64_t)(1) << 62;  /* B128 */
+    return desc;
+}
+
+__launch_bounds__(THREADS, 1)
+__global__ void wgmma_matmul_small(
+        __nv_bfloat16* __restrict__ C, int M, int N, int K,
+        int totalTiles, int nTilesN,
+        const __grid_constant__ CUtensorMap tma_A,
+        const __grid_constant__ CUtensorMap tma_B) {
+
+    extern __shared__ char smem[];
+    uint64_t* mbar = reinterpret_cast<uint64_t*>(smem + SMALL_STAGES * SMALL_SMEM_STAGE);
+    const int tid = threadIdx.x;
+    const int wg_id = tid / WG_SIZE;
+    const int warp_in_wg = (tid / 32) % 4;
+    const int lane = tid % 32;
+    const int groupID = lane / 4;
+    const int thread_in_group = lane % 4;
+    int nTilesM = totalTiles / nTilesN;
+    int numKTiles = K / SMALL_TILE_K;
+    float acc[64];
+
+    if (tid < 32) { tma_prefetch_descriptor(&tma_A); tma_prefetch_descriptor(&tma_B); }
+    if (tid == 0) for (int s = 0; s < SMALL_STAGES; s++) mbarrier_init(&mbar[s], 1);
+    __syncthreads();
+
+    int tileIdx = blockIdx.x;
+    int nTilesM_ = nTilesM;
+    int tile_m, tile_n;
+    { const int gm = 16; int gms = nTilesM_ / gm;
+      if (gms > 0) { int gi = tileIdx/(gm*nTilesN); int w = tileIdx%(gm*nTilesN);
+        tile_n = w/gm; tile_m = gi*gm + w%gm; }
+      else { tile_m = tileIdx/nTilesN; tile_n = tileIdx%nTilesN; } }
+
+    int mBase = tile_m * SMALL_TILE_M;
+    int nBase = tile_n * SMALL_TILE_N;
+    int wg_a_offset = wg_id * 64 * SMALL_TILE_K * 2;
+
+    /* Prelude */
+    int prelude = (numKTiles < SMALL_STAGES) ? numKTiles : SMALL_STAGES;
+    if (tid == 0) {
+        for (int s = 0; s < prelude; s++) {
+            int kc = s * SMALL_TILE_K;
+            char* stage = smem + s * SMALL_SMEM_STAGE;
+            mbarrier_arrive_expect_tx(&mbar[s], SMALL_A_STAGE + SMALL_B_STAGE);
+            tma_load_2d(stage, &tma_A, kc, mBase, &mbar[s]);
+            tma_load_2d(stage + SMALL_A_STAGE, &tma_B, kc, nBase, &mbar[s]);
+        }
+    }
+
+    /* Prologue */
+    { mbarrier_wait_parity(&mbar[0], 0);
+      char* stage = smem;
+      uint64_t da = make_gmma_desc_small(stage + wg_a_offset);
+      uint64_t db = make_gmma_desc_small(stage + SMALL_A_STAGE);
+      wgmma_tile_k64_small(acc, da, db,
+                     gmma_desc_advance(da,2), gmma_desc_advance(db,2),
+                     gmma_desc_advance(da,4), gmma_desc_advance(db,4),
+                     gmma_desc_advance(da,6), gmma_desc_advance(db,6), 0); }
+
+    /* Mainloop */
+    for (int kb = 1; kb < numKTiles; kb++) {
+        int sc = kb % SMALL_STAGES, sl = (kb+SMALL_STAGES-1)%SMALL_STAGES;
+        int phase = (kb/SMALL_STAGES) & 1;
+        mbarrier_wait_parity(&mbar[sc], phase);
+        char* stage = smem + sc * SMALL_SMEM_STAGE;
+        uint64_t da = make_gmma_desc_small(stage + wg_a_offset);
+        uint64_t db = make_gmma_desc_small(stage + SMALL_A_STAGE);
+        wgmma_tile_k64_small(acc, da, db,
+                       gmma_desc_advance(da,2), gmma_desc_advance(db,2),
+                       gmma_desc_advance(da,4), gmma_desc_advance(db,4),
+                       gmma_desc_advance(da,6), gmma_desc_advance(db,6), 1);
+        wgmma_wait_group_1();
+        if (tid == 0 && kb+SMALL_STAGES-1 < numKTiles) {
+            int nk = (kb+SMALL_STAGES-1)*SMALL_TILE_K;
+            char* ns = smem + sl * SMALL_SMEM_STAGE;
+            mbarrier_arrive_expect_tx(&mbar[sl], SMALL_A_STAGE+SMALL_B_STAGE);
+            tma_load_2d(ns, &tma_A, nk, mBase, &mbar[sl]);
+            tma_load_2d(ns+SMALL_A_STAGE, &tma_B, nk, nBase, &mbar[sl]);
+        }
+    }
+    wgmma_wait_group_0();
+
+    /* Epilogue: m64n128k16 fragment layout (pair4 0..15) */
+    #pragma unroll
+    for (int j = 0; j < 32; j++) {
+        int p4 = j/2, h = j%2;
+        int row = mBase + wg_id*64 + warp_in_wg*16 + h*8 + groupID;
+        int col = nBase + p4*8 + thread_in_group*2;
+        int idx = 4*p4 + 2*h;
+        if (row < M && col+1 < N)
+            *reinterpret_cast<__nv_bfloat162*>(&C[row*N+col]) =
+                __floats2bfloat162_rn(acc[idx], acc[idx+1]);
+    }
+}
+
 /* =========================================================================
  * Simple BF16 transpose kernel: (K, N) row-major → (N, K) row-major
  * After transpose, K is contiguous (matching CuTe DSL convention).
@@ -648,10 +891,8 @@ extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
     if (s_numSMs == 0)
         cudaDeviceGetAttribute(&s_numSMs, cudaDevAttrMultiProcessorCount, 0);
 
-    /* Skip sizes too small for the 128×256 tile */
-    if (M < TILE_M || N < TILE_N || K < TILE_K) {
-        fprintf(stderr, "Matrix too small for 128x256x64 tile: M=%d N=%d K=%d\n",
-                M, N, K);
+    if (M < SMALL_TILE_M || N < SMALL_TILE_N || K < SMALL_TILE_K) {
+        fprintf(stderr, "Matrix too small: M=%d N=%d K=%d\n", M, N, K);
         return -4;
     }
 
@@ -661,7 +902,7 @@ extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
         if (s_B_t) cudaFree(s_B_t);
         cudaMalloc(&s_B_t, B_elems * sizeof(__nv_bfloat16));
         s_B_t_size = B_elems * sizeof(__nv_bfloat16);
-        s_B_last = nullptr;  /* force re-transpose */
+        s_B_last = nullptr;
     }
     if (s_B_last != B) {
         dim3 block(32, 32);
@@ -670,48 +911,38 @@ extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
         s_B_last = B;
     }
 
-    /* --- TMA descriptors --- */
-    CUtensorMap tma_A, tma_B;
+    /* Dispatch: big kernel (128×256) for N≥256, small kernel (128×128) otherwise */
+    bool use_big = (M >= TILE_M && N >= TILE_N && K >= TILE_K);
 
-    /* A: global (K, M) with K contiguous — row-major A viewed as (K-cols, M-rows) */
-    {
-        cuuint64_t dims[2]    = {(cuuint64_t)K, (cuuint64_t)M};
-        cuuint64_t strides[1] = {(cuuint64_t)K * 2};
-        cuuint32_t box[2]     = {(cuuint32_t)TILE_K, (cuuint32_t)TILE_M};
-        cuuint32_t elem[2]    = {1, 1};
-        if (s_encodeTiled(&tma_A, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)A,
-                dims, strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_NONE,
-                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS) return -2;
+    if (use_big) {
+        CUtensorMap tma_A, tma_B;
+        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)M}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={TILE_K,TILE_M}; cuuint32_t el[2]={1,1};
+          if (s_encodeTiled(&tma_A,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)A,dims,str,box,el,
+              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -2; }
+        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)N}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={TILE_K,N_SUB}; cuuint32_t el[2]={1,1};
+          if (s_encodeTiled(&tma_B,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)s_B_t,dims,str,box,el,
+              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -3; }
+        static bool cfg_big = false;
+        if (!cfg_big) { cudaFuncSetAttribute(wgmma_matmul, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES); cfg_big = true; }
+        int nTilesM=M/TILE_M, nTilesN=N/TILE_N, totalTiles=nTilesM*nTilesN;
+        wgmma_matmul<<<totalTiles, THREADS, SMEM_BYTES, stream>>>(C,M,N,K,totalTiles,nTilesN,tma_A,tma_B);
+    } else {
+        CUtensorMap tma_A, tma_B;
+        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)M}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={SMALL_TILE_K,(cuuint32_t)SMALL_TILE_M}; cuuint32_t el[2]={1,1};
+          if (s_encodeTiled(&tma_A,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)A,dims,str,box,el,
+              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -2; }
+        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)N}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={SMALL_TILE_K,(cuuint32_t)SMALL_TILE_N}; cuuint32_t el[2]={1,1};
+          if (s_encodeTiled(&tma_B,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)s_B_t,dims,str,box,el,
+              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -3; }
+        static bool cfg_small = false;
+        if (!cfg_small) { cudaFuncSetAttribute(wgmma_matmul_small, cudaFuncAttributeMaxDynamicSharedMemorySize, SMALL_SMEM_BYTES); cfg_small = true; }
+        int nTilesM=M/SMALL_TILE_M, nTilesN=N/SMALL_TILE_N, totalTiles=nTilesM*nTilesN;
+        wgmma_matmul_small<<<totalTiles, THREADS, SMALL_SMEM_BYTES, stream>>>(C,M,N,K,totalTiles,nTilesN,tma_A,tma_B);
     }
-
-    /* B_t: global (K, N) with K contiguous — transposed B viewed as (K-cols, N-rows) */
-    {
-        cuuint64_t dims[2]    = {(cuuint64_t)K, (cuuint64_t)N};
-        cuuint64_t strides[1] = {(cuuint64_t)K * 2};
-        cuuint32_t box[2]     = {(cuuint32_t)TILE_K, (cuuint32_t)N_SUB};
-        cuuint32_t elem[2]    = {1, 1};
-        if (s_encodeTiled(&tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)s_B_t,
-                dims, strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_NONE,
-                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS) return -3;
-    }
-
-    /* Configure dynamic SMEM */
-    static bool cfg_done = false;
-    if (!cfg_done) {
-        cudaFuncSetAttribute(wgmma_matmul,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
-        cfg_done = true;
-    }
-
-    /* Launch: non-persistent, one block per output tile */
-    int nTilesM = M / TILE_M;
-    int nTilesN = N / TILE_N;
-    int totalTiles = nTilesM * nTilesN;
-
-    wgmma_matmul<<<totalTiles, THREADS, SMEM_BYTES, stream>>>(
-        C, M, N, K, totalTiles, nTilesN, tma_A, tma_B);
 
     return 0;
 }

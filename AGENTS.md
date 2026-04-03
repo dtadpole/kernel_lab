@@ -364,6 +364,32 @@ data/
 - Fixture entry point files are named `cutedsl.py` (CuTe DSL reference implementations)
 - Device-specific configs use `configs_<device>.json` naming (e.g. `configs_rtx5090.json`)
 
+### 12. Benchmarking rules
+
+#### All benchmarks must go through the eval harness
+
+All code — cuDNN/cuBLAS, CuTe DSL, and Generated CUDA — **must** be run through
+the eval harness (`cuda_exec/scripts/eval_harness.cu`). **Never** run benchmarks
+directly (e.g., via standalone Python scripts like `bench_all_three.py` or `torch.mm()`).
+
+The harness implements:
+- **Cold-L2 conditions**: L2 flush via `cudaMemsetAsync(flush_buf, 0, l2_size)` before each trial
+- **Fresh input buffers**: `cudaMalloc` + `fill_random_bf16` per trial (new pointers break pointer caches)
+- **Fair comparison**: identical measurement methodology for all three implementations
+
+Running directly (e.g., `torch.mm()` in a Python loop) inflates numbers by up to 15% at large
+sizes due to warm L2, causing unfair comparisons.
+
+#### Correctness is a hard gate
+
+Never push or commit code when correctness tests are failing. If any config fails correctness,
+fix it first. Do not push performance-only improvements that have correctness regressions.
+
+#### cuDNN baseline = `torch.mm()` via cuBLAS
+
+The cuDNN reference (`cudnn.py`) uses `torch.mm()` which dispatches to cuBLAS `cublasGemmEx`.
+This is the vendor-optimized baseline. Do **not** use CUTLASS for the cuDNN baseline.
+
 ## License
 
 MIT — see `LICENSE`.

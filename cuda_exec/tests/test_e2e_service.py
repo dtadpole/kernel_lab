@@ -15,7 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CUDA_EXEC_DIR = REPO_ROOT / "cuda_exec"
 PRUNE_SCRIPT = CUDA_EXEC_DIR / "scripts" / "prune_temp_runs.py"
 FIXTURES = REPO_ROOT / "conf" / "fixtures"
-CONFIG_FIXTURE = FIXTURES / "vecadd" / "configs.json"
+GENERATED = REPO_ROOT / "data" / "generated"
+CONFIG_FIXTURE = FIXTURES / "sm120" / "vecadd" / "configs.json"
 SUITE_RUN_DIR: Path | None = None
 SUITE_VENV_DIR: Path | None = None
 REFERENCE_STACK_SITE_PACKAGES = CUDA_EXEC_DIR / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
@@ -236,10 +237,10 @@ class CudaExecE2ETest(unittest.TestCase):
             "metadata": self._metadata(turn),
             "timeout_seconds": 20,
             "reference_files": {
-                "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
+                "cutedsl.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8")
             },
             "generated_files": {
-                "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
+                "generated.cu": (GENERATED / "sm120" / "vecadd" / "generated.cu").read_text(encoding="utf-8")
             },
         }
 
@@ -321,13 +322,13 @@ class CudaExecE2ETest(unittest.TestCase):
                 "timeout_seconds": 20,
                 "reference_files": {},
                 "generated_files": {
-                    "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
+                    "generated.cu": (GENERATED / "sm120" / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
         self.assertEqual(only_generated_status, 400)
         self.assertIn("detail", only_generated_body)
-        self.assertIn("reference_files must include a file named reference.py", only_generated_body["detail"])
+        self.assertIn("reference_files must include a file named cutedsl.py", only_generated_body["detail"])
 
         only_reference_status, only_reference_body = self.service.post_json(
             "/compile",
@@ -335,7 +336,7 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(107),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
+                    "cutedsl.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {},
             },
@@ -379,12 +380,12 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertIn("We recommend a generator", body["detail"])
 
     def test_compile_rejects_cu_file_not_named_generated_cu(self) -> None:
-        cu_content = (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
+        cu_content = (GENERATED / "sm120" / "vecadd" / "generated.cu").read_text(encoding="utf-8")
         payload = {
             "metadata": self._metadata(turn=152),
             "timeout_seconds": 20,
             "reference_files": {
-                "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8"),
+                "cutedsl.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8"),
             },
             "generated_files": {"my_kernel.cu": cu_content},
         }
@@ -393,23 +394,23 @@ class CudaExecE2ETest(unittest.TestCase):
         self.assertIn("detail", body)
         self.assertIn("must be named generated.cu", body["detail"])
 
-    def test_compile_rejects_reference_files_without_reference_py(self) -> None:
+    def test_compile_rejects_reference_files_without_cutedsl_py(self) -> None:
         status, body = self.service.post_json(
             "/compile",
             {
                 "metadata": self._metadata(153),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "my_model.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
+                    "my_model.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
+                    "generated.cu": (GENERATED / "sm120" / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
         self.assertEqual(status, 400)
         self.assertIn("detail", body)
-        self.assertIn("must include a file named reference.py", body["detail"])
+        self.assertIn("must include a file named cutedsl.py", body["detail"])
 
     def test_compile_accepts_single_generated_cu_with_helper_files(self) -> None:
         payload = self._compile_payload(turn=111)
@@ -426,7 +427,7 @@ class CudaExecE2ETest(unittest.TestCase):
     def test_compile_accepts_reference_files_without_any_reference_cu_file(self) -> None:
         payload = self._compile_payload(turn=112)
         payload["reference_files"] = {
-            "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8"),
+            "cutedsl.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8"),
             "notes/reference.txt": "vector-add reference notes\n",
         }
         status, body = self.service.post_json("/compile", payload)
@@ -441,10 +442,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(113),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
+                    "cutedsl.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "/tmp/generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
+                    "/tmp/generated.cu": (GENERATED / "sm120" / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -458,10 +459,10 @@ class CudaExecE2ETest(unittest.TestCase):
                 "metadata": self._metadata(114),
                 "timeout_seconds": 20,
                 "reference_files": {
-                    "../reference.py": (FIXTURES / "vecadd" / "reference.py").read_text(encoding="utf-8")
+                    "../cutedsl.py": (FIXTURES / "sm120" / "vecadd" / "cutedsl.py").read_text(encoding="utf-8")
                 },
                 "generated_files": {
-                    "generated.cu": (FIXTURES / "vecadd" / "generated.cu").read_text(encoding="utf-8")
+                    "generated.cu": (GENERATED / "sm120" / "vecadd" / "generated.cu").read_text(encoding="utf-8")
                 },
             },
         )
@@ -767,7 +768,7 @@ class CudaExecE2ETest(unittest.TestCase):
 
 class ReferenceFixtureContractTest(unittest.TestCase):
     def test_reference_fixture_declares_explicit_module_contract(self) -> None:
-        fixture_path = FIXTURES / "vecadd" / "reference.py"
+        fixture_path = FIXTURES / "sm120" / "vecadd" / "cutedsl.py"
         source = fixture_path.read_text(encoding="utf-8")
         self.assertIn("class Model(nn.Module)", source)
         self.assertIn("def get_init_inputs()", source)
@@ -795,7 +796,7 @@ class ReferenceFixtureContractTest(unittest.TestCase):
         except Exception:
             self.skipTest("torch/cutlass.cute/CUDA is unavailable in cuda_exec runtime environment")
 
-        fixture_path = FIXTURES / "vecadd" / "reference.py"
+        fixture_path = FIXTURES / "sm120" / "vecadd" / "cutedsl.py"
         env = os.environ.copy()
         env.update(
             {

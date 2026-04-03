@@ -62,7 +62,7 @@ Every tool requires a `metadata` dict:
 
 ```json
 {
-  "reference_files": {"reference.py": "<content>"},
+  "reference_files": {"cutedsl.py": "<content>"},
   "generated_files": {"generated.cu": "<content>"}
 }
 ```

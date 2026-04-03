@@ -1,4 +1,7 @@
-"""Flash Attention forward reference for cuda_exec evaluation.
+"""Flash Attention forward reference for cuda_exec evaluation (SM120 Blackwell).
+
+Supports RTX 5090 (170 SMs) and RTX PRO 6000 (188 SMs).
+Use ``detect_sm120_device()`` to identify the current device variant.
 
 Uses flash_attn.cute (FlashAttention-4 CuTe DSL) when available and
 functional, otherwise falls back to PyTorch's scaled_dot_product_attention
@@ -7,7 +10,7 @@ which dispatches to cuDNN flash attention on supported GPUs.
 Input layout: (batch, seqlen, num_heads, head_dim) — BF16
 Output layout: same as input — BF16
 
-Contract for cuda_exec reference Python files:
+Contract for cuda_exec CuTe DSL reference files (cutedsl.py):
 - export `class Model(torch.nn.Module)`
 - export `get_inputs(config)`
 - export `get_init_inputs()`
@@ -22,6 +25,27 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+# ---------------------------------------------------------------------------
+#  SM120 device detection
+# ---------------------------------------------------------------------------
+
+_SM120_DEVICES = {
+    "rtx5090":      {"match": ["RTX 5090", "5090"],     "sms": 170, "bf16_tflops": 209.5},
+    "rtx_pro_6000": {"match": ["RTX PRO 6000", "PRO 6000"], "sms": 188, "bf16_tflops": 503.8},
+}
+
+
+def detect_sm120_device() -> str:
+    """Return the SM120 device key ('rtx5090' or 'rtx_pro_6000'), or 'unknown_sm120'."""
+    if not torch.cuda.is_available():
+        return "unknown_sm120"
+    name = torch.cuda.get_device_name().upper()
+    for key, info in _SM120_DEVICES.items():
+        if any(pat.upper() in name for pat in info["match"]):
+            return key
+    return "unknown_sm120"
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ async def test_compile_vecadd(cuda_mcp, sample_metadata, vecadd_fixtures):
     """compile tool returns structured response."""
     result = await cuda_mcp.compile(
         metadata=sample_metadata,
-        reference_files={"reference.py": vecadd_fixtures["reference"]},
+        reference_files={"cutedsl.py": vecadd_fixtures["reference"]},
         generated_files={"generated.cu": vecadd_fixtures["generated"]},
     )
     data = json.loads(result)
@@ -46,7 +46,7 @@ async def test_compile_has_ptx(cuda_mcp, sample_metadata, vecadd_fixtures):
     """compile produces PTX output."""
     result = await cuda_mcp.compile(
         metadata=sample_metadata,
-        reference_files={"reference.py": vecadd_fixtures["reference"]},
+        reference_files={"cutedsl.py": vecadd_fixtures["reference"]},
         generated_files={"generated.cu": vecadd_fixtures["generated"]},
     )
     data = json.loads(result)

@@ -1,0 +1,50 @@
+{
+  "mat-256x256": {
+    "family": "integration-matrix-multiplication",
+    "device": "rtx5090",
+    "rank": 2,
+    "shape": [256, 256],
+    "input_size": 65536,
+    "shape_kind": "2d"
+  },
+  "mat-512x512": {
+    "family": "integration-matrix-multiplication",
+    "device": "rtx5090",
+    "rank": 2,
+    "shape": [512, 512],
+    "input_size": 262144,
+    "shape_kind": "2d"
+  },
+  "mat-1024x1024": {
+    "family": "integration-matrix-multiplication",
+    "device": "rtx5090",
+    "rank": 2,
+    "shape": [1024, 1024],
+    "input_size": 1048576,
+    "shape_kind": "2d"
+  },
+  "mat-2048x2048": {
+    "family": "integration-matrix-multiplication",
+    "device": "rtx5090",
+    "rank": 2,
+    "shape": [2048, 2048],
+    "input_size": 4194304,
+    "shape_kind": "2d"
+  },
+  "mat-4096x4096": {
+    "family": "integration-matrix-multiplication",
+    "device": "rtx5090",
+    "rank": 2,
+    "shape": [4096, 4096],
+    "input_size": 16777216,
+    "shape_kind": "2d"
+  },
+  "mat-8192x8192": {
+    "family": "integration-matrix-multiplication",
+    "device": "rtx5090",
+    "rank": 2,
+    "shape": [8192, 8192],
+    "input_size": 67108864,
+    "shape_kind": "2d"
+  }
+}

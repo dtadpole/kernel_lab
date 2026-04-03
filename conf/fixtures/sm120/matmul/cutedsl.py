@@ -1,4 +1,7 @@
-"""Blackwell GeForce CuTe DSL BF16 GEMM reference fixture for cuda_exec evaluation.
+"""Blackwell (SM120) CuTe DSL BF16 GEMM reference fixture for cuda_exec evaluation.
+
+Supports RTX 5090 (170 SMs) and RTX PRO 6000 (188 SMs).
+Use ``detect_sm120_device()`` to identify the current device variant.
 
 Wraps ``Sm120Gemm`` from ``cute_gemm.py`` into the ``Model(nn.Module)`` contract
 expected by the evaluation harness.  All inputs are ``torch.bfloat16``; the
@@ -10,7 +13,7 @@ Convention for all inputs/outputs:
     B: (K, N)  row-major BF16  — B.t() view (zero-copy) gives (N, K) N-major
     C: (M, N)  row-major BF16  — FP32->BF16 conversion in kernel epilogue
 
-Contract for cuda_exec reference Python files:
+Contract for cuda_exec CuTe DSL reference files (cutedsl.py):
 - export ``class Model(torch.nn.Module)``
 - export ``get_inputs(config)``
 - export ``get_init_inputs()``
@@ -26,6 +29,27 @@ import torch
 from torch import nn
 
 from cute_gemm import Sm120Gemm
+
+
+# ---------------------------------------------------------------------------
+#  SM120 device detection
+# ---------------------------------------------------------------------------
+
+_SM120_DEVICES = {
+    "rtx5090":      {"match": ["RTX 5090", "5090"],     "sms": 170, "bf16_tflops": 209.5},
+    "rtx_pro_6000": {"match": ["RTX PRO 6000", "PRO 6000"], "sms": 188, "bf16_tflops": 503.8},
+}
+
+
+def detect_sm120_device() -> str:
+    """Return the SM120 device key ('rtx5090' or 'rtx_pro_6000'), or 'unknown_sm120'."""
+    if not torch.cuda.is_available():
+        return "unknown_sm120"
+    name = torch.cuda.get_device_name().upper()
+    for key, info in _SM120_DEVICES.items():
+        if any(pat.upper() in name for pat in info["match"]):
+            return key
+    return "unknown_sm120"
 
 
 # ---------------------------------------------------------------------------

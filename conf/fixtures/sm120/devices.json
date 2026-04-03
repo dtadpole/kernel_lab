@@ -1,0 +1,42 @@
+{
+  "arch": "sm120",
+  "arch_name": "Blackwell",
+  "devices": {
+    "rtx5090": {
+      "full_name": "NVIDIA GeForce RTX 5090",
+      "match_patterns": ["RTX 5090", "5090"],
+      "gpu": "GB202",
+      "sms": 170,
+      "cuda_cores": 21760,
+      "tensor_cores": 680,
+      "boost_clock_mhz": 2407,
+      "tdp_watts": 575,
+      "l2_cache_mb": 96,
+      "memory_gb": 32,
+      "memory_type": "GDDR7",
+      "memory_bus_bits": 512,
+      "memory_bandwidth_gbs": 1792,
+      "bf16_tflops_dense": 209.5,
+      "bf16_tflops_sparse": 419.0,
+      "roofline_ridge_bf16": 117
+    },
+    "rtx_pro_6000": {
+      "full_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "match_patterns": ["RTX PRO 6000", "PRO 6000"],
+      "gpu": "GB202",
+      "sms": 188,
+      "cuda_cores": 24064,
+      "tensor_cores": 752,
+      "boost_clock_mhz": 2617,
+      "tdp_watts": 600,
+      "l2_cache_mb": 128,
+      "memory_gb": 96,
+      "memory_type": "GDDR7-ECC",
+      "memory_bus_bits": 512,
+      "memory_bandwidth_gbs": 1792,
+      "bf16_tflops_dense": 503.8,
+      "bf16_tflops_sparse": 1007.6,
+      "roofline_ridge_bf16": 281
+    }
+  }
+}

@@ -145,7 +145,7 @@ Rules:
 - `reference_files` may include `.cu` files, but does not require one
 - if `generated_files` contains zero or multiple `.cu` files, reject the compile request
 - when rejecting multiple generated `.cu` files, the caller-facing guidance should recommend using a generator
-- `reference_files` must include a file keyed as `reference.py` (the entry point)
+- `reference_files` must include a file keyed as `cutedsl.py` (the entry point)
 - `generated_files` must have its single `.cu` file keyed as `generated.cu` (the entry point)
 
 Conceptual example:
@@ -157,7 +157,7 @@ Conceptual example:
     "generated.cu": "extern \"C\" __global__ void ..."
   },
   "reference_files": {
-    "reference.py": "import torch ..."
+    "cutedsl.py": "import torch ..."
   }
 }
 ```
@@ -1172,7 +1172,7 @@ def get_init_inputs() -> list:
 
 **The harness/support layer owns the measurement environment.  Fixture files must not.**
 
-Fixture files (`reference.py`, `generated.cu`) implement only kernel logic:
+Fixture files (`cutedsl.py`, `generated.cu`) implement only kernel logic:
 - `kernel_run()` — launch kernel(s) on the given stream, return immediately.
 - `Model.forward()` — run the kernel, return output tensor.  Must not synchronize.
 

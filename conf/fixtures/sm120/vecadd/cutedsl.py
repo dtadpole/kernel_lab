@@ -3,7 +3,7 @@
 All inputs and outputs use torch.bfloat16.  This matches the BF16-only
 convention enforced by the CUDA eval harness on the generated side.
 
-Contract for cuda_exec reference Python files:
+Contract for cuda_exec CuTe DSL reference files (cutedsl.py):
 - export `class Model(torch.nn.Module)`
 - export `get_inputs(config)`
 - export `get_init_inputs()`

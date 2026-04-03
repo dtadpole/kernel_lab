@@ -2,6 +2,10 @@
 
 A repository for kernel optimization experiments and related tooling.
 
+## System design
+
+See `docs/SYSTEM_DESIGN.md` for the multi-agent architecture (Supervisor / Solver / Harness / Evaluator / Reflector) and the two-repo split (kernel-lab + kernel-lab-kb).
+
 ## Current components
 
 - `cuda_exec/` — FastAPI-based remote CUDA execution service

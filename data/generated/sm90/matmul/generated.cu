@@ -48,9 +48,9 @@ using ElementAccumulator = float;
 using ElementCompute = float;
 using ElementScalar = float;
 
-// A is row-major (M×K), B is column-major (K×N from PyTorch's B.t())
+// A is row-major (M×K), B is row-major (K×N) — standard PyTorch convention
 using LayoutA = cutlass::layout::RowMajor;
-using LayoutB = cutlass::layout::ColumnMajor;
+using LayoutB = cutlass::layout::RowMajor;
 using LayoutC = cutlass::layout::RowMajor;
 using LayoutD = cutlass::layout::RowMajor;
 
@@ -148,7 +148,7 @@ static int run_gemm(int M, int N, int K,
 
     // Row-major A (M×K): stride = (K, 1, 0)
     StrideA stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, 1));
-    // Column-major B: stride computed from (N, K)
+    // Row-major B (K×N): stride computed from (N, K)
     StrideB stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, 1));
     // Row-major C/D (M×N)
     StrideC stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, 1));

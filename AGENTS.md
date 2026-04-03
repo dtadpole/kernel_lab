@@ -235,6 +235,14 @@ Each arch folder contains kernels optimized for that SM version — **do not cop
 - SM120 (Blackwell GeForce): uses per-warp `mma.sync m16n8k16`. WGMMA not available on GeForce SM120.
 - TMA (`cp.async.bulk.tensor`) works on both SM90+ and SM120.
 
+**SM90 generated kernel (data/generated/sm90/matmul/generated.cu):**
+- Uses CUTLASS 3.x C++ API (CollectiveBuilder) with `KernelTmaWarpSpecializedCooperative`
+- Tile: 128×256×64 (big) / 128×128×64 (small), auto stage count, persistent scheduler
+- Compile: `nvcc -arch=sm_90a -std=c++17 -O3 -I<cutlass>/include -I<cutlass>/tools/util/include --expt-relaxed-constexpr -lcuda`
+- CUTLASS headers: `/home/zhenc/workspace1/third-party/cutlass/4.3.5/`
+- Performance at 8192×8192: **668 TFLOPS (95% of cuBLAS 715)**
+- Remaining 5% gap: ptxas `wgmma pipeline crossing function boundary` — CUTLASS template generates cross-function wgmma ops that nvcc can't fully pipeline. cuBLAS is NVIDIA-internal compiled with better instruction scheduling.
+
 **CuTe DSL venv compatibility:**
 - The service venv (`~/.cuda_exec_service/.venv`) has `cuda-python==13.2.0` → requires CUDA 13.x driver.
 - h8_3 has driver 550.90.07 (CUDA 12.4) → CuTe DSL **fails** with `cudaErrorInsufficientDriver`.

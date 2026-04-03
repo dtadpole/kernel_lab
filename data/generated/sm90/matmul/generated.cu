@@ -426,7 +426,7 @@ __global__ void wgmma_matmul(
     /* CTA swizzle (CuTe DSL pattern): group_size_m=8 for L2 reuse */
     int tile_m, tile_n;
     {
-        const int group_m = 8;
+        const int group_m = 16;
         int groups_m = nTilesM / group_m;
         if (groups_m > 0) {
             int group_id = tileIdx / (group_m * nTilesN);

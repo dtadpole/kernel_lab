@@ -901,7 +901,7 @@ def run_profile_task(
                 "--target", sys.executable, str(reference_py),
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
-                "--kernel-name", 'regex:"cutlass|vector_add"',
+                "--kernel-name", 'regex:"cutlass|vector_add|flash_fwd"',
             ]
         else:  # side == "cudnn"
             cudnn_py = Path(workspace["workspace_path"]) / "inputs" / "cudnn" / "cudnn.py"

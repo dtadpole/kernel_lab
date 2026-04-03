@@ -87,6 +87,7 @@ mainloop and 67KB for epilogue, total = 264KB > 228KB. Need to either:
 
 High — this is essentially a rewrite of the tile loop and consumer logic.
 Estimate 300-500 lines of changes. Should be done in a dedicated session.
+<<<<<<< HEAD
 
 ## Attempted in this session
 
@@ -109,3 +110,5 @@ Estimate 300-500 lines of changes. Should be done in a dedicated session.
 - **Next step**: Study the stmatrix m8n8.x4.trans register-to-SMEM mapping using
   the PTX ISA documentation and write a small test kernel to verify the mapping
   before integrating into the matmul kernel.
+=======
+>>>>>>> 232fb28 (docs: matmul ping-pong scheduling plan + cluster multicast findings)

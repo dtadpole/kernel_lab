@@ -141,7 +141,7 @@ def _get_timeout() -> Any:
 # ---------------------------------------------------------------------------
 
 
-def dispatch_remote(
+async def dispatch_remote(
     endpoint: str,
     body: dict[str, Any],
     *,
@@ -150,15 +150,15 @@ def dispatch_remote(
     """POST to a remote cuda_exec service and return the response dict.
 
     Resolves *host* to a base URL, loads the bearer token, and sends an
-    HTTP POST with JSON body.  Returns the parsed JSON response.
+    async HTTP POST with JSON body.  Returns the parsed JSON response.
     """
     import httpx
 
     base_url = resolve_host_url(host)
     token = _load_bearer_token()
     timeout = _get_timeout()
-    with httpx.Client(base_url=base_url, timeout=timeout) as client:
-        resp = client.post(
+    async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
+        resp = await client.post(
             endpoint,
             json=body,
             headers={"Authorization": f"Bearer {token}"},

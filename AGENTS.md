@@ -302,7 +302,22 @@ git branch -d worktree-<name>
 - Do not commit `.worktrees/` to git — it is in `.gitignore`
 - Each worktree has its own working tree but shares the same `.git` object store
 
-### 10. Data directory layout
+### 10. Results file naming
+
+Results are stored under `results/<arch>/<device>/matmul/` (or other kernel family).
+
+**Filename format:** `YYYYMMDD_HHMM_<hash>_<slug>.md`
+
+| Component | Description | Example |
+|-----------|-------------|---------|
+| Date+time | `YYYYMMDD_HHMM` | `20260403_0200` |
+| Hash | Short commit hash | `e732f2d` |
+| Slug | Kebab-case description | `sm90-wgmma-benchmark` |
+| Extension | Always `.md` | `.md` |
+
+**Example:** `20260403_0200_e732f2d_sm90-wgmma-benchmark.md`
+
+### 11. Data directory layout
 
 ```text
 data/

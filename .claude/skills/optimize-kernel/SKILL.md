@@ -66,18 +66,30 @@ most recent.
 Then run a fresh evaluation to get ground-truth numbers for this session:
 
 1. Use `/cuda:exec` to **compile** the current generated code
-2. Use `/cuda:exec` to **evaluate** across ALL configs in `data/fixtures/{arch}/{kernel}/configs.json`
+2. Use `/cuda:exec` to **evaluate** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
 3. Record latency for generated code vs reference (CuTe DSL) vs cuDNN/cuBLAS
 
-Build a comparison table:
+**After every full evaluation, output a performance comparison table** like the
+example below. This table is mandatory after evaluate-all in both Phase 1 and
+Phase 5.
 
 ```
-Config             | Generated | Reference | cuDNN | Gap vs Best
--------------------|-----------|-----------|-------|------------
-causal-b8-s4096    | 1.67ms    | 1.43ms    | N/A   | -14.4%
-noncausal-b8-s4096 | 1.52ms    | 1.52ms    | N/A   | 0%
-...
+Config               | FLOPs  | Gen (ms) | Gen TFLOPS | Ref (ms) | Ref TFLOPS | cuDNN (ms) | cuDNN TFLOPS | Gen/Ref | Gen/cuDNN
+---------------------|--------|----------|------------|----------|------------|------------|--------------|---------|----------
+mha-causal-b8-s4096  | 0.550T | 1.669    | 329.4      | 1.635    | 336.2      | 1.553      | 354.1        | 0.98x   | 0.93x
+mha-causal-b4-s8192  | 1.100T | 3.136    | 350.7      | 3.044    | 361.4      | 2.900      | 379.3        | 0.97x   | 0.92x
+mha-causal-b2-s16384 | 2.199T | 6.111    | 359.8      | 5.945    | 369.9      | 5.627      | 390.8        | 0.97x   | 0.92x
+mha-nc-b8-s4096      | 1.100T | 2.992    | 367.6      | 2.632    | 417.8      | 2.756      | 399.1        | 0.88x   | 0.92x
+mha-nc-b4-s8192      | 2.199T | 5.864    | 375.0      | 5.138    | 428.0      | 5.396      | 407.5        | 0.88x   | 0.92x
+mha-nc-b2-s16384     | 4.398T | 11.573   | 380.0      | 9.938    | 442.5      | 10.839     | 405.8        | 0.86x   | 0.94x
 ```
+
+Column definitions:
+- **FLOPs**: Total floating-point ops for this config (causal ≈ half of non-causal)
+- **Gen/Ref/cuDNN (ms)**: Mean latency from timed trials
+- **TFLOPS**: FLOPs / latency — effective throughput
+- **Gen/Ref**: Speedup ratio (generated latency / reference latency, <1.0 = slower)
+- **Gen/cuDNN**: Speedup ratio vs cuDNN baseline
 
 #### 1b. Profile Selectively
 
@@ -224,11 +236,14 @@ idea to implement first.
    - Check compile output: register count, spill bytes, shared memory
    - If compile fails, fix and retry (up to 3 compile attempts)
    - If register spills increased substantially, reconsider the approach
-2. **Evaluate** across ALL configs
+2. **Evaluate** across **ALL** configs (every config, no exceptions)
    - Check correctness first — all configs must pass
    - If correctness fails, fix and retry (up to 3 correctness attempts)
-3. **Profile** the modified code on the **same config(s)** profiled in Phase 1b
-   to confirm the optimization hit the expected hardware metric
+   - **Output the performance comparison table** (same format as Phase 1a)
+     after evaluate-all completes — this is mandatory
+3. **Profile selectively** — NCU profiling is expensive. Only profile the
+   **same 1-2 config(s)** profiled in Phase 1b, to compare the specific NCU
+   metrics targeted by this optimization. Do NOT profile all configs.
 4. **Compare** new latency vs baseline from Phase 1
 
 #### Decision Point

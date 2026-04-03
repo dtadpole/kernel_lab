@@ -9,7 +9,8 @@ Usage:
     python cli.py health <host>  [--all]
     python cli.py nuke   <host>  [--data] [--all]
 
-Host names come from conf/kb/default.yaml.
+Host names come from conf/hosts/default.yaml (centralized deployment map).
+KB-specific defaults come from conf/kb/default.yaml.
 """
 
 from __future__ import annotations
@@ -31,30 +32,58 @@ _REPO_ROOT = _SCRIPT_DIR.parents[2]
 _SERVICE_FILE = _SCRIPT_DIR / "kb-embed.service"
 _EMBED_SERVER_DIR = _SCRIPT_DIR.parent / "embed_server"
 
+_SERVICE_KEY = "kb_embed"  # key in hosts.services map
 
-def _load_config() -> dict[str, Any]:
-    """Load KB service configuration from conf/kb/default.yaml."""
-    cfg_path = _REPO_ROOT / "conf" / "kb" / "default.yaml"
-    if not cfg_path.exists():
-        print(f"ERROR: KB config not found: {cfg_path}", file=sys.stderr)
+
+def _load_config() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load host inventory and KB service defaults.
+
+    Returns (hosts_cfg, service_defaults).
+    """
+    hosts_path = _REPO_ROOT / "conf" / "hosts" / "default.yaml"
+    kb_path = _REPO_ROOT / "conf" / "kb" / "default.yaml"
+    if not hosts_path.exists():
+        print(f"ERROR: hosts config not found: {hosts_path}", file=sys.stderr)
         sys.exit(1)
-    with cfg_path.open() as f:
-        return yaml.safe_load(f)
+    if not kb_path.exists():
+        print(f"ERROR: KB config not found: {kb_path}", file=sys.stderr)
+        sys.exit(1)
+    with hosts_path.open() as f:
+        hosts_cfg = yaml.safe_load(f)
+    with kb_path.open() as f:
+        kb_cfg = yaml.safe_load(f)
+    return hosts_cfg, kb_cfg.get("service_defaults", {})
 
 
-def _resolve_host(cfg: dict[str, Any], name: str) -> dict[str, Any]:
-    """Resolve a host name to its config, merged with defaults."""
-    hosts = cfg.get("hosts", {})
+def _resolve_host(hosts_cfg: dict[str, Any], svc_defaults: dict[str, Any], name: str) -> dict[str, Any]:
+    """Resolve a host name to a flat config dict for this service."""
+    hosts = hosts_cfg.get("hosts", {})
     if name not in hosts:
         available = ", ".join(sorted(hosts.keys()))
         print(f"ERROR: unknown host '{name}'. Available: {available}", file=sys.stderr)
         sys.exit(1)
-    defaults = cfg.get("service_defaults", {})
-    return {**defaults, **hosts[name]}
+
+    host = hosts[name]
+    svc = (host.get("services") or {}).get(_SERVICE_KEY)
+    if svc is None:
+        print(f"ERROR: host '{name}' has no {_SERVICE_KEY} service configured.", file=sys.stderr)
+        sys.exit(1)
+
+    hw = host.get("hardware") or {}
+    return {
+        **svc_defaults,
+        "ssh_host": host["ssh_host"],
+        "description": f"{hw.get('gpu', 'GPU')} ({hw.get('gpu_count', '?')}x)",
+        **svc,
+    }
 
 
-def _all_host_names(cfg: dict[str, Any]) -> list[str]:
-    return sorted(cfg.get("hosts", {}).keys())
+def _deployable_host_names(hosts_cfg: dict[str, Any]) -> list[str]:
+    """Return host names that have kb_embed configured."""
+    return sorted(
+        name for name, h in hosts_cfg.get("hosts", {}).items()
+        if (h.get("services") or {}).get(_SERVICE_KEY)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +191,14 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
         "EMBED_MODEL_ID=Qwen/Qwen3-Embedding-4B",
         f"EMBED_MODEL_ID={model_id}",
     )
+    cuda_devices = host_cfg.get("cuda_visible_devices")
+    if cuda_devices is not None:
+        service_content = service_content.replace("__CUDA_VISIBLE_DEVICES__", cuda_devices)
+    else:
+        service_content = "\n".join(
+            line for line in service_content.split("\n")
+            if "__CUDA_VISIBLE_DEVICES__" not in line
+        )
 
     _ssh(ssh_host, f"""
         mkdir -p $HOME/.config/systemd/user
@@ -256,9 +293,12 @@ def cmd_status(host_cfg: dict[str, Any]) -> bool:
     else:
         print(f"  Health:   (service not running)")
 
-    # Model
+    # Model & GPU pin
     print(f"  Model:    {model_id}")
     print(f"  Port:     {port}")
+    cuda_devices = host_cfg.get("cuda_visible_devices")
+    if cuda_devices is not None:
+        print(f"  GPU pin:  CUDA_VISIBLE_DEVICES={cuda_devices}")
 
     # GPU
     r = _ssh(ssh_host,
@@ -356,7 +396,7 @@ def main() -> int:
 
     # deploy
     p = sub.add_parser("deploy", help="Sync code + install deps + configure systemd")
-    p.add_argument("host", nargs="?", help="Host name from conf/kb/default.yaml")
+    p.add_argument("host", nargs="?", help="Host name from conf/hosts/default.yaml")
     p.add_argument("--rebuild", action="store_true", help="Force recreate venv")
     p.add_argument("--all", action="store_true", help="Deploy to all hosts")
 
@@ -387,12 +427,12 @@ def main() -> int:
     p.add_argument("--all", action="store_true", help="Nuke all hosts")
 
     args = parser.parse_args()
-    cfg = _load_config()
+    hosts_cfg, svc_defaults = _load_config()
 
     # Resolve target hosts
     use_all = getattr(args, "all", False)
     if use_all:
-        targets = _all_host_names(cfg)
+        targets = _deployable_host_names(hosts_cfg)
     elif args.host:
         targets = [args.host]
     else:
@@ -401,7 +441,7 @@ def main() -> int:
     # Execute
     all_ok = True
     for name in targets:
-        host_cfg = _resolve_host(cfg, name)
+        host_cfg = _resolve_host(hosts_cfg, svc_defaults, name)
         if args.command == "deploy":
             ok = cmd_deploy(host_cfg, rebuild=args.rebuild)
         elif args.command == "start":

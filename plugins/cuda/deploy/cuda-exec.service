@@ -12,6 +12,7 @@ RestartSec=5
 # Environment
 Environment=PYTHONPATH=%h/.cuda_exec_service
 Environment=CUDA_EXEC_ROOT=%h/.cuda_exec
+Environment=CUDA_VISIBLE_DEVICES=__CUDA_VISIBLE_DEVICES__
 Environment=PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Hardening directives that imply NoNewPrivileges=true are intentionally

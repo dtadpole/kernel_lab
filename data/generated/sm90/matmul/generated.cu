@@ -629,20 +629,26 @@ __global__ void wgmma_matmul(
         } /* end consumer */
 
         /* Tile boundary: sync ALL 384 threads.
-         * Ensures epilogue SMEM writes complete before producer reloads.
-         *
-         * Barrier re-init is NOT needed when numKTiles/STAGES is even:
-         * mbarrier auto-resets after each completion (phase flips, pending
-         * resets to init count).  After an even number of uses, the parity
-         * wraps back to its initial state.  The producer's next wait_parity
-         * with phase 0 succeeds immediately because the internal parity
-         * (toggled back to the post-pre-arrive state) differs from 0.
-         *
-         * For 8192: numKTiles=128, uses_per_stage=32 (even) → parity wraps.
-         * For 4096: numKTiles=64,  uses_per_stage=16 (even) → parity wraps.
-         * This eliminates 8×inval + 8×init + __syncthreads + 4×arrive per
-         * tile boundary (~2 µs × 14 boundaries = ~28 µs saved at 8192). */
+         * Ensures epilogue SMEM writes complete before producer reloads. */
         __syncthreads();
+
+        /* Re-init barriers for next tile */
+        if (tileIdx + gridDim.x < totalTiles) {
+            if (tid == 0) {
+                for (int s = 0; s < STAGES; s++) {
+                    mbarrier_inval(&full_bar[s]);
+                    mbarrier_inval(&empty_bar[s]);
+                    mbarrier_init(&full_bar[s], 1);
+                    mbarrier_init(&empty_bar[s], NUM_CONSUMERS);
+                }
+            }
+            __syncthreads();
+            /* Consumers re-signal empty for next tile */
+            if (wg_id > 0 && wg_tid == 0) {
+                for (int s = 0; s < STAGES; s++)
+                    mbarrier_arrive(&empty_bar[s]);
+            }
+        }
     } /* end persistent tile loop */
 }
 

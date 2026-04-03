@@ -120,6 +120,16 @@ void wgmma_wait_group_1() {
 }
 
 /* =========================================================================
+ * PTX helper — TMA descriptor prefetch
+ * ========================================================================= */
+__device__ __forceinline__
+void tma_prefetch_descriptor(const void* tma_desc) {
+    asm volatile(
+        "prefetch.tensormap [%0];\n"
+        :: "l"(tma_desc) : "memory");
+}
+
+/* =========================================================================
  * WGMMA descriptor construction
  *
  * GmmaDescriptor 64-bit layout (from CUTLASS mma_sm90_desc.hpp):
@@ -406,134 +416,114 @@ __global__ void wgmma_matmul(
     const int groupID = lane / 4;                 /* 0-7 */
     const int thread_in_group = lane % 4;         /* 0-3 */
 
-    int nTilesM = totalTiles / nTilesN;
     int numKTiles = K / TILE_K;
+    int nTilesM = totalTiles / nTilesN;
 
-    /* 128 F32 accumulators for full 64×256 output per warpgroup (m64n256k16).
-     * NOT zero-initialized — first WGMMA call uses scale_D=0 (overwrite). */
+    /* 128 F32 accumulators for full 64×256 output per warpgroup (m64n256k16). */
     float acc[128];
+    int tileIdx = blockIdx.x;
 
-    /* Initialize mbarriers once */
+    /* L2 super-tiling: 4×4 blocks */
+    int tile_m, tile_n;
+    if (nTilesN >= 4 && nTilesM >= 4) {
+        int nSuperN = nTilesN / 4;
+        int superIdx = tileIdx / 16;
+        int localIdx = tileIdx % 16;
+        tile_m = (superIdx / nSuperN) * 4 + localIdx / 4;
+        tile_n = (superIdx % nSuperN) * 4 + localIdx % 4;
+    } else {
+        tile_m = tileIdx / nTilesN;
+        tile_n = tileIdx % nTilesN;
+    }
+
+    int mBase = tile_m * TILE_M;
+    int nBase = tile_n * TILE_N;
+    int wg_a_offset = wg_id * 64 * TILE_K * 2;
+
+    /* TMA descriptor prefetch (warp 0 only, like CuTe DSL) */
+    if (tid < 32) {
+        tma_prefetch_descriptor(&tma_A);
+        tma_prefetch_descriptor(&tma_B);
+    }
+
+    /* Initialize mbarriers (once per block, no re-init needed) */
     if (tid == 0)
         for (int s = 0; s < STAGES; s++)
             mbarrier_init(&mbar[s], 1);
     __syncthreads();
 
-    /* ---- Persistent tile loop ---- */
-    for (int tileIdx = blockIdx.x; tileIdx < totalTiles; tileIdx += gridDim.x) {
-
-        /* L2 super-tiling: 4×4 blocks */
-        int tile_m, tile_n;
-        if (nTilesN >= 4 && nTilesM >= 4) {
-            int nSuperN = nTilesN / 4;
-            int superIdx = tileIdx / 16;
-            int localIdx = tileIdx % 16;
-            tile_m = (superIdx / nSuperN) * 4 + localIdx / 4;
-            tile_n = (superIdx % nSuperN) * 4 + localIdx % 4;
-        } else {
-            tile_m = tileIdx / nTilesN;
-            tile_n = tileIdx % nTilesN;
-        }
-
-        /* Re-init mbarriers between tiles */
-        __syncthreads();
-        if (tid == 0)
-            for (int s = 0; s < STAGES; s++) {
-                mbarrier_inval(&mbar[s]);
-                mbarrier_init(&mbar[s], 1);
-            }
-        __syncthreads();
-
-        int mBase = tile_m * TILE_M;
-        int nBase = tile_n * TILE_N;
-
-        /* ---- Prelude: pre-fill pipeline ---- */
-        int prelude = (numKTiles < STAGES - 1) ? numKTiles : (STAGES - 1);
+    /* ---- Prelude: pre-fill pipeline (warp 0 issues TMA) ---- */
+    int prelude = (numKTiles < STAGES) ? numKTiles : STAGES;
+    if (tid == 0) {
         for (int s = 0; s < prelude; s++) {
-            if (tid == 0) {
-                int kc = s * TILE_K;
-                char* stage = smem + s * SMEM_STAGE;
-                mbarrier_arrive_expect_tx(&mbar[s],
-                    A_STAGE_BYTES + B_STAGE_BYTES);
-                /* A: box {TILE_K, TILE_M} from (K, M) tensor */
-                tma_load_2d(stage, &tma_A, kc, mBase, &mbar[s]);
-                /* B0: box {TILE_K, N_SUB} from (K, N) tensor at n=nBase */
-                tma_load_2d(stage + A_STAGE_BYTES,
-                            &tma_B, kc, nBase, &mbar[s]);
-                /* B1: box {TILE_K, N_SUB} from (K, N) tensor at n=nBase+N_SUB */
-                tma_load_2d(stage + A_STAGE_BYTES + B_SUB_BYTES,
-                            &tma_B, kc, nBase + N_SUB, &mbar[s]);
-            }
+            int kc = s * TILE_K;
+            char* stage = smem + s * SMEM_STAGE;
+            mbarrier_arrive_expect_tx(&mbar[s],
+                A_STAGE_BYTES + B_STAGE_BYTES);
+            tma_load_2d(stage, &tma_A, kc, mBase, &mbar[s]);
+            tma_load_2d(stage + A_STAGE_BYTES,
+                        &tma_B, kc, nBase, &mbar[s]);
+            tma_load_2d(stage + A_STAGE_BYTES + B_SUB_BYTES,
+                        &tma_B, kc, nBase + N_SUB, &mbar[s]);
         }
+    }
 
-        /* ---- K-loop with pipelined WGMMA/TMA overlap ----
-         *
-         * Pattern (like CuTe DSL):
-         *   For each K-tile:
-         *     1. Wait for TMA data (mbarrier)
-         *     2. Fence + issue 8 WGMMA calls + commit
-         *     3. Wait for PREVIOUS group (wait_group 1), not current
-         *     4. Issue TMA for next stage (overlaps with current WGMMA)
-         *
-         * This allows WGMMA compute to overlap with TMA loads.
-         */
-        {
-            int wg_a_offset = wg_id * 64 * TILE_K * 2;
+    /* ---- Prologue: first K-tile with scale_D=0 (overwrite) ---- */
+    {
+        mbarrier_wait_parity(&mbar[0], 0);
+        char* stage = smem;
+        uint64_t da_base = make_gmma_desc(stage + wg_a_offset);
+        uint64_t db_base = make_gmma_desc(stage + A_STAGE_BYTES);
+        wgmma_tile_k64(acc, da_base, db_base,
+                       gmma_desc_advance(da_base, 2), gmma_desc_advance(db_base, 2),
+                       gmma_desc_advance(da_base, 4), gmma_desc_advance(db_base, 4),
+                       gmma_desc_advance(da_base, 6), gmma_desc_advance(db_base, 6),
+                       0);  /* scale_D = 0: overwrite accumulators */
+    }
 
-            for (int kb = 0; kb < numKTiles; kb++) {
-                int sc = kb % STAGES;
-                int sl = (kb + STAGES - 1) % STAGES;
-                int phase = (kb / STAGES) & 1;
+    /* ---- Mainloop: K-tiles 1..numKTiles-1, scale_D=1 (accumulate) ----
+     *
+     * CuTe DSL pattern: wait_data → WGMMA → commit → wait_group(1) → TMA
+     * wait_group(1) ensures PREVIOUS group's SMEM reads are done before TMA
+     * overwrites that buffer. Current group's WGMMA overlaps with next TMA.
+     */
+    for (int kb = 1; kb < numKTiles; kb++) {
+        int sc = kb % STAGES;
+        int sl = (kb + STAGES - 1) % STAGES;
+        int phase = (kb / STAGES) & 1;
 
-                /* Wait for TMA data */
-                mbarrier_wait_parity(&mbar[sc], phase);
+        /* Wait for TMA data for current K-tile */
+        mbarrier_wait_parity(&mbar[sc], phase);
 
-                char* stage = smem + sc * SMEM_STAGE;
-                char* smem_A  = stage;
-                char* smem_B  = stage + A_STAGE_BYTES;
-                /* B0 and B1 sub-tiles are contiguous → single B descriptor
-                 * covers all 256 N-rows (B0=0..127, B1=128..255) */
+        /* WGMMA: always accumulate (scale_D=1) */
+        char* stage = smem + sc * SMEM_STAGE;
+        uint64_t da_base = make_gmma_desc(stage + wg_a_offset);
+        uint64_t db_base = make_gmma_desc(stage + A_STAGE_BYTES);
+        wgmma_tile_k64(acc, da_base, db_base,
+                       gmma_desc_advance(da_base, 2), gmma_desc_advance(db_base, 2),
+                       gmma_desc_advance(da_base, 4), gmma_desc_advance(db_base, 4),
+                       gmma_desc_advance(da_base, 6), gmma_desc_advance(db_base, 6),
+                       1);  /* scale_D = 1: accumulate */
 
-                /* Pre-compute descriptors for 4 K-steps */
-                uint64_t da_base = make_gmma_desc(smem_A + wg_a_offset);
-                uint64_t db_base = make_gmma_desc(smem_B);
+        /* Wait for PREVIOUS group — ensures its SMEM reads are done */
+        wgmma_wait_group_1();
 
-                uint64_t da0 = da_base;
-                uint64_t db0 = db_base;
-                uint64_t da1 = gmma_desc_advance(da_base, 2);
-                uint64_t db1 = gmma_desc_advance(db_base, 2);
-                uint64_t da2 = gmma_desc_advance(da_base, 4);
-                uint64_t db2 = gmma_desc_advance(db_base, 4);
-                uint64_t da3 = gmma_desc_advance(da_base, 6);
-                uint64_t db3 = gmma_desc_advance(db_base, 6);
-
-                int scale_D = (kb == 0) ? 0 : 1;
-
-                /* Single asm block: fence + 4× m64n256k16 + commit */
-                wgmma_tile_k64(acc, da0, db0, da1, db1,
-                               da2, db2, da3, db3, scale_D);
-
-                /* Wait for PREVIOUS group — allows current to overlap with TMA */
-                if (kb > 0)
-                    wgmma_wait_group_1();
-
-                /* Producer: issue TMA for next stage */
-                if (tid == 0 && kb + STAGES - 1 < numKTiles) {
-                    int nk = (kb + STAGES - 1) * TILE_K;
-                    char* next_stage = smem + sl * SMEM_STAGE;
-                    mbarrier_arrive_expect_tx(&mbar[sl],
-                        A_STAGE_BYTES + B_STAGE_BYTES);
-                    tma_load_2d(next_stage, &tma_A, nk, mBase, &mbar[sl]);
-                    tma_load_2d(next_stage + A_STAGE_BYTES,
-                                &tma_B, nk, nBase, &mbar[sl]);
-                    tma_load_2d(next_stage + A_STAGE_BYTES + B_SUB_BYTES,
-                                &tma_B, nk, nBase + N_SUB, &mbar[sl]);
-                }
-            }
-
-            /* Wait for last WGMMA group */
-            wgmma_wait_group_0();
+        /* Producer: TMA for next stage (safe now — previous group done) */
+        if (tid == 0 && kb + STAGES - 1 < numKTiles) {
+            int nk = (kb + STAGES - 1) * TILE_K;
+            char* next_stage = smem + sl * SMEM_STAGE;
+            mbarrier_arrive_expect_tx(&mbar[sl],
+                A_STAGE_BYTES + B_STAGE_BYTES);
+            tma_load_2d(next_stage, &tma_A, nk, mBase, &mbar[sl]);
+            tma_load_2d(next_stage + A_STAGE_BYTES,
+                        &tma_B, nk, nBase, &mbar[sl]);
+            tma_load_2d(next_stage + A_STAGE_BYTES + B_SUB_BYTES,
+                        &tma_B, nk, nBase + N_SUB, &mbar[sl]);
         }
+    }
+
+    /* Wait for last WGMMA group */
+    wgmma_wait_group_0();
 
         /* ---- Epilogue: write accumulators to global memory ---- */
         /*
@@ -566,7 +556,6 @@ __global__ void wgmma_matmul(
                     __floats2bfloat162_rn(acc[idx], acc[idx + 1]);
             }
         }
-    }
 }
 
 /* =========================================================================
@@ -713,13 +702,12 @@ extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
         cfg_done = true;
     }
 
-    /* Launch */
+    /* Launch: non-persistent, one block per output tile */
     int nTilesM = M / TILE_M;
     int nTilesN = N / TILE_N;
     int totalTiles = nTilesM * nTilesN;
-    int grid_size = totalTiles < s_numSMs ? totalTiles : s_numSMs;
 
-    wgmma_matmul<<<grid_size, THREADS, SMEM_BYTES, stream>>>(
+    wgmma_matmul<<<totalTiles, THREADS, SMEM_BYTES, stream>>>(
         C, M, N, K, totalTiles, nTilesN, tma_A, tma_B);
 
     return 0;

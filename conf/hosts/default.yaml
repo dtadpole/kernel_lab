@@ -66,6 +66,8 @@ hosts:
       kb_embed:
         port: 46983
         cuda_visible_devices: "6"
+    benchmark:
+      cuda_visible_devices: "4,5"   # GPUs reserved for local benchmarks
 
   h8_4:
     ssh_host: "devvm8491.cco0.facebook.com"
@@ -79,3 +81,5 @@ hosts:
       kb_embed:
         port: 46984          # was 46982, changed due to port conflict (aarontao's MCP server)
         cuda_visible_devices: "6"
+    benchmark:
+      cuda_visible_devices: "4,5"   # GPUs reserved for local benchmarks

@@ -249,14 +249,33 @@ Each arch folder contains kernels optimized for that SM version — **do not cop
 - Workaround: create a local venv with `cuda-bindings==12.8.0` + `nvidia-cutlass-dsl==4.4.2 --no-deps` + `torch==2.6.0+cu124`. Set `CUTE_DSL_ARCH=sm_90a`.
 - _one/_two have driver 595.45.04 (CUDA 13.2) → CuTe DSL works natively.
 
-### 9. Plugins
+### 9. GPU allocation on multi-GPU hosts (h8_3, h8_4)
+
+Each H100 host has 8 GPUs (0-7). Allocations are fixed to avoid contention:
+
+| GPU(s) | Purpose | Set via |
+|--------|---------|---------|
+| **7** | `cuda_exec` service (long-running, systemd) | `CUDA_VISIBLE_DEVICES=7` in service unit |
+| **6** | `kb_embed` service (embedding server, systemd) | `CUDA_VISIBLE_DEVICES=6` in service unit |
+| **4, 5** | Local benchmarks / ad-hoc kernel runs | `CUDA_VISIBLE_DEVICES=4` or `5` |
+| **0-3** | Free (other users / experiments) | — |
+
+This applies to **both h8_3 and h8_4** identically. See `conf/hosts/default.yaml` for the canonical config.
+
+**When running benchmarks locally**, always set `CUDA_VISIBLE_DEVICES=4` (or `5`):
+
+```bash
+CUDA_VISIBLE_DEVICES=4 python bench_script.py
+```
+
+### 10. Plugins
 
 - Plugins live in `plugins/` — each is a Claude Code plugin with `.claude-plugin/plugin.json`
 - Each plugin can contain: MCP servers (`.mcp.json`), Skills (`skills/`), hooks, agents
 - Plugins work in both Claude Code CLI (`--plugin-dir`) and Agent SDK (`mcp_servers={}`)
 - MCP servers use the project's `.venv/bin/python` and `PYTHONPATH` set to repo root
 
-### 9. Git worktrees
+### 11. Git worktrees
 
 Worktrees provide isolated copies of the repo for parallel or experimental work without disturbing `main`.
 

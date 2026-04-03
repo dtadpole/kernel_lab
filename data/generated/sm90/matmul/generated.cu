@@ -1,215 +1,486 @@
 /*
- * CUTLASS 3.x WGMMA-based BF16 matrix multiplication for SM90 (H100 Hopper).
+ * Raw CUDA + inline PTX WGMMA-based BF16 matrix multiplication for SM90 (H100).
  *
- * Uses the CUTLASS CollectiveBuilder to construct an optimized kernel with:
- *   - TMA (Tensor Memory Accelerator) for global→shared memory loads
- *   - WGMMA (Warpgroup MMA) for compute — warpgroup-level m64nNk16 operations
- *   - Warp-specialized cooperative scheduling
- *   - Persistent tile scheduler for work distribution
- *   - Automatic stage count selection based on SMEM capacity
+ * Hand-written kernel with zero CUTLASS dependency.
+ * Uses:
+ *   - WGMMA (warpgroup MMA) m64n128k16 for compute — 2 warpgroups, SS mode
+ *   - TMA (cp.async.bulk.tensor) for global→shared loads
+ *   - mbarrier for pipeline synchronization
+ *   - Persistent tile scheduling with L2 super-tiling
  *
- * Two tile configurations dispatched by matrix size:
- *   Big:   128×256×64 tile — for M,N ≥ 2048 (high arithmetic intensity)
- *   Small: 128×128×64 tile — for M,N < 2048
+ * Tile: 128×256×64, 256 threads (2 warpgroups), 4-stage pipeline
+ * SMEM: ~197KB (within H100's 228KB limit)
  *
  * kernel_run contract:
  *   extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
  *                             __nv_bfloat16** outputs, int num_outputs,
  *                             int n, cudaStream_t stream);
  */
-
 #include <cuda_bf16.h>
 #include <cuda.h>
+#include <dlfcn.h>
 #include <cstdio>
 #include <cstdlib>
-
-#include "cute/tensor.hpp"
-#include "cutlass/cutlass.h"
-#include "cutlass/bfloat16.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/gemm/kernel/tile_scheduler.hpp"
-#include "cutlass/util/packed_stride.hpp"
-
-using namespace cute;
+#include <cstring>
+#include <cmath>
 
 /* =========================================================================
- * GEMM type definitions using CollectiveBuilder
+ * Constants
  * ========================================================================= */
+#define TILE_M       128
+#define TILE_N       256
+#define TILE_K       64
+#define STAGES       4
+#define THREADS      256    /* 2 warpgroups × 128 threads */
+#define WG_SIZE      128    /* threads per warpgroup */
+#define N_SUB        128    /* N-subdivision per WGMMA call */
 
-using ElementA = cutlass::bfloat16_t;
-using ElementB = cutlass::bfloat16_t;
-using ElementC = cutlass::bfloat16_t;
-using ElementD = cutlass::bfloat16_t;
-using ElementAccumulator = float;
-using ElementCompute = float;
-using ElementScalar = float;
-
-// A is row-major (M×K), B is column-major (K×N from PyTorch's B.t())
-using LayoutA = cutlass::layout::RowMajor;
-using LayoutB = cutlass::layout::ColumnMajor;
-using LayoutC = cutlass::layout::RowMajor;
-using LayoutD = cutlass::layout::RowMajor;
-
-static constexpr int AlignmentA = 16 / sizeof(ElementA);  // 8
-static constexpr int AlignmentB = 16 / sizeof(ElementB);  // 8
-static constexpr int AlignmentC = 16 / sizeof(ElementC);  // 8
-static constexpr int AlignmentD = 16 / sizeof(ElementD);  // 8
-
-// Epilogue: linear combination D = alpha * Acc + beta * C (we use alpha=1, beta=0)
-using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<
-    ElementD, ElementCompute, ElementC, ElementScalar>;
-
-// ---------- Big kernel: 128×256×64 for large matrices ----------
-
-using TileShape_Big = Shape<_128, _256, _64>;
-using ClusterShape_Big = Shape<_1, _1, _1>;
-
-using CollectiveEpilogue_Big = typename cutlass::epilogue::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    TileShape_Big, ClusterShape_Big,
-    cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementCompute,
-    ElementC, LayoutC, AlignmentC,
-    ElementD, LayoutD, AlignmentD,
-    cutlass::epilogue::TmaWarpSpecializedCooperative,
-    EpilogueOp
->::CollectiveOp;
-
-using CollectiveMainloop_Big = typename cutlass::gemm::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    ElementA, LayoutA, AlignmentA,
-    ElementB, LayoutB, AlignmentB,
-    ElementAccumulator,
-    TileShape_Big, ClusterShape_Big,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        static_cast<int>(sizeof(typename CollectiveEpilogue_Big::SharedStorage))>,
-    cutlass::gemm::KernelTmaWarpSpecializedCooperative
->::CollectiveOp;
-
-using GemmKernel_Big = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,
-    CollectiveMainloop_Big,
-    CollectiveEpilogue_Big,
-    cutlass::gemm::PersistentScheduler
->;
-using Gemm_Big = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Big>;
-
-// ---------- Small kernel: 128×128×64 for smaller matrices ----------
-
-using TileShape_Small = Shape<_128, _128, _64>;
-using ClusterShape_Small = Shape<_1, _1, _1>;
-
-using CollectiveEpilogue_Small = typename cutlass::epilogue::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    TileShape_Small, ClusterShape_Small,
-    cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementCompute,
-    ElementC, LayoutC, AlignmentC,
-    ElementD, LayoutD, AlignmentD,
-    cutlass::epilogue::TmaWarpSpecializedCooperative,
-    EpilogueOp
->::CollectiveOp;
-
-using CollectiveMainloop_Small = typename cutlass::gemm::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    ElementA, LayoutA, AlignmentA,
-    ElementB, LayoutB, AlignmentB,
-    ElementAccumulator,
-    TileShape_Small, ClusterShape_Small,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        static_cast<int>(sizeof(typename CollectiveEpilogue_Small::SharedStorage))>,
-    cutlass::gemm::KernelTmaWarpSpecializedCooperative
->::CollectiveOp;
-
-using GemmKernel_Small = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,
-    CollectiveMainloop_Small,
-    CollectiveEpilogue_Small,
-    cutlass::gemm::PersistentScheduler
->;
-using Gemm_Small = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Small>;
+/* SMEM per stage */
+#define A_STAGE_BYTES   (TILE_M * TILE_K * 2)                   /* 16384 */
+#define B_SUB_BYTES     (N_SUB * TILE_K * 2)                    /* 16384 */
+#define B_STAGE_BYTES   (2 * B_SUB_BYTES)                       /* 32768 */
+#define SMEM_STAGE      (A_STAGE_BYTES + B_STAGE_BYTES)         /* 49152 */
+#define SMEM_BYTES      (STAGES * SMEM_STAGE + 256)             /* 196864 */
 
 /* =========================================================================
- * GEMM runner — handles argument setup and kernel launch
+ * PTX helpers — mbarrier
  * ========================================================================= */
+__device__ __forceinline__
+void mbarrier_init(uint64_t* mbar, unsigned count) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.init.shared.b64 [%0], %1;\n" :: "r"(addr), "r"(count));
+}
 
-template <typename GemmType>
-static int run_gemm(int M, int N, int K,
-                    const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-                    cudaStream_t stream) {
-    using StrideA = typename GemmType::GemmKernel::StrideA;
-    using StrideB = typename GemmType::GemmKernel::StrideB;
-    using StrideC = typename GemmType::GemmKernel::StrideC;
-    using StrideD = typename GemmType::GemmKernel::StrideD;
+__device__ __forceinline__
+void mbarrier_inval(uint64_t* mbar) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.inval.shared.b64 [%0];\n" :: "r"(addr));
+}
 
-    // Row-major A (M×K): stride = (K, 1, 0)
-    StrideA stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, 1));
-    // Column-major B: stride computed from (N, K)
-    StrideB stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, 1));
-    // Row-major C/D (M×N)
-    StrideC stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, 1));
-    StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, 1));
+__device__ __forceinline__
+void mbarrier_arrive_expect_tx(uint64_t* mbar, unsigned tx_bytes) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;\n"
+                 :: "r"(addr), "r"(tx_bytes));
+}
 
-    // Hardware info for persistent scheduler
-    cutlass::KernelHardwareInfo hw_info;
-    hw_info.device_id = 0;
-    cudaGetDevice(&hw_info.device_id);
-    hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
-
-    typename GemmType::Arguments arguments{
-        cutlass::gemm::GemmUniversalMode::kGemm,
-        {M, N, K, 1},  // problem shape (M, N, K, batch=1)
-        {
-            reinterpret_cast<const ElementA*>(A), stride_A,
-            reinterpret_cast<const ElementB*>(B), stride_B
-        },
-        {
-            {1.0f, 0.0f}, // alpha=1, beta=0
-            reinterpret_cast<const ElementC*>(C), stride_C,
-            reinterpret_cast<ElementD*>(C), stride_D
-        },
-        hw_info
-    };
-
-    GemmType gemm;
-    size_t workspace_size = GemmType::get_workspace_size(arguments);
-    void* workspace = nullptr;
-    if (workspace_size > 0) {
-        cudaMalloc(&workspace, workspace_size);
-    }
-
-    auto status = gemm.can_implement(arguments);
-    if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "CUTLASS can_implement failed: %d\n", (int)status);
-        if (workspace) cudaFree(workspace);
-        return -1;
-    }
-
-    status = gemm.initialize(arguments, workspace, stream);
-    if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "CUTLASS initialize failed: %d\n", (int)status);
-        if (workspace) cudaFree(workspace);
-        return -1;
-    }
-
-    status = gemm.run(stream);
-    if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "CUTLASS run failed: %d\n", (int)status);
-        if (workspace) cudaFree(workspace);
-        return -1;
-    }
-
-    if (workspace) cudaFree(workspace);
-    return 0;
+__device__ __forceinline__
+void mbarrier_wait_parity(uint64_t* mbar, unsigned phase) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    unsigned result;
+    do {
+        asm volatile(
+            "{\n"
+            "  .reg .pred p;\n"
+            "  mbarrier.try_wait.parity.shared.b64 p, [%1], %2;\n"
+            "  selp.u32 %0, 1, 0, p;\n"
+            "}\n"
+            : "=r"(result) : "r"(addr), "r"(phase));
+    } while (result == 0);
 }
 
 /* =========================================================================
- * kernel_run — eval harness contract
+ * PTX helpers — TMA
  * ========================================================================= */
+__device__ __forceinline__
+void tma_load_2d(void* smem_dst, const void* tma_desc,
+                 int coord0, int coord1, uint64_t* mbar) {
+    unsigned smem_addr = __cvta_generic_to_shared(smem_dst);
+    unsigned mbar_addr = __cvta_generic_to_shared(mbar);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+        ".mbarrier::complete_tx::bytes"
+        " [%0], [%1, {%2, %3}], [%4];\n"
+        :: "r"(smem_addr), "l"(tma_desc),
+           "r"(coord0), "r"(coord1), "r"(mbar_addr)
+        : "memory");
+}
+
+/* =========================================================================
+ * PTX helpers — WGMMA fence / commit / wait
+ * ========================================================================= */
+__device__ __forceinline__
+void wgmma_fence() {
+    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+}
+
+__device__ __forceinline__
+void wgmma_commit_group() {
+    asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
+}
+
+__device__ __forceinline__
+void wgmma_wait_group_0() {
+    asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(0) : "memory");
+}
+
+__device__ __forceinline__
+void wgmma_wait_group_1() {
+    asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(1) : "memory");
+}
+
+/* =========================================================================
+ * WGMMA descriptor construction
+ *
+ * GmmaDescriptor 64-bit layout (from CUTLASS mma_sm90_desc.hpp):
+ *   [13:0]   start_address    = smem_byte_offset >> 4
+ *   [29:16]  leading_byte_off = 1 (unused for SWIZZLE_* layouts)
+ *   [45:32]  stride_byte_off  = row_stride_bytes >> 4
+ *   [51:49]  base_offset      = K-step index (16B granularity in 128B line)
+ *   [63:62]  layout_type      = 1 (SWIZZLE_128B)
+ * ========================================================================= */
+__device__ __forceinline__
+uint64_t make_gmma_desc(const void* smem_ptr) {
+    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    /* stride: 8 rows × 128 bytes/row (TILE_K * 2) = 1024 bytes → >> 4 = 64 */
+    const int stride_16B = (8 * TILE_K * 2) >> 4;   /* 64 */
+    uint64_t desc = 0;
+    desc |= (uint64_t)((addr >> 4) & 0x3FFF);                  /* start_address */
+    desc |= (uint64_t)(1) << 16;                                /* leading_byte_off */
+    desc |= (uint64_t)(stride_16B & 0x3FFF) << 32;             /* stride_byte_off */
+    /* base_offset = 0 always (CUTLASS convention) */
+    desc |= (uint64_t)(1) << 62;                                /* layout_type = B128 */
+    return desc;
+}
+
+/* Advance a GMMA descriptor by offset in 16-byte units (modifies start_address only).
+ * For K-stepping: each k16 BF16 step = 32 bytes = 2 units of 16 bytes. */
+__device__ __forceinline__
+uint64_t gmma_desc_advance(uint64_t desc, int offset_16B) {
+    /* Only low 32 bits contain start_address; CUTLASS does: reg32_[0] += offset */
+    uint32_t lo = (uint32_t)desc + (uint32_t)offset_16B;
+    uint32_t hi = (uint32_t)(desc >> 32);
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+/* =========================================================================
+ * WGMMA m64n128k16 — SS mode, BF16→F32
+ *
+ * 64 F32 accumulator registers per call.
+ * scaleA=1, scaleB=1, tnspA=0 (K-major), tnspB=0 (K-major)
+ * ========================================================================= */
+__device__ __forceinline__
+void wgmma_m64n128k16(float* acc, uint64_t desc_a, uint64_t desc_b, int scale_D) {
+    asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %66, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, "
+    " %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, "
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " %64,"
+    " %65,"
+    " p, 1, 1, 0, 0;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
+      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
+      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
+      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
+      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
+      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
+      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
+      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
+      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
+    : "l"(desc_a), "l"(desc_b), "r"(scale_D));
+}
+
+/* =========================================================================
+ * Main WGMMA kernel: 128×256×64 tile, 256 threads, 4-stage pipeline
+ *
+ * B is pre-transposed to (N, K) with K contiguous (like CuTe DSL).
+ * Both A and B are K-major in SMEM → tnspA=0, tnspB=0.
+ * ========================================================================= */
+__launch_bounds__(THREADS, 1)
+__global__ void wgmma_matmul(
+        __nv_bfloat16* __restrict__ C, int M, int N, int K,
+        int totalTiles, int nTilesN,
+        const __grid_constant__ CUtensorMap tma_A,
+        const __grid_constant__ CUtensorMap tma_B) {
+
+    extern __shared__ char smem[];
+    uint64_t* mbar = reinterpret_cast<uint64_t*>(smem + STAGES * SMEM_STAGE);
+
+    const int tid = threadIdx.x;
+    const int wg_id = tid / WG_SIZE;              /* 0 or 1 */
+    const int warp_in_wg = (tid / 32) % 4;       /* 0-3 within warpgroup */
+    const int lane = tid % 32;
+    const int groupID = lane / 4;                 /* 0-7 */
+    const int thread_in_group = lane % 4;         /* 0-3 */
+
+    int nTilesM = totalTiles / nTilesN;
+    int numKTiles = K / TILE_K;
+
+    /* Accumulator registers: 64 for N-half 0, 64 for N-half 1.
+     * NOT zero-initialized — first WGMMA call uses scale_D=0 (overwrite). */
+    float acc_lo[64];
+    float acc_hi[64];
+
+    /* Initialize mbarriers once */
+    if (tid == 0)
+        for (int s = 0; s < STAGES; s++)
+            mbarrier_init(&mbar[s], 1);
+    __syncthreads();
+
+    /* ---- Persistent tile loop ---- */
+    for (int tileIdx = blockIdx.x; tileIdx < totalTiles; tileIdx += gridDim.x) {
+
+        /* L2 super-tiling: 4×4 blocks */
+        int tile_m, tile_n;
+        if (nTilesN >= 4 && nTilesM >= 4) {
+            int nSuperN = nTilesN / 4;
+            int superIdx = tileIdx / 16;
+            int localIdx = tileIdx % 16;
+            tile_m = (superIdx / nSuperN) * 4 + localIdx / 4;
+            tile_n = (superIdx % nSuperN) * 4 + localIdx % 4;
+        } else {
+            tile_m = tileIdx / nTilesN;
+            tile_n = tileIdx % nTilesN;
+        }
+
+        /* Re-init mbarriers between tiles */
+        __syncthreads();
+        if (tid == 0)
+            for (int s = 0; s < STAGES; s++) {
+                mbarrier_inval(&mbar[s]);
+                mbarrier_init(&mbar[s], 1);
+            }
+        __syncthreads();
+
+        int mBase = tile_m * TILE_M;
+        int nBase = tile_n * TILE_N;
+
+        /* ---- Prelude: pre-fill pipeline ---- */
+        int prelude = (numKTiles < STAGES - 1) ? numKTiles : (STAGES - 1);
+        for (int s = 0; s < prelude; s++) {
+            if (tid == 0) {
+                int kc = s * TILE_K;
+                char* stage = smem + s * SMEM_STAGE;
+                mbarrier_arrive_expect_tx(&mbar[s],
+                    A_STAGE_BYTES + B_STAGE_BYTES);
+                /* A: box {TILE_K, TILE_M} from (K, M) tensor */
+                tma_load_2d(stage, &tma_A, kc, mBase, &mbar[s]);
+                /* B0: box {TILE_K, N_SUB} from (K, N) tensor at n=nBase */
+                tma_load_2d(stage + A_STAGE_BYTES,
+                            &tma_B, kc, nBase, &mbar[s]);
+                /* B1: box {TILE_K, N_SUB} from (K, N) tensor at n=nBase+N_SUB */
+                tma_load_2d(stage + A_STAGE_BYTES + B_SUB_BYTES,
+                            &tma_B, kc, nBase + N_SUB, &mbar[s]);
+            }
+        }
+
+        /* ---- K-loop with pipelined WGMMA/TMA overlap ----
+         *
+         * Pattern (like CuTe DSL):
+         *   For each K-tile:
+         *     1. Wait for TMA data (mbarrier)
+         *     2. Fence + issue 8 WGMMA calls + commit
+         *     3. Wait for PREVIOUS group (wait_group 1), not current
+         *     4. Issue TMA for next stage (overlaps with current WGMMA)
+         *
+         * This allows WGMMA compute to overlap with TMA loads.
+         */
+        {
+            int wg_a_offset = wg_id * 64 * TILE_K * 2;
+
+            for (int kb = 0; kb < numKTiles; kb++) {
+                int sc = kb % STAGES;
+                int sl = (kb + STAGES - 1) % STAGES;
+                int phase = (kb / STAGES) & 1;
+
+                /* Wait for TMA data */
+                mbarrier_wait_parity(&mbar[sc], phase);
+
+                char* stage = smem + sc * SMEM_STAGE;
+                char* smem_A  = stage;
+                char* smem_B0 = stage + A_STAGE_BYTES;
+                char* smem_B1 = stage + A_STAGE_BYTES + B_SUB_BYTES;
+
+                /* Pre-compute ALL descriptors before fence to keep
+                 * the fence→commit region free of non-WGMMA ops */
+                uint64_t da_base  = make_gmma_desc(smem_A + wg_a_offset);
+                uint64_t db0_base = make_gmma_desc(smem_B0);
+                uint64_t db1_base = make_gmma_desc(smem_B1);
+
+                uint64_t da0  = da_base;
+                uint64_t db00 = db0_base;
+                uint64_t db10 = db1_base;
+                uint64_t da1  = gmma_desc_advance(da_base,  2);
+                uint64_t db01 = gmma_desc_advance(db0_base, 2);
+                uint64_t db11 = gmma_desc_advance(db1_base, 2);
+                uint64_t da2  = gmma_desc_advance(da_base,  4);
+                uint64_t db02 = gmma_desc_advance(db0_base, 4);
+                uint64_t db12 = gmma_desc_advance(db1_base, 4);
+                uint64_t da3  = gmma_desc_advance(da_base,  6);
+                uint64_t db03 = gmma_desc_advance(db0_base, 6);
+                uint64_t db13 = gmma_desc_advance(db1_base, 6);
+
+                int scale_D = (kb == 0) ? 0 : 1;
+
+                /* WGMMA fence — only WGMMA instructions after this */
+                wgmma_fence();
+
+                /* K-step 0 */
+                wgmma_m64n128k16(acc_lo, da0, db00, scale_D);
+                wgmma_m64n128k16(acc_hi, da0, db10, scale_D);
+                /* K-step 1 (always accumulate) */
+                wgmma_m64n128k16(acc_lo, da1, db01, 1);
+                wgmma_m64n128k16(acc_hi, da1, db11, 1);
+                /* K-step 2 */
+                wgmma_m64n128k16(acc_lo, da2, db02, 1);
+                wgmma_m64n128k16(acc_hi, da2, db12, 1);
+                /* K-step 3 */
+                wgmma_m64n128k16(acc_lo, da3, db03, 1);
+                wgmma_m64n128k16(acc_hi, da3, db13, 1);
+
+                wgmma_commit_group();
+
+                /* Wait for PREVIOUS group — allows current to overlap with TMA */
+                if (kb > 0)
+                    wgmma_wait_group_1();
+
+                /* Producer: issue TMA for next stage */
+                if (tid == 0 && kb + STAGES - 1 < numKTiles) {
+                    int nk = (kb + STAGES - 1) * TILE_K;
+                    char* next_stage = smem + sl * SMEM_STAGE;
+                    mbarrier_arrive_expect_tx(&mbar[sl],
+                        A_STAGE_BYTES + B_STAGE_BYTES);
+                    tma_load_2d(next_stage, &tma_A, nk, mBase, &mbar[sl]);
+                    tma_load_2d(next_stage + A_STAGE_BYTES,
+                                &tma_B, nk, nBase, &mbar[sl]);
+                    tma_load_2d(next_stage + A_STAGE_BYTES + B_SUB_BYTES,
+                                &tma_B, nk, nBase + N_SUB, &mbar[sl]);
+                }
+            }
+
+            /* Wait for last WGMMA group */
+            wgmma_wait_group_0();
+        }
+
+        /* ---- Epilogue: write accumulators to global memory ---- */
+        /*
+         * WGMMA m64n128k16 F32 output fragment layout (empirically verified):
+         *
+         *   For register d[i] (i=0..63):
+         *     half  = (i >> 1) & 1       (0 or 1 — top/bottom 8-row group)
+         *     pair4 = i >> 2             (0..15 — which 8-column chunk)
+         *     sub2  = i & 1              (0 or 1 — even/odd column within pair)
+         *
+         *     row = warp_in_wg * 16 + half * 8 + groupID
+         *     col = pair4 * 8 + sub2 + thread_in_group * 2
+         *
+         *   Registers d[4*p + 2*h] and d[4*p + 2*h + 1] are adjacent columns
+         *   at the same row, so they can be packed into bfloat162 stores.
+         */
+
+        /* Vectorized bfloat162 stores — write pairs of adjacent columns */
+        #pragma unroll
+        for (int j = 0; j < 32; j++) {
+            int p4 = j / 2;    /* pair4 index (0..15) — column group */
+            int h  = j % 2;    /* half (0 or 1) — row group */
+
+            int row = mBase + wg_id * 64 + warp_in_wg * 16 + h * 8 + groupID;
+            int col_base = p4 * 8 + thread_in_group * 2;
+
+            int idx = 4 * p4 + 2 * h;  /* base register index */
+
+            if (row < M) {
+                int col_lo = nBase + col_base;
+                int col_hi = nBase + N_SUB + col_base;
+
+                if (col_lo + 1 < N) {
+                    *reinterpret_cast<__nv_bfloat162*>(&C[row * N + col_lo]) =
+                        __floats2bfloat162_rn(acc_lo[idx], acc_lo[idx + 1]);
+                }
+                if (col_hi + 1 < N) {
+                    *reinterpret_cast<__nv_bfloat162*>(&C[row * N + col_hi]) =
+                        __floats2bfloat162_rn(acc_hi[idx], acc_hi[idx + 1]);
+                }
+            }
+        }
+    }
+}
+
+/* =========================================================================
+ * Simple BF16 transpose kernel: (K, N) row-major → (N, K) row-major
+ * After transpose, K is contiguous (matching CuTe DSL convention).
+ * ========================================================================= */
+__global__ void transpose_bf16(const __nv_bfloat16* __restrict__ src,
+                               __nv_bfloat16* __restrict__ dst,
+                               int rows, int cols) {
+    int r = blockIdx.y * blockDim.y + threadIdx.y;
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < rows && c < cols)
+        dst[c * rows + r] = src[r * cols + c];
+}
+
+/* =========================================================================
+ * Host: TMA encoder, shape parsing, kernel dispatch
+ * ========================================================================= */
+typedef CUresult (*cuTensorMapEncodeTiled_fn)(
+    CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*,
+    const cuuint64_t*, const cuuint64_t*, const cuuint32_t*, const cuuint32_t*,
+    CUtensorMapInterleave, CUtensorMapSwizzle, CUtensorMapL2promotion,
+    CUtensorMapFloatOOBfill);
+
+static cuTensorMapEncodeTiled_fn s_encodeTiled = nullptr;
+
+static bool init_tma_encoder() {
+    if (s_encodeTiled) return true;
+    void* handle = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_NOLOAD);
+    if (!handle) handle = dlopen("libcuda.so.1", RTLD_LAZY);
+    if (!handle) handle = dlopen("libcuda.so", RTLD_LAZY);
+    if (!handle) return false;
+
+    typedef CUresult (*getProc_fn)(const char*, void**, int, cuuint64_t,
+                                   CUdriverProcAddressQueryResult*);
+    getProc_fn getProc = (getProc_fn)dlsym(handle, "cuGetProcAddress_v2");
+    if (!getProc) getProc = (getProc_fn)dlsym(handle, "cuGetProcAddress");
+    if (!getProc) return false;
+
+    CUdriverProcAddressQueryResult status;
+    CUresult res = getProc("cuTensorMapEncodeTiled",
+                           (void**)&s_encodeTiled, 12000,
+                           CU_GET_PROC_ADDRESS_DEFAULT, &status);
+    return (res == CUDA_SUCCESS && s_encodeTiled);
+}
+
+static int s_M = 0, s_N = 0, s_K = 0;
+static void ensure_shape(int n) {
+    if (s_M > 0) return;
+    const char* shape = getenv("CUDA_EXEC_PARAM_SHAPE");
+    if (shape) {
+        int d0 = 0, d1 = 0;
+        const char* p = shape;
+        while (*p && *p != '[') ++p;
+        if (*p == '[') ++p;
+        while (*p == ' ') ++p;
+        while (*p >= '0' && *p <= '9') { d0 = d0 * 10 + (*p - '0'); ++p; }
+        while (*p == ' ' || *p == ',') ++p;
+        while (*p >= '0' && *p <= '9') { d1 = d1 * 10 + (*p - '0'); ++p; }
+        s_M = d0; s_N = d1; s_K = d0;
+    } else {
+        s_M = (int)sqrtf((float)n);
+        s_N = s_M; s_K = s_M;
+    }
+}
+
+/* Cached transposed B buffer */
+static __nv_bfloat16* s_B_t = nullptr;
+static size_t s_B_t_size = 0;
+static const __nv_bfloat16* s_B_last = nullptr;  /* cache: skip transpose if same B */
 
 extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
                           __nv_bfloat16** outputs, int num_outputs,
@@ -218,20 +489,82 @@ extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
 
     const __nv_bfloat16* A = inputs[0];
     const __nv_bfloat16* B = inputs[1];
-    __nv_bfloat16* C = outputs[0];
+    __nv_bfloat16*       C = outputs[0];
 
-    // n is input_size (total elements per tensor). For square matrices: dim = sqrt(n).
-    int dim = 1;
-    while (dim * dim < n) dim++;
-    if (dim * dim != n) {
-        fprintf(stderr, "input_size %d is not a perfect square\n", n);
-        return -1;
-    }
-    int M = dim, N = dim, K = dim;
+    ensure_shape(n);
+    int M = s_M, N = s_N, K = s_K;
 
-    if (M >= 2048 && N >= 2048) {
-        return run_gemm<Gemm_Big>(M, N, K, A, B, C, stream);
-    } else {
-        return run_gemm<Gemm_Small>(M, N, K, A, B, C, stream);
+    if (!init_tma_encoder()) return -1;
+
+    static int s_numSMs = 0;
+    if (s_numSMs == 0)
+        cudaDeviceGetAttribute(&s_numSMs, cudaDevAttrMultiProcessorCount, 0);
+
+    /* Skip sizes too small for the 128×256 tile */
+    if (M < TILE_M || N < TILE_N || K < TILE_K) {
+        fprintf(stderr, "Matrix too small for 128x256x64 tile: M=%d N=%d K=%d\n",
+                M, N, K);
+        return -4;
     }
+
+    /* --- Transpose B: (K, N) row-major → (N, K) row-major --- */
+    size_t B_elems = (size_t)K * N;
+    if (s_B_t_size < B_elems * sizeof(__nv_bfloat16)) {
+        if (s_B_t) cudaFree(s_B_t);
+        cudaMalloc(&s_B_t, B_elems * sizeof(__nv_bfloat16));
+        s_B_t_size = B_elems * sizeof(__nv_bfloat16);
+        s_B_last = nullptr;  /* force re-transpose */
+    }
+    if (s_B_last != B) {
+        dim3 block(32, 32);
+        dim3 grid((N + 31) / 32, (K + 31) / 32);
+        transpose_bf16<<<grid, block, 0, stream>>>(B, s_B_t, K, N);
+        s_B_last = B;
+    }
+
+    /* --- TMA descriptors --- */
+    CUtensorMap tma_A, tma_B;
+
+    /* A: global (K, M) with K contiguous — row-major A viewed as (K-cols, M-rows) */
+    {
+        cuuint64_t dims[2]    = {(cuuint64_t)K, (cuuint64_t)M};
+        cuuint64_t strides[1] = {(cuuint64_t)K * 2};
+        cuuint32_t box[2]     = {(cuuint32_t)TILE_K, (cuuint32_t)TILE_M};
+        cuuint32_t elem[2]    = {1, 1};
+        if (s_encodeTiled(&tma_A, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)A,
+                dims, strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS) return -2;
+    }
+
+    /* B_t: global (K, N) with K contiguous — transposed B viewed as (K-cols, N-rows) */
+    {
+        cuuint64_t dims[2]    = {(cuuint64_t)K, (cuuint64_t)N};
+        cuuint64_t strides[1] = {(cuuint64_t)K * 2};
+        cuuint32_t box[2]     = {(cuuint32_t)TILE_K, (cuuint32_t)N_SUB};
+        cuuint32_t elem[2]    = {1, 1};
+        if (s_encodeTiled(&tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)s_B_t,
+                dims, strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS) return -3;
+    }
+
+    /* Configure dynamic SMEM */
+    static bool cfg_done = false;
+    if (!cfg_done) {
+        cudaFuncSetAttribute(wgmma_matmul,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES);
+        cfg_done = true;
+    }
+
+    /* Launch */
+    int nTilesM = M / TILE_M;
+    int nTilesN = N / TILE_N;
+    int totalTiles = nTilesM * nTilesN;
+    int grid_size = totalTiles < s_numSMs ? totalTiles : s_numSMs;
+
+    wgmma_matmul<<<grid_size, THREADS, SMEM_BYTES, stream>>>(
+        C, M, N, K, totalTiles, nTilesN, tma_A, tma_B);
+
+    return 0;
 }

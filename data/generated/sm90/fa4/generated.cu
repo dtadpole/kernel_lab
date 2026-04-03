@@ -1,20 +1,30 @@
 /*
- * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 4: RS mode PV).
- * Unified 128 threads (1 warp group) + double-buffered K + dedicated V.
+ * Flash Attention forward pass — TMA + wgmma, BF16, SM90a (H100).
  *
- * Architecture: 128 threads, all threads cooperate on both cp.async
- * loads and WGMMA compute. No warp specialization.
+ * Architecture:
+ *   256 threads = 2 warp groups (WG0=producer, WG1=consumer)
+ *   Producer (warps 0-3, 128 threads, 56 regs): TMA loads Q/K/V
+ *   Consumer (warps 4-7, 128 threads, 256 regs): wgmma.mma_async QK/PV + softmax
  *
- * Pipeline: V[i] and K[i+1] loads overlap with QK[i] + softmax compute.
- * V has its own dedicated SMEM buffer (no longer reuses K).
+ * Data movement: TMA (cp.async.bulk.tensor) with 128B swizzle
+ * Compute: wgmma.mma_async RS variant — m64n128k16 for QK, m64n64k16 for PV
+ * Pipeline: 2-stage double-buffered K/V with mbarrier
  *
- * PV GEMM uses WGMMA RS mode: P stays in registers after softmax,
- * eliminating the P SMEM roundtrip (8KB store + fence + sync + read).
+ * Tile sizes: BLOCK_Q=64, BLOCK_KV=128, DIM=128
  *
- * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, 128 threads.
- * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB.
+ * SMEM layout (split-DIM: each [DIM=128,BLOCK] tile → two [64,BLOCK] halves):
+ *   Q_lo:    [64, 64]  =  8KB at SMEM + 0
+ *   Q_hi:    [64, 64]  =  8KB at SMEM + 8KB
+ *   K stage s:
+ *     K_lo:  [64, 128] = 16KB at SMEM + 16KB + s*32KB
+ *     K_hi:  [64, 128] = 16KB at SMEM + 16KB + s*32KB + 16KB
+ *   V stage s:
+ *     V_lo:  [64, 128] = 16KB at SMEM + 80KB + s*32KB
+ *     V_hi:  [64, 128] = 16KB at SMEM + 80KB + s*32KB + 16KB
+ *   Barriers: 9 × 8B aligned at 144KB
  *
- * Target: NVIDIA H100 (SM90a, GH100). Compile with -arch=sm_90a.
+ * TMA uses boxDim=[64, BLOCK] with SWIZZLE_128B.
+ * Each row = 64 bf16 = 128 bytes = exactly one 128B swizzle unit.
  *
  * kernel_run contract:
  *   extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
@@ -24,15 +34,73 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cuda.h>
+/* dlfcn.h no longer needed — using direct -lcuda linking */
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cfloat>
 
+/* ======================================================================
+ *  Constants
+ * ====================================================================== */
+
+static constexpr int WARP_SIZE   = 32;
+static constexpr int BLOCK_Q     = 64;
+static constexpr int BLOCK_KV    = 128;
+static constexpr int DIM_CONST   = 128;
+static constexpr int HALF_DIM    = 64;
+static constexpr int NUM_STAGES  = 2;
+static constexpr int TB_SIZE     = 256;   /* 2 warp groups */
+static constexpr int WG_SIZE     = 128;   /* threads per warp group */
+
+/* Row stride within a half-tile: 64 bf16 = 128 bytes */
+static constexpr int HALF_ROW_STRIDE = HALF_DIM * 2;  /* 128 bytes */
+
+/* Q half-tile: [64 cols, BLOCK_Q rows] = [64, 64] = 8KB */
+static constexpr int Q_HALF_TILE_BYTES = HALF_DIM * BLOCK_Q * 2;   /* 8192 = 8KB */
+static constexpr int Q_FULL_TILE_BYTES = 2 * Q_HALF_TILE_BYTES;    /* 16384 = 16KB */
+
+/* K/V half-tile: [64 cols, BLOCK_KV rows] = [64, 128] = 16KB */
+static constexpr int KV_HALF_TILE_BYTES = HALF_DIM * BLOCK_KV * 2; /* 16384 = 16KB */
+static constexpr int KV_FULL_TILE_BYTES = 2 * KV_HALF_TILE_BYTES;  /* 32768 = 32KB */
+
+/* Offset to second 64 rows within a KV half-tile (for PV GEMM split) */
+static constexpr int KV_ROW_OFFSET_64  = 64 * HALF_ROW_STRIDE;    /* 8192 bytes */
+
+/* SMEM layout offsets */
+static constexpr int SMEM_Q_OFFSET   = 0;                                              /* 0 */
+static constexpr int SMEM_K_OFFSET   = Q_FULL_TILE_BYTES;                              /* 16KB */
+static constexpr int SMEM_V_OFFSET   = SMEM_K_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 80KB */
+static constexpr int SMEM_BAR_OFFSET = SMEM_V_OFFSET + NUM_STAGES * KV_FULL_TILE_BYTES; /* 144KB */
+
+/*
+ * Barrier layout (9 barriers, 8 bytes each):
+ *   0: Q_full        (producer arrives with tx=Q_FULL_TILE_BYTES, consumer waits)
+ *   1: K_full[0]     (producer arrives with tx=KV_FULL_TILE_BYTES, consumer waits)
+ *   2: K_full[1]
+ *   3: V_full[0]     (producer arrives with tx=KV_FULL_TILE_BYTES, consumer waits)
+ *   4: V_full[1]
+ *   5: K_empty[0]    (consumer arrives, producer waits)
+ *   6: K_empty[1]
+ *   7: V_empty[0]    (consumer arrives, producer waits)
+ *   8: V_empty[1]
+ */
+static constexpr int NUM_BARRIERS   = 9;
+static constexpr int SMEM_TOTAL     = SMEM_BAR_OFFSET + NUM_BARRIERS * 8 + 128;
+
+static constexpr int BAR_Q_FULL     = 0;
+static constexpr int BAR_K_FULL     = 1;  /* + stage */
+static constexpr int BAR_V_FULL     = 3;  /* + stage */
+static constexpr int BAR_K_EMPTY    = 5;  /* + stage */
+static constexpr int BAR_V_EMPTY    = 7;  /* + stage */
+
 __device__ __host__ constexpr
 int cdiv(int a, int b) { return (a + b - 1) / b; }
 
-/* --- Fast math: inline PTX to avoid FCHK + slowpath overhead --------- */
+/* ======================================================================
+ *  Fast math helpers
+ * ====================================================================== */
 
 __device__ __forceinline__
 float fast_exp2f(float x) {
@@ -48,545 +116,980 @@ float fast_rcp(float x) {
     return r;
 }
 
-/* --- Swizzle<3,4,3> (128B swizzle) for B128 WGMMA layout ------------- */
+/* ======================================================================
+ *  mbarrier helpers
+ * ====================================================================== */
 
 __device__ __forceinline__
-uint32_t swizzle_B128(uint32_t byte_offset) {
-    /* Swizzle<3,4,3>: XOR bits [4:6] with bits [7:9] of byte address.
-     * Equivalent to: idx128[2:0] ^= idx128[5:3] where idx128 = byte/16. */
-    uint32_t idx = byte_offset >> 4;
-    idx ^= (idx >> 3) & 7;
-    return (idx << 4) | (byte_offset & 0xF);
+void mbarrier_init(uint64_t* mbar, unsigned count) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.init.shared.b64 [%0], %1;" :: "r"(addr), "r"(count));
 }
 
-/* --- cp.async global -> shared (B128 swizzle layout) ----------------- */
-/*
- * Store a [HEIGHT, WIDTH] bf16 tile from GMEM to SMEM in B128 swizzle
- * layout.  The layout uses 128-byte-wide atoms (64 bf16 per row within
- * each atom).  For WIDTH=128, two atoms are placed per 8-row group:
- *
- *   Group g: atom 0 (cols 0-63)  at SMEM offset g * 2048
- *            atom 1 (cols 64-127) at SMEM offset g * 2048 + 1024
- *
- * Within each atom: 8 rows × 128 bytes/row = 1024 bytes, swizzled.
- * Total SMEM per tile: HEIGHT/8 * 2 * 1024 = HEIGHT * 256 = HEIGHT*WIDTH*2.
- */
-
-template <int HEIGHT, int WIDTH, int TB_SIZE>
-__device__ inline
-void global_to_shared_B128(uint32_t dst, const nv_bfloat16 *src,
-                           int src_stride, int tid) {
-    constexpr int ATOM_COLS  = 64;                          /* 64 bf16 = 128B */
-    constexpr int ATOM_BYTES = 8 * ATOM_COLS * (int)sizeof(nv_bfloat16); /* 1024 */
-    constexpr int GROUP_BYTES = (WIDTH / ATOM_COLS) * ATOM_BYTES;        /* 2048 for W=128 */
-
-    constexpr int num_elems = 16 / sizeof(nv_bfloat16);     /* 8 bf16 per 16B */
-    constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
-
-    #pragma unroll
-    for (int iter = 0; iter < num_iters; iter++) {
-        const int idx  = (iter * TB_SIZE + tid) * num_elems;
-        const int row  = idx / WIDTH;
-        const int col  = idx % WIDTH;
-
-        /* Atom-local coordinates */
-        const int atom        = col / ATOM_COLS;
-        const int col_in_atom = col % ATOM_COLS;
-        const int group       = row / 8;
-        const int row_in_grp  = row % 8;
-
-        /* Byte offset within atom, then swizzle */
-        const uint32_t atom_byte = row_in_grp * ATOM_COLS * (int)sizeof(nv_bfloat16)
-                                 + col_in_atom * (int)sizeof(nv_bfloat16);
-        const uint32_t dst_addr = dst + group * GROUP_BYTES
-                                      + atom  * ATOM_BYTES
-                                      + swizzle_B128(atom_byte);
-
-        const nv_bfloat16 *src_addr = src + (row * src_stride + col);
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
-                     :: "r"(dst_addr), "l"(src_addr));
-    }
+__device__ __forceinline__
+void mbarrier_arrive_expect_tx(uint64_t* mbar, unsigned tx_bytes) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;"
+                 :: "r"(addr), "r"(tx_bytes));
 }
 
-/* --- WGMMA synchronization ------------------------------------------ */
+__device__ __forceinline__
+void mbarrier_arrive(uint64_t* mbar) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile(
+        "{\n"
+        "  .reg .b64 state;\n"
+        "  mbarrier.arrive.shared.b64 state, [%0];\n"
+        "}\n" :: "r"(addr));
+}
 
+__device__ __forceinline__
+void mbarrier_wait_parity(uint64_t* mbar, unsigned phase) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    uint32_t result;
+    do {
+        asm volatile(
+            "{\n"
+            "  .reg .pred p;\n"
+            "  mbarrier.try_wait.parity.shared.b64 p, [%1], %2;\n"
+            "  selp.u32 %0, 1, 0, p;\n"
+            "}\n"
+            : "=r"(result) : "r"(addr), "r"(phase));
+    } while (result == 0);
+}
+
+__device__ __forceinline__
+void mbarrier_inval(uint64_t* mbar) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.inval.shared.b64 [%0];" :: "r"(addr));
+}
+
+/* ======================================================================
+ *  TMA load helper
+ * ====================================================================== */
+
+__device__ __forceinline__
+void tma_load_2d(void* smem_dst, const void* tma_desc,
+                 int coord0, int coord1, uint64_t* mbar) {
+    uint32_t smem_addr = __cvta_generic_to_shared(smem_dst);
+    uint32_t mbar_addr = __cvta_generic_to_shared(mbar);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+        ".mbarrier::complete_tx::bytes"
+        " [%0], [%1, {%2, %3}], [%4];\n"
+        :: "r"(smem_addr), "l"(tma_desc),
+           "r"(coord0), "r"(coord1), "r"(mbar_addr)
+        : "memory");
+}
+
+/* ======================================================================
+ *  wgmma descriptor construction for 128B-swizzled SMEM half-tiles
+ *
+ *  Each half-tile is [64 cols, BLOCK rows] bf16 with SWIZZLE_128B.
+ *  Row stride = 64 bf16 = 128 bytes = one swizzle unit.
+ *
+ *  GmmaDescriptor bitfield (CUTLASS):
+ *    [0:14)   start_address >> 4
+ *    [16:30)  leading_byte_offset >> 4
+ *    [32:46)  stride_byte_offset >> 4
+ *    [49:52)  base_offset (3 bits)
+ *    [62:64)  layout_type (1 = SWIZZLE_128B)
+ *
+ *  For half-tiles [64 cols, N rows]:
+ *    leading_byte_offset = 128 (row stride in bytes) -> >> 4 = 8
+ *    stride_byte_offset = 8 * 128 = 1024 (stride between groups of 8 rows) -> >> 4 = 64
+ * ====================================================================== */
+
+__device__ __forceinline__
+uint64_t make_wgmma_desc(uint32_t smem_addr, int base_offset) {
+    uint64_t desc = 0;
+    desc |= (uint64_t)((smem_addr >> 4) & 0x3FFF);          /* [0:14)  start_address >> 4 */
+    desc |= (uint64_t)(HALF_ROW_STRIDE >> 4) << 16;         /* [16:30) LBO >> 4 = 8 */
+    desc |= (uint64_t)((8 * HALF_ROW_STRIDE) >> 4) << 32;   /* [32:46) SBO >> 4 = 64 */
+    desc |= (uint64_t)(base_offset & 7) << 49;              /* [49:52) base_offset */
+    desc |= (uint64_t)(1) << 62;                             /* [62:64) SWIZZLE_128B */
+    return desc;
+}
+
+/* ======================================================================
+ *  wgmma PTX helpers — RS variant m64n64k16
+ *
+ *  RS variant trailing params: p, scaleA, scaleB, tnspB (4 params)
+ *    p=1 (enabled): D += scaleA*A @ scaleB*B (accumulate)
+ *    p=0: D = A @ B (overwrite)
+ *    scaleA, scaleB: must be 1 or -1
+ *    tnspB: 0=non-transposed, 1=transposed
+ * ====================================================================== */
+
+/* Accumulate mode: D += A @ B, tnspB=1 (for QK: K transposed) */
+__device__ __forceinline__
+void wgmma_m64n64k16_acc(float d[32], uint32_t a[4], uint64_t desc_b) {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  setp.ne.b32 p, 1, 0;\n"  /* p=true -> accumulate */
+        "  wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+        "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+        "   %8,  %9,  %10, %11, %12, %13, %14, %15,"
+        "   %16, %17, %18, %19, %20, %21, %22, %23,"
+        "   %24, %25, %26, %27, %28, %29, %30, %31},"
+        "  {%32, %33, %34, %35},"
+        "   %36,"
+        "   p, 1, 1, 1;\n"
+        "}\n"
+        : "+f"(d[0]),  "+f"(d[1]),  "+f"(d[2]),  "+f"(d[3]),
+          "+f"(d[4]),  "+f"(d[5]),  "+f"(d[6]),  "+f"(d[7]),
+          "+f"(d[8]),  "+f"(d[9]),  "+f"(d[10]), "+f"(d[11]),
+          "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+          "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
+          "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+          "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
+          "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "l"(desc_b)
+    );
+}
+
+/* Overwrite mode: D = A @ B, tnspB=1 (for first QK k-step) */
+__device__ __forceinline__
+void wgmma_m64n64k16_new(float d[32], uint32_t a[4], uint64_t desc_b) {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  setp.ne.b32 p, 0, 0;\n"  /* p=false -> overwrite D */
+        "  wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+        "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+        "   %8,  %9,  %10, %11, %12, %13, %14, %15,"
+        "   %16, %17, %18, %19, %20, %21, %22, %23,"
+        "   %24, %25, %26, %27, %28, %29, %30, %31},"
+        "  {%32, %33, %34, %35},"
+        "   %36,"
+        "   p, 1, 1, 1;\n"
+        "}\n"
+        : "+f"(d[0]),  "+f"(d[1]),  "+f"(d[2]),  "+f"(d[3]),
+          "+f"(d[4]),  "+f"(d[5]),  "+f"(d[6]),  "+f"(d[7]),
+          "+f"(d[8]),  "+f"(d[9]),  "+f"(d[10]), "+f"(d[11]),
+          "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+          "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
+          "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+          "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
+          "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "l"(desc_b)
+    );
+}
+
+/* Overwrite mode, tnspB=0: D = A @ B (for first PV k-step of each V half) */
+__device__ __forceinline__
+void wgmma_m64n64k16_new_nt(float d[32], uint32_t a[4], uint64_t desc_b) {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  setp.ne.b32 p, 0, 0;\n"  /* p=false -> overwrite D */
+        "  wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+        "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+        "   %8,  %9,  %10, %11, %12, %13, %14, %15,"
+        "   %16, %17, %18, %19, %20, %21, %22, %23,"
+        "   %24, %25, %26, %27, %28, %29, %30, %31},"
+        "  {%32, %33, %34, %35},"
+        "   %36,"
+        "   p, 1, 1, 0;\n"
+        "}\n"
+        : "+f"(d[0]),  "+f"(d[1]),  "+f"(d[2]),  "+f"(d[3]),
+          "+f"(d[4]),  "+f"(d[5]),  "+f"(d[6]),  "+f"(d[7]),
+          "+f"(d[8]),  "+f"(d[9]),  "+f"(d[10]), "+f"(d[11]),
+          "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+          "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
+          "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+          "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
+          "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "l"(desc_b)
+    );
+}
+
+/* Accumulate mode, tnspB=0: D += A @ B (for PV: V non-transposed) */
+__device__ __forceinline__
+void wgmma_m64n64k16_acc_nt(float d[32], uint32_t a[4], uint64_t desc_b) {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  setp.ne.b32 p, 1, 0;\n"  /* p=true -> accumulate */
+        "  wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+        "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+        "   %8,  %9,  %10, %11, %12, %13, %14, %15,"
+        "   %16, %17, %18, %19, %20, %21, %22, %23,"
+        "   %24, %25, %26, %27, %28, %29, %30, %31},"
+        "  {%32, %33, %34, %35},"
+        "   %36,"
+        "   p, 1, 1, 0;\n"
+        "}\n"
+        : "+f"(d[0]),  "+f"(d[1]),  "+f"(d[2]),  "+f"(d[3]),
+          "+f"(d[4]),  "+f"(d[5]),  "+f"(d[6]),  "+f"(d[7]),
+          "+f"(d[8]),  "+f"(d[9]),  "+f"(d[10]), "+f"(d[11]),
+          "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+          "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
+          "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+          "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
+          "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "l"(desc_b)
+    );
+}
+
+/* ======================================================================
+ *  wgmma PTX helpers — RS variant m64n128k16
+ *
+ *  Same as m64n64k16 but with 64 output registers (16 groups of 4).
+ *  Used for QK GEMM where N=128 (full BLOCK_KV in one wgmma call).
+ * ====================================================================== */
+
+/* Overwrite mode: D = A @ B, tnspB=1 (for first QK k-step) */
+__device__ __forceinline__
+void wgmma_m64n128k16_new(float d[64], uint32_t a[4], uint64_t desc_b) {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  setp.ne.b32 p, 0, 0;\n"  /* p=false -> overwrite D */
+        "  wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+        "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+        "   %8,  %9,  %10, %11, %12, %13, %14, %15,"
+        "   %16, %17, %18, %19, %20, %21, %22, %23,"
+        "   %24, %25, %26, %27, %28, %29, %30, %31,"
+        "   %32, %33, %34, %35, %36, %37, %38, %39,"
+        "   %40, %41, %42, %43, %44, %45, %46, %47,"
+        "   %48, %49, %50, %51, %52, %53, %54, %55,"
+        "   %56, %57, %58, %59, %60, %61, %62, %63},"
+        "  {%64, %65, %66, %67},"
+        "   %68,"
+        "   p, 1, 1, 1;\n"
+        "}\n"
+        : "+f"(d[0]),  "+f"(d[1]),  "+f"(d[2]),  "+f"(d[3]),
+          "+f"(d[4]),  "+f"(d[5]),  "+f"(d[6]),  "+f"(d[7]),
+          "+f"(d[8]),  "+f"(d[9]),  "+f"(d[10]), "+f"(d[11]),
+          "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+          "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
+          "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+          "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
+          "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]),
+          "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]),
+          "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]),
+          "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]),
+          "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]),
+          "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]),
+          "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
+          "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]),
+          "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "l"(desc_b)
+    );
+}
+
+/* Accumulate mode: D += A @ B, tnspB=1 (for QK: K transposed) */
+__device__ __forceinline__
+void wgmma_m64n128k16_acc(float d[64], uint32_t a[4], uint64_t desc_b) {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  setp.ne.b32 p, 1, 0;\n"  /* p=true -> accumulate */
+        "  wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+        "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7, "
+        "   %8,  %9,  %10, %11, %12, %13, %14, %15,"
+        "   %16, %17, %18, %19, %20, %21, %22, %23,"
+        "   %24, %25, %26, %27, %28, %29, %30, %31,"
+        "   %32, %33, %34, %35, %36, %37, %38, %39,"
+        "   %40, %41, %42, %43, %44, %45, %46, %47,"
+        "   %48, %49, %50, %51, %52, %53, %54, %55,"
+        "   %56, %57, %58, %59, %60, %61, %62, %63},"
+        "  {%64, %65, %66, %67},"
+        "   %68,"
+        "   p, 1, 1, 1;\n"
+        "}\n"
+        : "+f"(d[0]),  "+f"(d[1]),  "+f"(d[2]),  "+f"(d[3]),
+          "+f"(d[4]),  "+f"(d[5]),  "+f"(d[6]),  "+f"(d[7]),
+          "+f"(d[8]),  "+f"(d[9]),  "+f"(d[10]), "+f"(d[11]),
+          "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+          "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]),
+          "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+          "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]),
+          "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]),
+          "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]),
+          "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]),
+          "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]),
+          "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]),
+          "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]),
+          "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
+          "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]),
+          "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "l"(desc_b)
+    );
+}
+
+/* wgmma fence, commit, wait */
 __device__ __forceinline__
 void wgmma_fence() {
-    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+    asm volatile("wgmma.fence.sync.aligned;\n");
 }
 
 __device__ __forceinline__
 void wgmma_commit_group() {
-    asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
-}
-
-template<int N>
-__device__ __forceinline__
-void wgmma_wait_group() {
-    asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(N) : "memory");
-}
-
-/* --- WGMMA descriptor construction and advancement ------------------- */
-
-__device__ __forceinline__
-uint64_t make_wgmma_desc(uint32_t smem_addr, int stride_bytes) {
-    uint64_t desc = 0;
-    desc |= (uint64_t)((smem_addr >> 4) & 0x3FFF);            // [0:14)  start_address
-    desc |= (uint64_t)(1) << 16;                               // [16:30) leading_byte_off = 1
-    desc |= (uint64_t)(((stride_bytes >> 4) & 0x3FFF)) << 32;  // [32:46) stride_byte_off
-    desc |= (uint64_t)(1) << 62;                                // [62:64) SWIZZLE_128B
-    return desc;
+    asm volatile("wgmma.commit_group.sync.aligned;\n");
 }
 
 __device__ __forceinline__
-uint64_t gmma_desc_advance(uint64_t desc, int offset_16B) {
-    uint32_t lo = (uint32_t)desc + (uint32_t)offset_16B;
-    uint32_t hi = (uint32_t)(desc >> 32);
-    return ((uint64_t)hi << 32) | (uint64_t)lo;
+void wgmma_wait_group_0() {
+    asm volatile("wgmma.wait_group.sync.aligned 0;\n");
 }
 
-/* --- WGMMA m64n64k16 (QK GEMM) -------------------------------------- */
-
 __device__ __forceinline__
-void wgmma_m64n64k16_f32_bf16(float acc[32], uint64_t desc_a, uint64_t desc_b,
-                               int scale_D) {
-    asm volatile(
-    "{\n"
-    ".reg .pred p;\n"
-    "setp.ne.b32 p, %34, 0;\n"
-    "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
-    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
-    " %16, %17, %18, %19, %20, %21, %22, %23, "
-    " %24, %25, %26, %27, %28, %29, %30, %31},"
-    " %32, %33, p, 1, 1, 0, 0;\n"
-    "}\n"
-    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
-      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
-      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
-      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
-      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
-      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
-      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
-      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31])
-    : "l"(desc_a), "l"(desc_b), "r"(scale_D));
-}
-
-/* --- WGMMA m64n128k16 (PV GEMM) ------------------------------------- */
-
-__device__ __forceinline__
-void wgmma_m64n128k16_f32_bf16(float acc[64], uint64_t desc_a, uint64_t desc_b,
-                                int scale_D) {
-    asm volatile(
-    "{\n"
-    ".reg .pred p;\n"
-    "setp.ne.b32 p, %66, 0;\n"
-    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
-    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
-    " %16, %17, %18, %19, %20, %21, %22, %23, "
-    " %24, %25, %26, %27, %28, %29, %30, %31, "
-    " %32, %33, %34, %35, %36, %37, %38, %39, "
-    " %40, %41, %42, %43, %44, %45, %46, %47, "
-    " %48, %49, %50, %51, %52, %53, %54, %55, "
-    " %56, %57, %58, %59, %60, %61, %62, %63},"
-    " %64, %65, p, 1, 1, 0, 1;\n"
-    "}\n"
-    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
-      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
-      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
-      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
-      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
-      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
-      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
-      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
-      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
-      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
-      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
-      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
-      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
-      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
-      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
-      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
-    : "l"(desc_a), "l"(desc_b), "r"(scale_D));
-}
-
-/* --- Pack two F32 values into BF16x2 -------------------------------- */
-
-__device__ __forceinline__
-uint32_t pack_bf16(float a, float b) {
-    uint32_t result;
-    asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(result) : "f"(a), "f"(b));
-    return result;
-}
-
-/* --- WGMMA m64n128k16 RS mode (A from registers, B from SMEM) ------- */
-
-__device__ __forceinline__
-void wgmma_m64n128k16_f32_bf16_RS(float acc[64],
-                                   uint32_t a0, uint32_t a1,
-                                   uint32_t a2, uint32_t a3,
-                                   uint64_t desc_b,
-                                   int scale_D) {
-    asm volatile(
-    "{\n"
-    ".reg .pred p;\n"
-    "setp.ne.b32 p, %69, 0;\n"
-    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
-    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
-    " %16, %17, %18, %19, %20, %21, %22, %23, "
-    " %24, %25, %26, %27, %28, %29, %30, %31, "
-    " %32, %33, %34, %35, %36, %37, %38, %39, "
-    " %40, %41, %42, %43, %44, %45, %46, %47, "
-    " %48, %49, %50, %51, %52, %53, %54, %55, "
-    " %56, %57, %58, %59, %60, %61, %62, %63},"
-    " {%64, %65, %66, %67},"
-    " %68, p, 1, 1, 1;\n"
-    "}\n"
-    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
-      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
-      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
-      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
-      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
-      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
-      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
-      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
-      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
-      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
-      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
-      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
-      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
-      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
-      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
-      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
-    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-      "l"(desc_b), "r"(scale_D));
-}
-
-/* --- fence_view_async_shared ----------------------------------------- */
-
-__device__ __forceinline__
-void fence_view_async_shared() {
-    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+void wgmma_wait_group_1() {
+    asm volatile("wgmma.wait_group.sync.aligned 1;\n");
 }
 
 /* ======================================================================
- *  WGMMA Flash Attention kernel — Phase 4 (RS mode PV GEMM)
- *
- *  128 threads = 1 warp group (warps 0-3).
- *  Double-buffered K: loads K[i+1] during QK[i] + softmax.
- *  Dedicated V buffer: V[i] loads overlap with QK[i] + softmax.
- *  PV GEMM: RS mode — P stays in registers, no SMEM roundtrip.
+ *  setmaxnreg for warp specialization
  * ====================================================================== */
 
-template<int BLOCK_Q, int BLOCK_KV, int DIM>
-__launch_bounds__(128, 1)   /* 128 threads, 1 block/SM */
-__global__
-void flash_attention_wgmma(
-    const nv_bfloat16 *Q,
-    const nv_bfloat16 *K,
-    const nv_bfloat16 *V,
-    nv_bfloat16 *O,
-    int B, int S, int H,
-    int len_q, int len_kv,
-    int is_causal)
+__device__ __forceinline__
+void setmaxnreg_dec_56() {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 56;\n");
+}
+
+__device__ __forceinline__
+void setmaxnreg_inc_256() {
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 256;\n");
+}
+
+/* ======================================================================
+ *  ldmatrix for Q -> registers (wgmma RS A operand)
+ * ====================================================================== */
+
+__device__ __forceinline__
+void ldmatrix_x4(uint32_t regs[4], uint32_t smem_addr) {
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
+        : "r"(smem_addr));
+}
+
+/* ======================================================================
+ *  Producer warp group (warps 0-3, threads 0-127)
+ *
+ *  Loads Q once via TMA (2 half-loads), then loops K/V with 2-stage
+ *  pipeline. Each tile load = 2 TMA calls (lo + hi halves).
+ *  Only thread 0 (elected leader) issues TMA loads.
+ * ====================================================================== */
+
+__device__ __noinline__
+void producer_warp_group(
+    char* smem_base,
+    uint64_t* barriers,
+    const CUtensorMap* tma_Q,
+    const CUtensorMap* tma_K,
+    const CUtensorMap* tma_V,
+    int q_coord_seq,    /* batch_id * S + q_block_id * BLOCK_Q */
+    int batch_seq_off,  /* batch_id * S */
+    int coord_head,     /* head_id * DIM_CONST */
+    int max_kv_iter,
+    int tid_in_wg)
 {
-    /* Constants */
-    constexpr int TB_SIZE = 128;
+    setmaxnreg_dec_56();
 
-    /* SMEM layout (P eliminated — RS mode keeps P in registers):
-     *   Q:    BLOCK_Q * DIM * 2B  = 16KB  (persistent)
-     *   K[0]: BLOCK_KV * DIM * 2B = 16KB  (stage 0)
-     *   K[1]: BLOCK_KV * DIM * 2B = 16KB  (stage 1)
-     *   V:    BLOCK_KV * DIM * 2B = 16KB  (dedicated, loads overlap QK+softmax)
-     *   Total: 64KB */
-    extern __shared__ nv_bfloat16 smem[];
-    const uint32_t smem_base = __cvta_generic_to_shared(smem);
-    const uint32_t Q_smem   = smem_base;
-    const uint32_t K_smem_0 = Q_smem + BLOCK_Q * DIM * sizeof(nv_bfloat16);
-    const uint32_t K_smem_1 = K_smem_0 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
-    const uint32_t V_smem   = K_smem_1 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
+    const bool is_leader = (tid_in_wg == 0);
 
-    const int tid = threadIdx.x;
-    const int warp_id = tid / 32;         /* 0-3 */
-    const int lane_id = tid % 32;
+    /* Load Q tile via TMA: 2 half-loads */
+    if (is_leader) {
+        mbarrier_arrive_expect_tx(&barriers[BAR_Q_FULL], Q_FULL_TILE_BYTES);
 
-    /* Block -> (batch, head, q_block) mapping */
+        /* Q_lo: columns [0:64) */
+        tma_load_2d(smem_base + SMEM_Q_OFFSET,
+                    tma_Q, coord_head, q_coord_seq,
+                    &barriers[BAR_Q_FULL]);
+        /* Q_hi: columns [64:128) */
+        tma_load_2d(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES,
+                    tma_Q, coord_head + HALF_DIM, q_coord_seq,
+                    &barriers[BAR_Q_FULL]);
+    }
+
+    /* K/V pipeline loop */
+    for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
+        int stage = kv_id % NUM_STAGES;
+        int kv_coord_seq = batch_seq_off + kv_id * BLOCK_KV;
+
+        /* Wait for consumer to finish reading previous data in this stage */
+        if (kv_id >= NUM_STAGES) {
+            int prev_phase = ((kv_id - NUM_STAGES) / NUM_STAGES) & 1;
+            mbarrier_wait_parity(&barriers[BAR_K_EMPTY + stage], prev_phase);
+        }
+
+        /* Load K tile: 2 half-loads */
+        if (is_leader) {
+            mbarrier_arrive_expect_tx(&barriers[BAR_K_FULL + stage], KV_FULL_TILE_BYTES);
+
+            /* K_lo: columns [0:64) */
+            tma_load_2d(smem_base + SMEM_K_OFFSET + stage * KV_FULL_TILE_BYTES,
+                        tma_K, coord_head, kv_coord_seq,
+                        &barriers[BAR_K_FULL + stage]);
+            /* K_hi: columns [64:128) */
+            tma_load_2d(smem_base + SMEM_K_OFFSET + stage * KV_FULL_TILE_BYTES + KV_HALF_TILE_BYTES,
+                        tma_K, coord_head + HALF_DIM, kv_coord_seq,
+                        &barriers[BAR_K_FULL + stage]);
+        }
+
+        /* Wait for consumer to finish reading V in this stage */
+        if (kv_id >= NUM_STAGES) {
+            int prev_phase = ((kv_id - NUM_STAGES) / NUM_STAGES) & 1;
+            mbarrier_wait_parity(&barriers[BAR_V_EMPTY + stage], prev_phase);
+        }
+
+        /* Load V tile: 2 half-loads */
+        if (is_leader) {
+            mbarrier_arrive_expect_tx(&barriers[BAR_V_FULL + stage], KV_FULL_TILE_BYTES);
+
+            /* V_lo: columns [0:64) */
+            tma_load_2d(smem_base + SMEM_V_OFFSET + stage * KV_FULL_TILE_BYTES,
+                        tma_V, coord_head, kv_coord_seq,
+                        &barriers[BAR_V_FULL + stage]);
+            /* V_hi: columns [64:128) */
+            tma_load_2d(smem_base + SMEM_V_OFFSET + stage * KV_FULL_TILE_BYTES + KV_HALF_TILE_BYTES,
+                        tma_V, coord_head + HALF_DIM, kv_coord_seq,
+                        &barriers[BAR_V_FULL + stage]);
+        }
+    }
+}
+
+/* ======================================================================
+ *  Consumer warp group (warps 4-7, threads 128-255)
+ *
+ *  wgmma.mma_async for QK^T and PV, with online softmax.
+ *  Q from SMEM via ldmatrix (RS variant: A=registers).
+ *  K, V from SMEM descriptors (B operand).
+ *
+ *  Split-DIM approach:
+ *    QK: S[64,128] = Q[64,128] @ K^T[128,128]
+ *      Single n-block using wgmma.m64n128k16 (64 output registers = 128 KV positions).
+ *      8 k-steps (4 from Q_lo×K_lo + 4 from Q_hi×K_hi).
+ *      S_acc[64] covers all 128 KV positions in 16 groups of 4 registers.
+ *
+ *    PV: O[64,128] = P[64,128] @ V[128,128]
+ *      = [P @ V_lo, P @ V_hi] where each V half is [128,64].
+ *      Each V half split into top[64,64] + bot[64,64] (KV rows 0-63 and 64-127).
+ *      4 k-steps per KV-half, 2 KV-halves per DIM-half, 2 DIM-halves = 16 wgmma calls.
+ *      Uses tnspB=0 with column-advance (ks*32), bot offset = 8192 bytes.
+ * ====================================================================== */
+
+__device__ __forceinline__
+void consumer_warp_group(
+    char* smem_base,
+    uint64_t* barriers,
+    nv_bfloat16* O_base,
+    int seq_stride,
+    int max_kv_iter,
+    int q_block_id,
+    int is_causal,
+    int tid_in_wg,
+    int lane_id)
+{
+    setmaxnreg_inc_256();
+
+    const int warp_in_wg = tid_in_wg / WARP_SIZE;  /* 0..3 */
+
+    /*
+     * wgmma output register layout:
+     *
+     * m64n128k16 (QK GEMM, per thread, 64 floats = S_acc[64]):
+     *   16 groups of 4 regs. Group g (0..15) covers N-columns [g*8, g*8+8).
+     *   Within group g:
+     *     d[g*4+0]: (row = warp*16 + lane/4,     col = g*8 + (lane%4)*2)
+     *     d[g*4+1]: (row = warp*16 + lane/4,     col = g*8 + (lane%4)*2 + 1)
+     *     d[g*4+2]: (row = warp*16 + lane/4 + 8, col = g*8 + (lane%4)*2)
+     *     d[g*4+3]: (row = warp*16 + lane/4 + 8, col = g*8 + (lane%4)*2 + 1)
+     *
+     * m64n64k16 (PV GEMM, per thread, 32 floats = O_lo/O_hi):
+     *   8 groups of 4 regs. Same layout as above but g in 0..7.
+     */
+
+    /* O accumulator: 2 n-halves of m64n64 for DIM=128 output */
+    float O_lo[32];  /* columns 0..63 */
+    float O_hi[32];  /* columns 64..127 */
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        O_lo[i] = 0.0f;
+        O_hi[i] = 0.0f;
+    }
+
+    /* Online softmax state per row.
+     * Each thread owns 2 rows: row0 = warp*16+lane/4, row1 = row0+8. */
+    float rowmax[2]    = {-FLT_MAX, -FLT_MAX};
+    float rowsumexp[2] = {0.0f, 0.0f};
+    float saved_rescale[2] = {1.0f, 1.0f};  /* deferred O rescale for overlap */
+
+    const float softmax_scale_log2 =
+        rsqrtf(static_cast<float>(DIM_CONST)) * 1.4426950408889634f;
+
+    /* Wait for Q to be loaded */
+    mbarrier_wait_parity(&barriers[BAR_Q_FULL], 0);
+
+    /* Q SMEM base addresses for lo and hi halves */
+    uint32_t q_lo_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET);
+    uint32_t q_hi_smem = __cvta_generic_to_shared(smem_base + SMEM_Q_OFFSET + Q_HALF_TILE_BYTES);
+
+    /* ================================================================
+     * Main KV loop with INTRA-WARPGROUP OVERLAP
+     *
+     * Key idea: QK GEMM for block N overlaps with PV GEMM for block N-1.
+     * Both are async wgmma calls. We use wgmma.wait_group(1) to wait for
+     * only the older group (QK), letting PV continue in the background
+     * while we do softmax on the QK result.
+     *
+     * Structure:
+     *   First half-block:  QK[0] only (no previous PV)
+     *   Middle blocks:     QK[n] + PV[n-1] overlapped
+     *   Last half-block:   PV[last] only (no next QK)
+     * ================================================================ */
+
+    /* Saved P registers for PV of the *previous* KV block */
+    uint32_t saved_p_regs[8][4];  /* [ks][4] for 8 k-steps (128 KV positions / 16) */
+    int prev_v_stage = 0;
+    int prev_v_phase = 0;
+
+    /* Helper macros (inlined by compiler) */
+
+    /*
+     * QK GEMM: S[m64, n128] = Q[m64, k128] @ K^T[k128, n128]
+     *
+     * Single n-block using wgmma.m64n128k16 with 64 output registers.
+     * S_acc[64]: 16 groups covering all 128 KV positions.
+     *   Groups 0-7 = KV positions 0..63, groups 8-15 = KV positions 64..127.
+     *
+     * 8 k-steps: 4 from Q_lo × K_dim_lo + 4 from Q_hi × K_dim_hi.
+     * K descriptor for m64n128k16 tnspB=1: B^T[N=128, K=16], covers all 128
+     * K rows using the same LBO/SBO pattern as m64n64k16.
+     */
+    #define DO_QK_GEMM(kv_id_arg, stage_arg, is_first)                          \
+    {                                                                            \
+        uint32_t kl = __cvta_generic_to_shared(                                  \
+            smem_base + SMEM_K_OFFSET + (stage_arg) * KV_FULL_TILE_BYTES);      \
+        uint32_t kh = kl + KV_HALF_TILE_BYTES;                                  \
+        wgmma_fence();                                                           \
+        for (int kg = 0; kg < 8; kg++) {                                         \
+            int khh = kg % 4;                                                    \
+            uint32_t qb = (kg < 4) ? q_lo_smem : q_hi_smem;                     \
+            uint32_t r = warp_in_wg * 16 + (lane_id % 16);                      \
+            uint32_t lc = khh * 2 + (lane_id / 16);                             \
+            uint32_t pc = lc ^ (r & 7);                                          \
+            uint32_t qa = qb + r * HALF_ROW_STRIDE + pc * 16;                   \
+            uint32_t qr[4]; ldmatrix_x4(qr, qa);                                \
+            uint32_t ks = (kg < 4) ? kl : kh;                                   \
+            uint32_t ksk = ks + khh * 32;                                        \
+            uint64_t kd = make_wgmma_desc(ksk, 0);                              \
+            if (kg == 0)                                                         \
+                wgmma_m64n128k16_new(S_acc, qr, kd);                            \
+            else                                                                 \
+                wgmma_m64n128k16_acc(S_acc, qr, kd);                            \
+        }                                                                        \
+        wgmma_commit_group();                                                    \
+    }
+
+    /*
+     * PV GEMM: O[m64, n128] = P[m64, k128] @ V[k128, n128]
+     *
+     * V is stored as two DIM-halves: V_lo[128, 64], V_hi[128, 64].
+     * Each DIM-half has 128 rows (KV positions) and 64 cols (DIM values).
+     *
+     * With tnspB=0: K = columns (DIM), N = rows (KV positions).
+     * Each wgmma m64n64k16 reads 16 columns (k-step) from 64 rows.
+     * But BLOCK_KV=128 > 64 rows per wgmma, so we split into two KV halves:
+     *   - KV rows 0-63 (top):   descriptor at vl + ks*32, P_regs[0..3]
+     *   - KV rows 64-127 (bot): descriptor at vl + 64*128 + ks*32, P_regs[4..7]
+     * 4 k-steps per KV-half = 8 k-steps total per DIM-half.
+     * Two DIM-halves (V_lo, V_hi) for full DIM=128 output.
+     */
+    #define DO_PV_GEMM(v_stage_arg)                                              \
+    {                                                                            \
+        uint32_t vl = __cvta_generic_to_shared(                                  \
+            smem_base + SMEM_V_OFFSET + (v_stage_arg) * KV_FULL_TILE_BYTES);    \
+        uint32_t vh = vl + KV_HALF_TILE_BYTES;                                  \
+        wgmma_fence();                                                           \
+        /* O_lo: DIM cols 0-63 */                                               \
+        /* KV rows 0-63 (P_regs 0-3) */                                        \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            uint64_t vd = make_wgmma_desc(vl + ks * 32, 0);                    \
+            wgmma_m64n64k16_acc_nt(O_lo, saved_p_regs[ks], vd);               \
+        }                                                                        \
+        /* KV rows 64-127 (P_regs 4-7) */                                      \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            uint64_t vd = make_wgmma_desc(vl + KV_ROW_OFFSET_64 + ks * 32, 0); \
+            wgmma_m64n64k16_acc_nt(O_lo, saved_p_regs[ks + 4], vd);           \
+        }                                                                        \
+        /* O_hi: DIM cols 64-127 */                                             \
+        /* KV rows 0-63 (P_regs 0-3) */                                        \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            uint64_t vd = make_wgmma_desc(vh + ks * 32, 0);                    \
+            wgmma_m64n64k16_acc_nt(O_hi, saved_p_regs[ks], vd);               \
+        }                                                                        \
+        /* KV rows 64-127 (P_regs 4-7) */                                      \
+        for (int ks = 0; ks < 4; ks++) {                                         \
+            uint64_t vd = make_wgmma_desc(vh + KV_ROW_OFFSET_64 + ks * 32, 0); \
+            wgmma_m64n64k16_acc_nt(O_hi, saved_p_regs[ks + 4], vd);           \
+        }                                                                        \
+        wgmma_commit_group();                                                    \
+    }
+
+    /*
+     * Softmax over S_acc[64] = 128 KV positions (16 groups of 4 regs).
+     * Each thread owns 2 rows. Per row, 16 groups × 2 values = 32 values.
+     * Groups 0-7 = KV positions 0..63, groups 8-15 = KV positions 64..127.
+     */
+    #define DO_SOFTMAX(kv_id_arg, is_first)                                      \
+    {                                                                            \
+        for (int i = 0; i < 64; i++) S_acc[i] *= softmax_scale_log2;            \
+        if (is_causal) {                                                         \
+            int r0 = q_block_id*BLOCK_Q + warp_in_wg*16 + (lane_id/4);         \
+            int r1 = r0 + 8;                                                    \
+            int kvs = (kv_id_arg) * BLOCK_KV;                                   \
+            for (int g = 0; g < 16; g++) {                                       \
+                int c0 = kvs + g*8 + (lane_id%4)*2;                             \
+                int c1 = c0 + 1;                                                \
+                if (c0 > r0) S_acc[g*4+0] = -FLT_MAX;                          \
+                if (c1 > r0) S_acc[g*4+1] = -FLT_MAX;                          \
+                if (c0 > r1) S_acc[g*4+2] = -FLT_MAX;                          \
+                if (c1 > r1) S_acc[g*4+3] = -FLT_MAX;                          \
+            }                                                                    \
+        }                                                                        \
+        float nm[2] = {-FLT_MAX, -FLT_MAX};                                    \
+        for (int g = 0; g < 16; g++) {                                           \
+            nm[0] = fmaxf(nm[0], fmaxf(S_acc[g*4+0], S_acc[g*4+1]));           \
+            nm[1] = fmaxf(nm[1], fmaxf(S_acc[g*4+2], S_acc[g*4+3]));           \
+        }                                                                        \
+        nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 1));           \
+        nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 2));           \
+        nm[1] = fmaxf(nm[1], __shfl_xor_sync(0xFFFFFFFF, nm[1], 1));           \
+        nm[1] = fmaxf(nm[1], __shfl_xor_sync(0xFFFFFFFF, nm[1], 2));           \
+        if (!(is_first)) { nm[0] = fmaxf(nm[0], rowmax[0]); nm[1] = fmaxf(nm[1], rowmax[1]); } \
+        float rs[2];                                                             \
+        rs[0] = (is_first) ? 1.0f : fast_exp2f(rowmax[0] - nm[0]);             \
+        rs[1] = (is_first) ? 1.0f : fast_exp2f(rowmax[1] - nm[1]);             \
+        if (!(is_first)) {                                                       \
+            for (int g = 0; g < 8; g++) {                                        \
+                O_lo[g*4+0]*=rs[0]; O_lo[g*4+1]*=rs[0];                        \
+                O_lo[g*4+2]*=rs[1]; O_lo[g*4+3]*=rs[1];                        \
+                O_hi[g*4+0]*=rs[0]; O_hi[g*4+1]*=rs[0];                        \
+                O_hi[g*4+2]*=rs[1]; O_hi[g*4+3]*=rs[1];                        \
+            }                                                                    \
+        }                                                                        \
+        rowmax[0] = nm[0]; rowmax[1] = nm[1];                                   \
+        float ns[2] = {0.0f, 0.0f};                                             \
+        for (int g = 0; g < 16; g++) {                                           \
+            S_acc[g*4+0] = fast_exp2f(S_acc[g*4+0] - rowmax[0]);               \
+            S_acc[g*4+1] = fast_exp2f(S_acc[g*4+1] - rowmax[0]);               \
+            S_acc[g*4+2] = fast_exp2f(S_acc[g*4+2] - rowmax[1]);               \
+            S_acc[g*4+3] = fast_exp2f(S_acc[g*4+3] - rowmax[1]);               \
+            ns[0] += S_acc[g*4+0] + S_acc[g*4+1];                              \
+            ns[1] += S_acc[g*4+2] + S_acc[g*4+3];                              \
+        }                                                                        \
+        ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 1);                         \
+        ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 2);                         \
+        ns[1] += __shfl_xor_sync(0xFFFFFFFF, ns[1], 1);                         \
+        ns[1] += __shfl_xor_sync(0xFFFFFFFF, ns[1], 2);                         \
+        rowsumexp[0] = rowsumexp[0] * rs[0] + ns[0];                            \
+        rowsumexp[1] = rowsumexp[1] * rs[1] + ns[1];                            \
+    }
+
+    /* Same as DO_SOFTMAX but saves rescale factors to saved_rescale[]
+     * instead of immediately applying to O_lo/O_hi. Used in overlap path
+     * where O is being written by PV GEMM in tensor cores. */
+    #define DO_SOFTMAX_NO_RESCALE(kv_id_arg, is_first)                           \
+    {                                                                            \
+        for (int i = 0; i < 64; i++) S_acc[i] *= softmax_scale_log2;            \
+        if (is_causal) {                                                         \
+            int r0 = q_block_id*BLOCK_Q + warp_in_wg*16 + (lane_id/4);         \
+            int r1 = r0 + 8;                                                    \
+            int kvs = (kv_id_arg) * BLOCK_KV;                                   \
+            for (int g = 0; g < 16; g++) {                                       \
+                int c0 = kvs + g*8 + (lane_id%4)*2;                             \
+                int c1 = c0 + 1;                                                \
+                if (c0 > r0) S_acc[g*4+0] = -FLT_MAX;                          \
+                if (c1 > r0) S_acc[g*4+1] = -FLT_MAX;                          \
+                if (c0 > r1) S_acc[g*4+2] = -FLT_MAX;                          \
+                if (c1 > r1) S_acc[g*4+3] = -FLT_MAX;                          \
+            }                                                                    \
+        }                                                                        \
+        float nm[2] = {-FLT_MAX, -FLT_MAX};                                    \
+        for (int g = 0; g < 16; g++) {                                           \
+            nm[0] = fmaxf(nm[0], fmaxf(S_acc[g*4+0], S_acc[g*4+1]));           \
+            nm[1] = fmaxf(nm[1], fmaxf(S_acc[g*4+2], S_acc[g*4+3]));           \
+        }                                                                        \
+        nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 1));           \
+        nm[0] = fmaxf(nm[0], __shfl_xor_sync(0xFFFFFFFF, nm[0], 2));           \
+        nm[1] = fmaxf(nm[1], __shfl_xor_sync(0xFFFFFFFF, nm[1], 1));           \
+        nm[1] = fmaxf(nm[1], __shfl_xor_sync(0xFFFFFFFF, nm[1], 2));           \
+        nm[0] = fmaxf(nm[0], rowmax[0]); nm[1] = fmaxf(nm[1], rowmax[1]);      \
+        float rs[2];                                                             \
+        rs[0] = fast_exp2f(rowmax[0] - nm[0]);                                  \
+        rs[1] = fast_exp2f(rowmax[1] - nm[1]);                                  \
+        saved_rescale[0] = rs[0]; saved_rescale[1] = rs[1];                     \
+        rowmax[0] = nm[0]; rowmax[1] = nm[1];                                   \
+        float ns[2] = {0.0f, 0.0f};                                             \
+        for (int g = 0; g < 16; g++) {                                           \
+            S_acc[g*4+0] = fast_exp2f(S_acc[g*4+0] - rowmax[0]);               \
+            S_acc[g*4+1] = fast_exp2f(S_acc[g*4+1] - rowmax[0]);               \
+            S_acc[g*4+2] = fast_exp2f(S_acc[g*4+2] - rowmax[1]);               \
+            S_acc[g*4+3] = fast_exp2f(S_acc[g*4+3] - rowmax[1]);               \
+            ns[0] += S_acc[g*4+0] + S_acc[g*4+1];                              \
+            ns[1] += S_acc[g*4+2] + S_acc[g*4+3];                              \
+        }                                                                        \
+        ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 1);                         \
+        ns[0] += __shfl_xor_sync(0xFFFFFFFF, ns[0], 2);                         \
+        ns[1] += __shfl_xor_sync(0xFFFFFFFF, ns[1], 1);                         \
+        ns[1] += __shfl_xor_sync(0xFFFFFFFF, ns[1], 2);                         \
+        rowsumexp[0] = rowsumexp[0] * rs[0] + ns[0];                            \
+        rowsumexp[1] = rowsumexp[1] * rs[1] + ns[1];                            \
+    }
+
+    /*
+     * Pack P registers for wgmma RS A operand.
+     * 8 k-steps for K_PV = BLOCK_KV = 128:
+     *   ks 0-7: from S_acc groups (ks*2) and (ks*2+1)
+     *   S_acc has 16 groups covering 128 KV positions continuously.
+     */
+    #define PACK_P_REGS()                                                        \
+    {                                                                            \
+        for (int ks = 0; ks < 8; ks++) {                                         \
+            nv_bfloat162 t;                                                      \
+            int g0 = ks*2, g1 = ks*2+1;                                         \
+            t = __float22bfloat162_rn({S_acc[g0*4+0], S_acc[g0*4+1]});          \
+            saved_p_regs[ks][0] = reinterpret_cast<uint32_t&>(t);               \
+            t = __float22bfloat162_rn({S_acc[g1*4+0], S_acc[g1*4+1]});          \
+            saved_p_regs[ks][1] = reinterpret_cast<uint32_t&>(t);               \
+            t = __float22bfloat162_rn({S_acc[g0*4+2], S_acc[g0*4+3]});          \
+            saved_p_regs[ks][2] = reinterpret_cast<uint32_t&>(t);               \
+            t = __float22bfloat162_rn({S_acc[g1*4+2], S_acc[g1*4+3]});          \
+            saved_p_regs[ks][3] = reinterpret_cast<uint32_t&>(t);               \
+        }                                                                        \
+    }
+
+    float S_acc[64];  /* QK output: 128 KV positions in 16 groups of 4 regs */
+
+    /* === FIRST HALF-BLOCK: QK[0] + softmax, save P for later PV === */
+    {
+        int stage = 0;
+        int phase = 0;
+        mbarrier_wait_parity(&barriers[BAR_K_FULL + stage], phase);
+        DO_QK_GEMM(0, stage, true);
+        wgmma_wait_group_0();
+        if (tid_in_wg == 0) mbarrier_arrive(&barriers[BAR_K_EMPTY + stage]);
+        DO_SOFTMAX(0, true);
+        PACK_P_REGS();
+        prev_v_stage = stage;
+        prev_v_phase = phase;
+    }
+
+    /* === MIDDLE BLOCKS: overlap QK[n] with PV[n-1] === */
+    for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
+        int stage = kv_id % NUM_STAGES;
+        int phase = (kv_id / NUM_STAGES) & 1;
+
+        /* Wait for V[prev] and K[cur] */
+        mbarrier_wait_parity(&barriers[BAR_V_FULL + prev_v_stage], prev_v_phase);
+        mbarrier_wait_parity(&barriers[BAR_K_FULL + stage], phase);
+
+        /* === Rescale O BEFORE PV starts (O is idle, safe to modify) === */
+        /* Apply the scale from the PREVIOUS softmax iteration.
+         * On the first middle iteration (kv_id=1), the scale is from first-block softmax. */
+        {
+            float rs0 = saved_rescale[0], rs1 = saved_rescale[1];
+            #pragma unroll
+            for (int g = 0; g < 8; g++) {
+                O_lo[g*4+0]*=rs0; O_lo[g*4+1]*=rs0;
+                O_lo[g*4+2]*=rs1; O_lo[g*4+3]*=rs1;
+                O_hi[g*4+0]*=rs0; O_hi[g*4+1]*=rs0;
+                O_hi[g*4+2]*=rs1; O_hi[g*4+3]*=rs1;
+            }
+        }
+
+        /* Issue QK[cur] (commit group 1) */
+        DO_QK_GEMM(kv_id, stage, false);
+
+        /* Issue PV[prev] (commit group 2) — overlaps with QK in tensor cores.
+         * O was just rescaled, so PV accumulates at the correct scale. */
+        DO_PV_GEMM(prev_v_stage);
+
+        /* Wait for QK to finish (group 1). PV (group 2) may still be running.
+         * S_acc is now readable. O_lo/O_hi are NOT readable (PV writing). */
+        wgmma_wait_group_1();
+
+        /* Release K[cur] */
+        if (tid_in_wg == 0)
+            mbarrier_arrive(&barriers[BAR_K_EMPTY + stage]);
+
+        /* Softmax on QK result — does NOT touch O_lo/O_hi.
+         * Computes rescale factors and saves them for next iteration. */
+        DO_SOFTMAX_NO_RESCALE(kv_id, false);
+
+        /* Wait for PV to finish — now safe to touch O */
+        wgmma_wait_group_0();
+
+        /* Release V[prev] */
+        if (tid_in_wg == 0)
+            mbarrier_arrive(&barriers[BAR_V_EMPTY + prev_v_stage]);
+
+        /* Pack P for next PV iteration */
+        PACK_P_REGS();
+        prev_v_stage = stage;
+        prev_v_phase = phase;
+    }
+
+    /* === LAST HALF-BLOCK: rescale O, then PV[last] === */
+    {
+        /* Apply the saved rescale from the last softmax */
+        float rs0 = saved_rescale[0], rs1 = saved_rescale[1];
+        #pragma unroll
+        for (int g = 0; g < 8; g++) {
+            O_lo[g*4+0]*=rs0; O_lo[g*4+1]*=rs0;
+            O_lo[g*4+2]*=rs1; O_lo[g*4+3]*=rs1;
+            O_hi[g*4+0]*=rs0; O_hi[g*4+1]*=rs0;
+            O_hi[g*4+2]*=rs1; O_hi[g*4+3]*=rs1;
+        }
+
+        mbarrier_wait_parity(&barriers[BAR_V_FULL + prev_v_stage], prev_v_phase);
+        DO_PV_GEMM(prev_v_stage);
+        wgmma_wait_group_0();
+        if (tid_in_wg == 0)
+            mbarrier_arrive(&barriers[BAR_V_EMPTY + prev_v_stage]);
+    }
+
+    #undef DO_QK_GEMM
+    #undef DO_PV_GEMM
+    #undef DO_SOFTMAX
+    #undef DO_SOFTMAX_NO_RESCALE
+    #undef PACK_P_REGS
+
+    /* ---- Normalize O and write to global memory ---- */
+    float inv_sum0 = fast_rcp(rowsumexp[0]);
+    float inv_sum1 = fast_rcp(rowsumexp[1]);
+
+    int base_row0 = warp_in_wg * 16 + (lane_id / 4);
+    int base_row1 = base_row0 + 8;
+
+    /* Write O_lo (columns 0..63) */
+    #pragma unroll
+    for (int g = 0; g < 8; g++) {
+        int col = g * 8 + (lane_id % 4) * 2;
+
+        float v0 = O_lo[g*4+0] * inv_sum0;
+        float v1 = O_lo[g*4+1] * inv_sum0;
+        float v2 = O_lo[g*4+2] * inv_sum1;
+        float v3 = O_lo[g*4+3] * inv_sum1;
+
+        reinterpret_cast<nv_bfloat162*>(
+            O_base + base_row0 * seq_stride + col)[0] =
+            __float22bfloat162_rn({v0, v1});
+        reinterpret_cast<nv_bfloat162*>(
+            O_base + base_row1 * seq_stride + col)[0] =
+            __float22bfloat162_rn({v2, v3});
+    }
+
+    /* Write O_hi (columns 64..127) */
+    #pragma unroll
+    for (int g = 0; g < 8; g++) {
+        int col = 64 + g * 8 + (lane_id % 4) * 2;
+
+        float v0 = O_hi[g*4+0] * inv_sum0;
+        float v1 = O_hi[g*4+1] * inv_sum0;
+        float v2 = O_hi[g*4+2] * inv_sum1;
+        float v3 = O_hi[g*4+3] * inv_sum1;
+
+        reinterpret_cast<nv_bfloat162*>(
+            O_base + base_row0 * seq_stride + col)[0] =
+            __float22bfloat162_rn({v0, v1});
+        reinterpret_cast<nv_bfloat162*>(
+            O_base + base_row1 * seq_stride + col)[0] =
+            __float22bfloat162_rn({v2, v3});
+    }
+}
+
+/* ======================================================================
+ *  Kernel entry point
+ * ====================================================================== */
+
+__launch_bounds__(TB_SIZE, 1)
+__global__
+void flash_attention_tma_wgmma(
+    nv_bfloat16* O,
+    int B_param, int S, int H,
+    int len_q, int len_kv,
+    int is_causal,
+    const __grid_constant__ CUtensorMap tma_Q,
+    const __grid_constant__ CUtensorMap tma_K,
+    const __grid_constant__ CUtensorMap tma_V)
+{
+    extern __shared__ char smem[];
+
     const int bid = blockIdx.x;
+    const int tid = threadIdx.x;
+
     const int num_q_blocks = cdiv(len_q, BLOCK_Q);
-    const int bs_id       = bid / num_q_blocks;
-    const int q_block_id  = bid % num_q_blocks;
-    const int batch_id    = bs_id / H;
-    const int head_id     = bs_id % H;
-    const int seq_stride  = H * DIM;
+    const int bs_id        = bid / num_q_blocks;
+    const int q_block_id   = bid % num_q_blocks;
+    const int batch_id     = bs_id / H;
+    const int head_id      = bs_id % H;
+    const int seq_stride   = H * DIM_CONST;
 
-    const nv_bfloat16 *Q_base = Q + batch_id * S * seq_stride + head_id * DIM
-                                   + q_block_id * BLOCK_Q * seq_stride;
-    const nv_bfloat16 *K_base = K + batch_id * S * seq_stride + head_id * DIM;
-    const nv_bfloat16 *V_base = V + batch_id * S * seq_stride + head_id * DIM;
-    nv_bfloat16       *O_base = O + batch_id * S * seq_stride + head_id * DIM
-                                  + q_block_id * BLOCK_Q * seq_stride;
+    /* TMA coordinates: (innermost=col_offset, outermost=row_offset) */
+    int coord_head    = head_id * DIM_CONST;            /* column offset */
+    int q_coord_seq   = batch_id * S + q_block_id * BLOCK_Q;  /* row offset for Q */
+    int batch_seq_off = batch_id * S;                   /* row offset for K/V base */
 
-    /* KV iteration bounds */
+    nv_bfloat16* O_base = O + (size_t)batch_id * S * seq_stride
+                            + head_id * DIM_CONST
+                            + (size_t)q_block_id * BLOCK_Q * seq_stride;
+
+    /* Initialize all mbarriers (thread 0 only) */
+    uint64_t* barriers = reinterpret_cast<uint64_t*>(smem + SMEM_BAR_OFFSET);
+    if (tid == 0) {
+        mbarrier_init(&barriers[BAR_Q_FULL], 1);
+        for (int s = 0; s < NUM_STAGES; s++) {
+            mbarrier_init(&barriers[BAR_K_FULL + s], 1);
+            mbarrier_init(&barriers[BAR_V_FULL + s], 1);
+        }
+        for (int s = 0; s < NUM_STAGES; s++) {
+            mbarrier_init(&barriers[BAR_K_EMPTY + s], 1);
+            mbarrier_init(&barriers[BAR_V_EMPTY + s], 1);
+        }
+    }
+    __syncthreads();
+
     const int num_kv_iter = cdiv(len_kv, BLOCK_KV);
     const int max_kv_iter = is_causal
         ? min(num_kv_iter, cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
         : num_kv_iter;
 
-    /* ---- Load Q to shared memory (all 128 threads) ---- */
-    global_to_shared_B128<BLOCK_Q, DIM, TB_SIZE>(
-        Q_smem, Q_base, seq_stride, tid);
-    asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
-    __syncthreads();
+    const int warp_group = tid / WG_SIZE;  /* 0=producer, 1=consumer */
+    const int tid_in_wg  = tid % WG_SIZE;
+    const int lane_id    = tid % WARP_SIZE;
 
-    /* WGMMA descriptor stride constant */
-    constexpr int QKV_stride_bytes = 8 * DIM * sizeof(nv_bfloat16);      /* 2048 */
-
-    const float softmax_scale_log2 =
-        rsqrtf(static_cast<float>(DIM)) * 1.4426950408889634f;
-
-    /* Initialize accumulators */
-    float O_acc[64];
-    #pragma unroll
-    for (int i = 0; i < 64; i++) O_acc[i] = 0.0f;
-
-    float rowmax[2] = {-FLT_MAX, -FLT_MAX};
-    float rowsumexp[2] = {0.0f, 0.0f};
-
-    /* Precompute base descriptor for Q (invariant across iterations) */
-    const uint64_t desc_q_base = make_wgmma_desc(Q_smem, QKV_stride_bytes);
-
-    /* ---- Prelude: load K[0] into stage 0 ---- */
-    if (max_kv_iter > 0) {
-        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
-            K_smem_0, K_base, seq_stride, tid);
-        asm volatile("cp.async.commit_group;");
-        asm volatile("cp.async.wait_all;");
-        __syncthreads();
-    }
-
-    /* Precompute V descriptor base (V_smem is fixed across iterations) */
-    const uint64_t desc_v_base = make_wgmma_desc(V_smem, QKV_stride_bytes);
-
-    /* ---- Main KV loop ---- */
-    for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
-        const int cur_stage  = kv_id & 1;
-        const uint32_t cur_K_smem  = cur_stage ? K_smem_1 : K_smem_0;
-        const uint32_t next_K_smem = cur_stage ? K_smem_0 : K_smem_1;
-
-        /* == Step 1a: Start loading V[kv_id] into V_smem (non-blocking) == */
-        const nv_bfloat16 *V_cur = V_base + kv_id * BLOCK_KV * seq_stride;
-        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
-            V_smem, V_cur, seq_stride, tid);
-        asm volatile("cp.async.commit_group;");
-        /* V load is now group 0 (newest) — will become group 1 if K is committed */
-
-        /* == Step 1b: Start loading K[kv_id+1] (non-blocking) == */
-        const bool has_next_k = (kv_id + 1 < max_kv_iter);
-        if (has_next_k) {
-            const nv_bfloat16 *K_next = K_base + (kv_id + 1) * BLOCK_KV * seq_stride;
-            global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
-                next_K_smem, K_next, seq_stride, tid);
-            asm volatile("cp.async.commit_group;");
-            /* Now: group 0 = K[kv_id+1], group 1 = V[kv_id] */
-        }
-        /* If !has_next_k: group 0 = V[kv_id] only */
-
-        /* == Step 2: QK GEMM using K_smem[cur_stage] == */
-        /* K[kv_id] is already in cur_K_smem (loaded in prelude or prev iter) */
-        float S_acc[32];
-        #pragma unroll
-        for (int i = 0; i < 32; i++) S_acc[i] = 0.0f;
-
-        const uint64_t desc_k_base = make_wgmma_desc(cur_K_smem, QKV_stride_bytes);
-
-        wgmma_fence();
-
-        /* B128 layout: 128-byte-wide atoms (64 bf16 cols).  DIM=128 needs
-         * 2 atoms per row.  k-steps 0-3 → atom 0, k-steps 4-7 → atom 1.
-         * Atom offset = 1024 bytes = 64 units of 16B. */
-        #pragma unroll
-        for (int ks = 0; ks < DIM / 16; ks++) {
-            const int atom_off = (ks / 4) * 64;   /* 0 or 64 */
-            const int k_off    = (ks % 4) * 2;    /* 0, 2, 4, 6 */
-            uint64_t desc_q = gmma_desc_advance(desc_q_base, atom_off + k_off);
-            uint64_t desc_k = gmma_desc_advance(desc_k_base, atom_off + k_off);
-            wgmma_m64n64k16_f32_bf16(S_acc, desc_q, desc_k,
-                                      (ks == 0) ? 0 : 1);
-        }
-
-        wgmma_commit_group();
-        wgmma_wait_group<0>();
-        wgmma_fence();  /* fence before reading accumulators */
-
-        /* == Step 3: Softmax on S_acc (in-place, P stays in registers) == */
-        /* V[kv_id] and K[kv_id+1] may still be loading in background */
-        #pragma unroll
-        for (int half = 0; half < 2; half++) {
-            float row_vals[16];
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                row_vals[p4 * 2 + 0] = S_acc[(p4 << 2) | (half << 1) | 0];
-                row_vals[p4 * 2 + 1] = S_acc[(p4 << 2) | (half << 1) | 1];
-            }
-
-            /* Scale */
-            #pragma unroll
-            for (int c = 0; c < 16; c++)
-                row_vals[c] *= softmax_scale_log2;
-
-            /* Causal mask */
-            if (is_causal) {
-                const int row = warp_id * 16 + half * 8 + (lane_id / 4);
-                const int q_pos = q_block_id * BLOCK_Q + row;
-                #pragma unroll
-                for (int p4 = 0; p4 < 8; p4++) {
-                    #pragma unroll
-                    for (int s2 = 0; s2 < 2; s2++) {
-                        const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
-                        const int kv_pos = kv_id * BLOCK_KV + col;
-                        if (kv_pos > q_pos)
-                            row_vals[p4 * 2 + s2] = -FLT_MAX;
-                    }
-                }
-            }
-
-            /* Local max across 16 values */
-            float local_max = row_vals[0];
-            #pragma unroll
-            for (int c = 1; c < 16; c++)
-                local_max = fmaxf(local_max, row_vals[c]);
-
-            /* Warp reduce max across 4 threads (lane%4 groups -> full 64-col) */
-            local_max = fmaxf(local_max,
-                __shfl_xor_sync(0xFFFFFFFF, local_max, 1));
-            local_max = fmaxf(local_max,
-                __shfl_xor_sync(0xFFFFFFFF, local_max, 2));
-
-            /* Update running max */
-            float new_max = fmaxf(local_max, rowmax[half]);
-            float rescale = fast_exp2f(rowmax[half] - new_max);
-            rowmax[half] = new_max;
-
-            /* Rescale O accumulator for this row */
-            #pragma unroll
-            for (int p4 = 0; p4 < 16; p4++) {
-                O_acc[(p4 << 2) | (half << 1) | 0] *= rescale;
-                O_acc[(p4 << 2) | (half << 1) | 1] *= rescale;
-            }
-
-            /* Compute exp2(x - max) and sum */
-            float local_sum = 0.0f;
-            #pragma unroll
-            for (int c = 0; c < 16; c++) {
-                row_vals[c] = fast_exp2f(row_vals[c] - new_max);
-                local_sum += row_vals[c];
-            }
-
-            /* Warp reduce sum */
-            local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, 1);
-            local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, 2);
-
-            /* Update running sum */
-            rowsumexp[half] = rowsumexp[half] * rescale + local_sum;
-
-            /* Write softmax output back to S_acc (P stays in registers) */
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                S_acc[(p4 << 2) | (half << 1) | 0] = row_vals[p4 * 2 + 0];
-                S_acc[(p4 << 2) | (half << 1) | 1] = row_vals[p4 * 2 + 1];
-            }
-        }
-
-        /* == Step 4: Wait for V[kv_id] load to complete == */
-        /* If K[kv_id+1] was also issued, V is group 1, K is group 0.
-         * wait_group 1 ensures V is done while K may still be in flight.
-         * If no K was issued, V is group 0 → wait_group 0. */
-        if (has_next_k) {
-            asm volatile("cp.async.wait_group 1;\n" ::: "memory");
-        } else {
-            asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        }
-        __syncthreads();
-
-        /* == Step 5: PV GEMM using RS mode (P from registers, V from SMEM) ==
-         *
-         * RS register layout (PTX ISA Figure 148):
-         *   a0 = bf16x2(P[row0, col], P[row0, col+1])       // row0, cols 0-7
-         *   a1 = bf16x2(P[row1, col], P[row1, col+1])       // row1, cols 0-7
-         *   a2 = bf16x2(P[row0, col+8], P[row0, col+8+1])   // row0, cols 8-15
-         *   a3 = bf16x2(P[row1, col+8], P[row1, col+8+1])   // row1, cols 8-15
-         *
-         * Mapping from S_acc (half=0 -> row0, half=1 -> row1):
-         *   a0 = pack(S_acc[ks*8+0], S_acc[ks*8+1])   // half=0, pair4=ks*2
-         *   a1 = pack(S_acc[ks*8+2], S_acc[ks*8+3])   // half=1, pair4=ks*2
-         *   a2 = pack(S_acc[ks*8+4], S_acc[ks*8+5])   // half=0, pair4=ks*2+1
-         *   a3 = pack(S_acc[ks*8+6], S_acc[ks*8+7])   // half=1, pair4=ks*2+1
-         */
-        wgmma_fence();
-
-        /* V K-stepping with tnspB=1: each K-step processes 16 ROWS of V.
-         * In B128 layout: 16 rows = 2 groups of 8 rows.
-         * Advance per K-step = 2 × group_bytes / 16 = 2 × 2048 / 16 = 256.
-         * (NOT ks*2 which advances 32B along columns — wrong axis!) */
-        constexpr int V_KS_ADVANCE = 2 * QKV_stride_bytes / 16;  /* 256 */
-
-        #pragma unroll
-        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint32_t a0 = pack_bf16(S_acc[ks*8 + 0], S_acc[ks*8 + 1]);
-            uint32_t a1 = pack_bf16(S_acc[ks*8 + 2], S_acc[ks*8 + 3]);
-            uint32_t a2 = pack_bf16(S_acc[ks*8 + 4], S_acc[ks*8 + 5]);
-            uint32_t a3 = pack_bf16(S_acc[ks*8 + 6], S_acc[ks*8 + 7]);
-            uint64_t desc_v = gmma_desc_advance(desc_v_base, ks * V_KS_ADVANCE);
-            wgmma_m64n128k16_f32_bf16_RS(O_acc, a0, a1, a2, a3, desc_v, 1);
-        }
-
-        wgmma_commit_group();
-        wgmma_wait_group<0>();
-
-        /* == Step 6: Ensure K[kv_id+1] is ready for next iteration == */
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-
-    } /* end kv_id loop */
-
-    /* ---- Epilogue: finalize O and store to gmem ---- */
-    wgmma_fence();  /* fence before reading O_acc */
-
-    #pragma unroll
-    for (int half = 0; half < 2; half++) {
-        float inv_sum = fast_rcp(rowsumexp[half]);
-        #pragma unroll
-        for (int p4 = 0; p4 < 16; p4++) {
-            O_acc[(p4 << 2) | (half << 1) | 0] *= inv_sum;
-            O_acc[(p4 << 2) | (half << 1) | 1] *= inv_sum;
-        }
-    }
-
-    /* Write O to global memory */
-    #pragma unroll
-    for (int half = 0; half < 2; half++) {
-        const int row = warp_id * 16 + half * 8 + (lane_id / 4);
-        if (row < len_q - q_block_id * BLOCK_Q) {
-            #pragma unroll
-            for (int p4 = 0; p4 < 16; p4++) {
-                #pragma unroll
-                for (int s2 = 0; s2 < 2; s2++) {
-                    const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
-                    const int idx = (p4 << 2) | (half << 1) | s2;
-                    nv_bfloat16 val = __float2bfloat16(O_acc[idx]);
-                    O_base[row * seq_stride + col] = val;
-                }
-            }
-        }
+    if (warp_group == 0) {
+        producer_warp_group(
+            smem, barriers,
+            &tma_Q, &tma_K, &tma_V,
+            q_coord_seq, batch_seq_off, coord_head,
+            max_kv_iter, tid_in_wg);
+    } else {
+        consumer_warp_group(
+            smem, barriers,
+            O_base, seq_stride,
+            max_kv_iter, q_block_id, is_causal,
+            tid_in_wg, lane_id);
     }
 }
 
 /* ======================================================================
- *  Helpers + kernel_run
+ *  Host-side helpers
  * ====================================================================== */
+
+/* Use cuTensorMapEncodeTiled directly — linked with -lcuda */
 
 static int parse_int_env(const char *name, int fallback) {
     const char *v = getenv(name);
@@ -631,52 +1134,114 @@ extern "C" int kernel_run(
 {
     const char *config_json = getenv("CUDA_EXEC_CONFIG_JSON");
 
-    int B = parse_int_env("CUDA_EXEC_PARAM_BATCH_SIZE", 0);
-    int S = parse_int_env("CUDA_EXEC_PARAM_SEQ_LEN",    0);
-    int H = parse_int_env("CUDA_EXEC_PARAM_NUM_HEADS",  0);
-    int D = parse_int_env("CUDA_EXEC_PARAM_HEAD_DIM",   0);
+    int B_val = parse_int_env("CUDA_EXEC_PARAM_BATCH_SIZE", 0);
+    int S_val = parse_int_env("CUDA_EXEC_PARAM_SEQ_LEN",    0);
+    int H_val = parse_int_env("CUDA_EXEC_PARAM_NUM_HEADS",  0);
+    int D_val = parse_int_env("CUDA_EXEC_PARAM_HEAD_DIM",   0);
 
-    if (B == 0) B = json_int(config_json, "batch_size", 0);
-    if (S == 0) S = json_int(config_json, "seq_len",    0);
-    if (H == 0) H = json_int(config_json, "num_heads",  0);
-    if (D == 0) D = json_int(config_json, "head_dim",   0);
+    if (B_val == 0) B_val = json_int(config_json, "batch_size", 0);
+    if (S_val == 0) S_val = json_int(config_json, "seq_len",    0);
+    if (H_val == 0) H_val = json_int(config_json, "num_heads",  0);
+    if (D_val == 0) D_val = json_int(config_json, "head_dim",   0);
 
-    if (D == 0) D = 128;
-    if (H == 0) H = 16;
-    if (S == 0 && B == 0 && n > 0) {
-        int total_tokens = n / (H * D);
-        B = 1;
-        S = total_tokens / B;
+    if (D_val == 0) D_val = 128;
+    if (H_val == 0) H_val = 16;
+    if (S_val == 0 && B_val == 0 && n > 0) {
+        int total_tokens = n / (H_val * D_val);
+        B_val = 1;
+        S_val = total_tokens / B_val;
     }
-    if (B == 0 || S == 0) return -1;
+    if (B_val == 0 || S_val == 0) return -1;
 
     bool causal = parse_bool_env("CUDA_EXEC_PARAM_CAUSAL", false);
     if (!causal && config_json)
         causal = json_bool(config_json, "causal", false);
 
-    if (D != 128) return -2;
+    if (D_val != 128) return -2;
 
+    /* CUDA driver is already initialized by CUDA runtime (cudaMalloc in harness).
+     * cuTensorMapEncodeTiled is a host-only function that doesn't need extra init. */
+
+    /*
+     * Create TMA tensor descriptors for Q, K, V.
+     *
+     * Global tensor layout: [B*S, H*D] contiguous in H*D
+     *   dim0 (innermost) = column index in H*D
+     *   dim1 = row index (sequence position across all batches)
+     *   stride[0] = row stride in bytes = H*D * sizeof(bf16)
+     *
+     * SWIZZLE_128B constraint: boxDim[0] * elem_size must equal 128 bytes.
+     * For bf16 (2 bytes): boxDim[0] = 64.
+     *
+     * One TMA descriptor per matrix with box=[64, BLOCK].
+     * Producer issues 2 TMA loads per tile:
+     *   lo half: coord0 = head_id * DIM + 0
+     *   hi half: coord0 = head_id * DIM + 64
+     */
+    int seq_stride = H_val * D_val;
+    cuuint64_t globalDim[2]    = {(cuuint64_t)seq_stride, (cuuint64_t)(B_val * S_val)};
+    cuuint64_t globalStride[1] = {(cuuint64_t)(seq_stride * 2)};  /* bytes per row */
+    cuuint32_t elemStride[2]   = {1, 1};
+
+    CUtensorMap tma_Q, tma_K, tma_V;
+
+    /* Q: box [64, BLOCK_Q] */
     {
-        const int BLOCK_Q   = 64;
-        const int BLOCK_KV  = 64;
-        const int DIM_CONST = 128;
-        const int TB_SIZE   = 128;
-
-        int num_blocks = B * H * cdiv(S, BLOCK_Q);
-
-        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB */
-        int smem_size = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16)      /* Q: 16KB */
-                      + 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16) /* K[0]+K[1]: 32KB */
-                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);    /* V: 16KB */
-
-        auto kernel = flash_attention_wgmma<BLOCK_Q, BLOCK_KV, DIM_CONST>;
-        cudaFuncSetAttribute(kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-
-        kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
-            inputs[0], inputs[1], inputs[2], outputs[0],
-            B, S, H, S, S, causal ? 1 : 0);
+        cuuint32_t boxDim[2] = {(cuuint32_t)HALF_DIM, (cuuint32_t)BLOCK_Q};
+        CUresult res = cuTensorMapEncodeTiled(
+            &tma_Q, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)inputs[0],
+            globalDim, globalStride, boxDim, elemStride,
+            CU_TENSOR_MAP_INTERLEAVE_NONE,
+            CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_NONE,
+            CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (res != CUDA_SUCCESS) return -4;
     }
+
+    /* K: box [64, BLOCK_KV] */
+    {
+        cuuint32_t boxDim[2] = {(cuuint32_t)HALF_DIM, (cuuint32_t)BLOCK_KV};
+        CUresult res = cuTensorMapEncodeTiled(
+            &tma_K, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)inputs[1],
+            globalDim, globalStride, boxDim, elemStride,
+            CU_TENSOR_MAP_INTERLEAVE_NONE,
+            CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_NONE,
+            CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (res != CUDA_SUCCESS) return -5;
+    }
+
+    /* V: box [64, BLOCK_KV] */
+    {
+        cuuint32_t boxDim[2] = {(cuuint32_t)HALF_DIM, (cuuint32_t)BLOCK_KV};
+        CUresult res = cuTensorMapEncodeTiled(
+            &tma_V, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)inputs[2],
+            globalDim, globalStride, boxDim, elemStride,
+            CU_TENSOR_MAP_INTERLEAVE_NONE,
+            CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_NONE,
+            CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (res != CUDA_SUCCESS) return -6;
+    }
+
+    /* Launch */
+    int num_blocks = B_val * H_val * cdiv(S_val, BLOCK_Q);
+
+    static bool smem_configured = false;
+    if (!smem_configured) {
+        cudaFuncSetAttribute(flash_attention_tma_wgmma,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
+        smem_configured = true;
+    }
+
+    flash_attention_tma_wgmma<<<num_blocks, TB_SIZE, SMEM_TOTAL, stream>>>(
+        outputs[0],
+        B_val, S_val, H_val, S_val, S_val,
+        causal ? 1 : 0,
+        tma_Q, tma_K, tma_V);
 
     return 0;
 }

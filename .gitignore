@@ -23,8 +23,8 @@ dist/
 .claude/logs/
 .claude/worktrees/
 
-# Ephemeral internal data (worktrees, caches)
-.data/
+# Git worktrees for isolated development
+.worktrees/
 
 # Editors / OS
 .DS_Store

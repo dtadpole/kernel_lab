@@ -170,23 +170,23 @@ Worktrees provide isolated copies of the repo for parallel or experimental work 
 
 #### Convention
 
-- **Location:** all worktrees live under `.data/worktrees/` in the project root
-- **`.data/`** is a hidden, git-ignored directory for ephemeral/internal data (worktrees, caches, scratch)
+- **Location:** all worktrees live under `.worktrees/` in the project root
+- **`.worktrees/`** is git-ignored — ephemeral working copies, not project data
 - **Branch naming:** `worktree-<name>` (e.g. `worktree-fa4-optimize`, `worktree-matmul-tiling`)
-- **Directory naming:** `.data/worktrees/<name>` — the `<name>` matches the branch suffix
+- **Directory naming:** `.worktrees/<name>` — the `<name>` matches the branch suffix
 
 #### Creating a worktree
 
 ```bash
 # From the project root:
-mkdir -p .data/worktrees
-git worktree add .data/worktrees/<name> -b worktree-<name>
+mkdir -p .worktrees
+git worktree add .worktrees/<name> -b worktree-<name>
 ```
 
 Example:
 
 ```bash
-git worktree add .data/worktrees/fa4-optimize -b worktree-fa4-optimize
+git worktree add .worktrees/fa4-optimize -b worktree-fa4-optimize
 ```
 
 #### Listing worktrees
@@ -198,16 +198,16 @@ git worktree list
 #### Removing a worktree
 
 ```bash
-git worktree remove .data/worktrees/<name>
+git worktree remove .worktrees/<name>
 # Then optionally delete the branch:
 git branch -d worktree-<name>
 ```
 
 #### Rules
 
-- Do not create worktrees outside `.data/worktrees/` — the old locations (`.claude/worktrees/`, sibling directories like `kernel_lab-worktrees/`) are deprecated
+- Do not create worktrees outside `.worktrees/` — the old locations (`.claude/worktrees/`, sibling directories like `kernel_lab-worktrees/`) are deprecated
 - Worktrees are ephemeral — merge or rebase work back to `main`, then remove the worktree
-- Do not commit `.data/` to git — it is in `.gitignore`
+- Do not commit `.worktrees/` to git — it is in `.gitignore`
 - Each worktree has its own working tree but shares the same `.git` object store
 
 ### 10. Data directory layout
@@ -230,12 +230,11 @@ data/
 │       └── fa4/generated.cu
 └── nvidia-docs/        # Cached NVIDIA documentation
 
-.data/                  # Hidden, git-ignored ephemeral data
-└── worktrees/          # Git worktrees for isolated development
+.worktrees/             # Git worktrees for isolated development (git-ignored)
 ```
 
 - `data/` is tracked in git — project data (fixtures, generated code, docs)
-- `.data/` is git-ignored — ephemeral internal data (worktrees, caches)
+- `.worktrees/` is git-ignored — ephemeral working copies for parallel development
 - Fixture entry point files are named `cutedsl.py` (CuTe DSL reference implementations)
 - Device-specific configs use `configs_<device>.json` naming (e.g. `configs_rtx5090.json`)
 

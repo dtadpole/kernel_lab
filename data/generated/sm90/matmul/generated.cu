@@ -42,6 +42,12 @@
 #define SMEM_STAGE      (A_STAGE_BYTES + B_STAGE_BYTES)         /* 49152 */
 #define SMEM_BYTES      (STAGES * SMEM_STAGE + 256)             /* 196864 */
 
+/* Epilogue: padded SMEM stride for bank-conflict-free R2S writes.
+ * Pad by 8 (not 4) so row stride = 264*2 = 528 bytes is 16-byte aligned
+ * for uint4 loads. Bank conflict check: 528/4 = 132, 132%32 = 4 → OK. */
+#define EPI_PAD         8
+#define EPI_N_STRIDE    (TILE_N + EPI_PAD)  /* 264 elements per row */
+
 /* =========================================================================
  * PTX helpers — mbarrier
  * ========================================================================= */
@@ -528,37 +534,52 @@ __global__ void wgmma_matmul(
     /* Wait for last WGMMA group */
     wgmma_wait_group_0();
 
-        /* ---- Epilogue: write accumulators to global memory ---- */
-        /*
-         * WGMMA m64n256k16 F32 output fragment layout:
-         *
-         *   For register d[i] (i=0..127):
-         *     half  = (i >> 1) & 1       (0 or 1 — top/bottom 8-row group)
-         *     pair4 = i >> 2             (0..31 — which 8-column chunk)
-         *     sub2  = i & 1              (0 or 1 — even/odd column within pair)
-         *
-         *     row = warp_in_wg * 16 + half * 8 + groupID
-         *     col = pair4 * 8 + sub2 + thread_in_group * 2
-         *
-         *   Registers d[4*p + 2*h] and d[4*p + 2*h + 1] are adjacent columns.
-         */
+    /* ---- Epilogue: SMEM-buffered coalesced stores ----
+     *
+     * Direct bfloat162 stores from WGMMA fragments are poorly coalesced:
+     * threads in a warp write to 8 different rows (8 cache sectors per store).
+     * Instead: write fragments to SMEM, syncthreads, then coalesced 128-bit
+     * stores from SMEM to GMEM (1 sector per store, 8× better).
+     *
+     * SMEM is padded (EPI_N_STRIDE = TILE_N + 4) to avoid bank conflicts
+     * when writing fragments: consecutive groupIDs hit banks 2 apart.
+     * Reuses mainloop SMEM (safe: wgmma_wait_group_0 guarantees completion).
+     */
+    __syncthreads();  /* ensure both warpgroups done with mainloop SMEM */
 
-        /* Vectorized bfloat162 stores */
+    __nv_bfloat16* epi_smem = reinterpret_cast<__nv_bfloat16*>(smem);
+
+    /* Step 1: Write F32 → BF16 fragments to padded SMEM */
+    #pragma unroll
+    for (int j = 0; j < 64; j++) {
+        int p4 = j / 2;
+        int h  = j % 2;
+        int row = wg_id * 64 + warp_in_wg * 16 + h * 8 + groupID;
+        int col = p4 * 8 + thread_in_group * 2;
+        int idx = 4 * p4 + 2 * h;
+        int off = row * EPI_N_STRIDE + col;
+        *reinterpret_cast<__nv_bfloat162*>(&epi_smem[off]) =
+            __floats2bfloat162_rn(acc[idx], acc[idx + 1]);
+    }
+    __syncthreads();
+
+    /* Step 2: Coalesced 128-bit loads from SMEM, stores to GMEM.
+     * 8 warps × 16 rows/warp = 128 rows. Each warp's 32 threads write
+     * 256 columns (32 × 8 BF16 = 256). One 128-bit store per thread. */
+    {
+        int warp_epi = tid / 32;   /* 0..7 */
+        int lane_epi = tid % 32;   /* 0..31 */
         #pragma unroll
-        for (int j = 0; j < 64; j++) {
-            int p4 = j / 2;    /* pair4 index (0..31) — column group */
-            int h  = j % 2;    /* half (0 or 1) — row group */
-
-            int row = mBase + wg_id * 64 + warp_in_wg * 16 + h * 8 + groupID;
-            int col = nBase + p4 * 8 + thread_in_group * 2;
-
-            int idx = 4 * p4 + 2 * h;  /* base register index */
-
-            if (row < M && col + 1 < N) {
-                *reinterpret_cast<__nv_bfloat162*>(&C[row * N + col]) =
-                    __floats2bfloat162_rn(acc[idx], acc[idx + 1]);
+        for (int r = 0; r < 16; r++) {
+            int row = mBase + warp_epi * 16 + r;
+            int col = nBase + lane_epi * 8;
+            if (row < M && col + 7 < N) {
+                uint4 data = *reinterpret_cast<const uint4*>(
+                    &epi_smem[(warp_epi * 16 + r) * EPI_N_STRIDE + lane_epi * 8]);
+                *reinterpret_cast<uint4*>(&C[row * N + col]) = data;
             }
         }
+    }
 }
 
 /* fence + 4x m64n128k16 + commit for small tile (128x128x64) */
@@ -698,6 +719,8 @@ void wgmma_tile_k64_small(float* acc,
 #define SMALL_B_STAGE   (SMALL_TILE_N * SMALL_TILE_K * 2)           /* 16384 */
 #define SMALL_SMEM_STAGE (SMALL_A_STAGE + SMALL_B_STAGE)            /* 32768 */
 #define SMALL_SMEM_BYTES (SMALL_STAGES * SMALL_SMEM_STAGE + 256)    /* 131328 */
+#define SMALL_EPI_PAD    4
+#define SMALL_EPI_N_STRIDE (SMALL_TILE_N + SMALL_EPI_PAD)          /* 132 */
 
 __device__ __forceinline__
 uint64_t make_gmma_desc_small(const void* smem_ptr) {
@@ -791,16 +814,38 @@ __global__ void wgmma_matmul_small(
     }
     wgmma_wait_group_0();
 
-    /* Epilogue: m64n128k16 fragment layout (pair4 0..15) */
+    /* Epilogue: SMEM-buffered coalesced stores (same approach as big kernel) */
+    __syncthreads();
+
+    __nv_bfloat16* epi_smem = reinterpret_cast<__nv_bfloat16*>(smem);
+
+    /* Step 1: Write m64n128k16 fragments to padded SMEM */
     #pragma unroll
     for (int j = 0; j < 32; j++) {
         int p4 = j/2, h = j%2;
-        int row = mBase + wg_id*64 + warp_in_wg*16 + h*8 + groupID;
-        int col = nBase + p4*8 + thread_in_group*2;
+        int row = wg_id*64 + warp_in_wg*16 + h*8 + groupID;
+        int col = p4*8 + thread_in_group*2;
         int idx = 4*p4 + 2*h;
-        if (row < M && col+1 < N)
-            *reinterpret_cast<__nv_bfloat162*>(&C[row*N+col]) =
-                __floats2bfloat162_rn(acc[idx], acc[idx+1]);
+        int off = row * SMALL_EPI_N_STRIDE + col;
+        *reinterpret_cast<__nv_bfloat162*>(&epi_smem[off]) =
+            __floats2bfloat162_rn(acc[idx], acc[idx+1]);
+    }
+    __syncthreads();
+
+    /* Step 2: Coalesced stores. 128 cols / 32 threads = 4 BF16 per thread (64-bit stores). */
+    {
+        int warp_epi = tid / 32;
+        int lane_epi = tid % 32;
+        #pragma unroll
+        for (int r = 0; r < 16; r++) {
+            int row = mBase + warp_epi*16 + r;
+            int col = nBase + lane_epi*4;
+            if (row < M && col+3 < N) {
+                uint2 data = *reinterpret_cast<const uint2*>(
+                    &epi_smem[(warp_epi*16+r) * SMALL_EPI_N_STRIDE + lane_epi*4]);
+                *reinterpret_cast<uint2*>(&C[row*N+col]) = data;
+            }
+        }
     }
 }
 

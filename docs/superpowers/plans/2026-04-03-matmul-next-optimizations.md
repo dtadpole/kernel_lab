@@ -87,3 +87,25 @@ mainloop and 67KB for epilogue, total = 264KB > 228KB. Need to either:
 
 High — this is essentially a rewrite of the tile loop and consumer logic.
 Estimate 300-500 lines of changes. Should be done in a dedicated session.
+
+## Attempted in this session
+
+### Cluster Multicast (2×1)
+- **Implemented** — correct output achieved
+- **Result**: -5% regression at 8192
+- **Root cause**: `cluster_arrive/cluster_wait` at tile boundaries + cross-CTA
+  `mbarrier_arrive_remote` latency exceeds B bandwidth savings
+- **Key learnings**:
+  - Must use `shared::cluster` state space for ALL TMA in cluster kernels (not `shared::cta`)
+  - Need `cluster_arrive/wait` between barrier re-init and cross-CTA pre-signaling
+  - Correct PTX: `%cluster_ctarank` for CTA rank, `mapa.shared::cluster` for remote arrive
+  - Cluster-coordinated tile assignment needed for B sharing (same tile_n in cluster)
+
+### stmatrix Epilogue
+- **Attempted** — compilation succeeded but correctness failed
+- **Root cause**: stmatrix address computation for row-major output differs from
+  Pranjal's column-major version. The `.trans` flag transposes relative to the
+  write layout, so the address offsets need to be recalculated.
+- **Next step**: Study the stmatrix m8n8.x4.trans register-to-SMEM mapping using
+  the PTX ISA documentation and write a small test kernel to verify the mapping
+  before integrating into the matmul kernel.

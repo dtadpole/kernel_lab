@@ -41,8 +41,8 @@ H100 theoretical 989.5 TFLOPS).
 
 ```
 ┌────────────────────┬──────────────────┬──────────────────┬──────────────────┬──────────┬──────────┐
-│  Config            │     cuBLAS       │    CuTe DSL      │  Generated CUDA  │ CuTe DSL │ Gen CUDA │
-│                    │  TFLOPS  (ms)    │  TFLOPS  (ms)    │  TFLOPS  (ms)    │ vs cuBLAS│ vs cuBLAS│
+│ H100 SXM (h8_4)   │     cuBLAS       │    CuTe DSL      │  Generated CUDA  │ CuTe DSL │ Gen CUDA │
+│ GPU4, CUDA 12.9    │  TFLOPS  (ms)    │  TFLOPS  (ms)    │  TFLOPS  (ms)    │ vs cuBLAS│ vs cuBLAS│
 ├────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
 │ mat-256x256        │    2.0  (0.017)  │    1.5  (0.022)  │    2.0  (0.017)  │   0.74×  │   0.99×  │
 ├────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤

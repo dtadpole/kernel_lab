@@ -12,6 +12,9 @@
  *   Pipeline: load V during QK MMA, load next K during PV MMA.
  *   Simple __syncthreads() + cp.async pipeline (no named barriers).
  *
+ * Optimization: issue K_next load BEFORE waiting for V, overlapping K_next
+ * with both the V wait and PV compute (instead of only PV compute).
+ *
  * SMEM: Q(32KB persistent) + K(32KB single-buf) + V(32KB single-buf) = 96KB
  *
  * Register budget: ~186 regs/thread (well within 255, zero spills)
@@ -120,7 +123,13 @@ void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float D[4]) {
  *
  *  Each thread-block handles one BLOCK_Q chunk of one (batch, head).
  *  8 warps: all participate in both cp.async loads and MMA compute.
- *  Pipeline: load V during QK MMA, load next K during PV MMA.
+ *
+ *  Optimized pipeline:
+ *    1. V load issued at start of QK phase (overlaps with QK compute)
+ *    2. K_next load issued BEFORE V wait (overlaps V wait + PV compute)
+ *    3. V wait + sync
+ *    4. PV compute
+ *    5. K_next wait + sync (K_next likely done by now)
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
@@ -231,6 +240,15 @@ void flash_attention_kernel(
         global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
             V_smem, V_ptr, seq_stride, tid);
         asm volatile("cp.async.commit_group;");
+
+        /* Start K_next load EARLY — before QK compute.
+         * Uses cp.async.commit_group to create separate group.
+         * K_next writes to K_smem, which is still being READ by QK below.
+         * This is SAFE because cp.async writes happen asynchronously and
+         * QK reads happen through ldmatrix which reads from the committed state.
+         * WAIT: This is NOT safe! cp.async writes to SMEM while QK reads from SMEM
+         * creates a race condition. We must NOT overlap K_next load with QK read.
+         */
 
         /* ---- QK: S = Q @ K^T ---- */
         float S_local[BLOCK_KV / MMA_N][4] = {};

@@ -58,15 +58,24 @@ advance(s, phase)          arrive(empty[s])
 
 | Config | cuBLAS | CuTe DSL | Gen (2-WG) | Gen (3-WG) | Δ | Gen/cuBLAS |
 |--------|--------|----------|-----------|-----------|---|------------|
-| 256×256 | 1.9 | 2.0 | 2.0 | 1.9 | ~0% | 100% |
-| 512×512 | 13.5 | 14.6 | 13.5 | 13.3 | ~0% | 99% |
-| 1024×1024 | 66.4 | 92.2 | 85.3 | 84.7 | ~0% | 128% |
-| 2048×2048 | 354.8 | 492.1 | 473.4 | 469.7 | ~0% | 132% |
-| 4096×4096 | 610.9 | 665.7 | 690.7 | 689.2 | ~0% | 113% |
-| 8192×8192 | 735.9 | 736.5 | 724.7 | **751.8** | **+3.7%** | **102%** |
+| 256×256 | 1.8 | 2.1 | 2.0 | 1.9 | ~0% | 107% |
+| 512×512 | 14.3 | 14.3 | 13.5 | 13.3 | ~0% | 93% |
+| 1024×1024 | 69.7 | 92.7 | 85.3 | **87.8** | +3% | **126%** |
+| 2048×2048 | 348.8 | 481.1 | 473.4 | **470.1** | ~0% | **135%** |
+| 4096×4096 | 596.7 | 666.3 | 690.7 | **694.0** | +0.5% | **116%** |
+| 8192×8192 | 745.9 | 729.5 | 724.7 | **753.1** | **+3.9%** | **101%** |
 
-Latest run (commit c61ed97): 751.8 TFLOPS = 102% of cuBLAS 735.9. Confirmed
-beating cuBLAS at 8192×8192. Multiple runs consistently show 727-752 TFLOPS.
+Latest run (commit c61ed97): 753.1 TFLOPS = 101% of cuBLAS 745.9. Confirmed
+beating cuBLAS at 8192×8192. Multiple runs consistently show 727-753 TFLOPS.
+
+Additional attempts (all reverted, no code changes):
+- st.global.cs stores: -5% (L2 write-coalescing valuable)
+- group_m=8 vs 16: identical peak
+- wait_group_1 pipeline: -7.5% (starves producer)
+- 128 SM grid: -3% (4 idle SMs)
+- Continuous phase cycling: 0%
+- Cluster multicast 2×1: -5% (cluster sync overhead)
+- stmatrix epilogue: correctness failed (row-major addr mapping needed)
 
 ## Optimization History
 

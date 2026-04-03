@@ -143,7 +143,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - current tests may still use the repo-local `.venv`, but the temp-folder `uv`-managed `.venv` is the preferred future-tightening path
 - expected lower-level CUDA failures are allowed during early integration coverage, as long as the interface behavior itself is exercised
 - current integration config coverage should include roughly 4–6 configs spanning multiple 1D sizes plus representative 2D and 3D shape metadata
-- prefer storing integration config sets in fixture files under `conf/fixtures/` instead of embedding them directly in the main test module
+- prefer storing integration config sets in fixture files under `data/fixtures/` instead of embedding them directly in the main test module
 - fixture config slugs should make semantic sense for the sample workload; for vector-add fixtures, prefer size/shape/rank-based slugs rather than unrelated causal/noncausal labels
 - for vector-add integration fixtures, the config body itself should stay pertinent: shape/rank/input_size metadata is enough, and unrelated transformer-style fields should be omitted
 
@@ -248,9 +248,79 @@ Each arch folder contains kernels optimized for that SM version — **do not cop
 - Plugins work in both Claude Code CLI (`--plugin-dir`) and Agent SDK (`mcp_servers={}`)
 - MCP servers use the project's `.venv/bin/python` and `PYTHONPATH` set to repo root
 
-## Owner
+### 9. Git worktrees
 
-- d.t.p
+Worktrees provide isolated copies of the repo for parallel or experimental work without disturbing `main`.
+
+#### Convention
+
+- **Location:** all worktrees live under `.worktrees/` in the project root
+- **`.worktrees/`** is git-ignored — ephemeral working copies, not project data
+- **Branch naming:** `worktree-<name>` (e.g. `worktree-fa4-optimize`, `worktree-matmul-tiling`)
+- **Directory naming:** `.worktrees/<name>` — the `<name>` matches the branch suffix
+
+#### Creating a worktree
+
+```bash
+# From the project root:
+mkdir -p .worktrees
+git worktree add .worktrees/<name> -b worktree-<name>
+```
+
+Example:
+
+```bash
+git worktree add .worktrees/fa4-optimize -b worktree-fa4-optimize
+```
+
+#### Listing worktrees
+
+```bash
+git worktree list
+```
+
+#### Removing a worktree
+
+```bash
+git worktree remove .worktrees/<name>
+# Then optionally delete the branch:
+git branch -d worktree-<name>
+```
+
+#### Rules
+
+- Do not create worktrees outside `.worktrees/` — the old locations (`.claude/worktrees/`, sibling directories like `kernel_lab-worktrees/`) are deprecated
+- Worktrees are ephemeral — merge or rebase work back to `main`, then remove the worktree
+- Do not commit `.worktrees/` to git — it is in `.gitignore`
+- Each worktree has its own working tree but shares the same `.git` object store
+
+### 10. Data directory layout
+
+```text
+data/
+├── fixtures/           # Reference implementations and configs, by arch
+│   ├── sm80/
+│   ├── sm90/
+│   ├── sm100/
+│   └── sm120/
+│       ├── devices.json          # SM120 device registry (RTX 5090 vs RTX PRO 6000)
+│       ├── vecadd/               # cutedsl.py, cudnn.py, configs.json
+│       ├── matmul/               # cutedsl.py, cute_gemm.py, cudnn.py, configs*.json
+│       └── fa4/                  # cutedsl.py, cudnn.py, configs*.json
+├── generated/          # Generated CUDA kernels, by arch
+│   └── sm120/
+│       ├── vecadd/generated.cu
+│       ├── matmul/generated.cu
+│       └── fa4/generated.cu
+└── nvidia-docs/        # Cached NVIDIA documentation
+
+.worktrees/             # Git worktrees for isolated development (git-ignored)
+```
+
+- `data/` is tracked in git — project data (fixtures, generated code, docs)
+- `.worktrees/` is git-ignored — ephemeral working copies for parallel development
+- Fixture entry point files are named `cutedsl.py` (CuTe DSL reference implementations)
+- Device-specific configs use `configs_<device>.json` naming (e.g. `configs_rtx5090.json`)
 
 ## License
 

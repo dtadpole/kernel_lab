@@ -1,17 +1,45 @@
 ---
 name: exec
-description: Compile, evaluate, and profile CUDA kernels using the remote cuda_exec service
+description: Compile, evaluate, and profile CUDA kernels locally or on remote GPU hosts
 user-invocable: true
-argument-hint: <action> [options]
+argument-hint: <local|remote> <action> [options]
 ---
 
 # CUDA Kernel Execution
 
-Compile, evaluate, and profile CUDA kernels via the cuda_exec remote service.
+Compile, evaluate, and profile CUDA kernels locally or on remote GPU hosts via the cuda_exec service.
+
+## Target (Required)
+
+Every action tool call requires an explicit `target` parameter. No default — you must always specify where to run.
+
+### Local execution
+```json
+{"mode": "local", "gpu_index": 0}
+```
+Runs directly on the local machine. `gpu_index` selects which GPU (maps to `CUDA_VISIBLE_DEVICES`).
+
+### Remote execution
+```json
+{"mode": "remote", "host": "_one"}
+```
+Proxies to the cuda_exec HTTP service on the named host. Host names are resolved from `conf/hosts/default.yaml`.
+
+### Skill invocation
+- `/cuda:exec local 0 compile ...` → `target={"mode": "local", "gpu_index": 0}`
+- `/cuda:exec remote _one compile ...` → `target={"mode": "remote", "host": "_one"}`
+
+### Available remote hosts
+| Host | GPU | Description |
+|------|-----|-------------|
+| `_one` | RTX PRO 6000 Blackwell | 98GB |
+| `_two` | RTX PRO 6000 Blackwell | 98GB |
+| `h8_3` | 8x NVIDIA H100 | Meta devvm |
+| `h8_4` | 8x NVIDIA H100 | Meta devvm |
 
 ## Tools
 
-- **health** — Check if the target cuda_exec service is responding
+- **health** — Check if the target cuda_exec service is responding (remote only)
 - **compile** — Compile CUDA source to binary/PTX/SASS
 - **evaluate** — Correctness + performance testing against runtime configs
 - **profile** — NCU profiling (generated or reference side)
@@ -19,11 +47,12 @@ Compile, evaluate, and profile CUDA kernels via the cuda_exec remote service.
 
 ## Workflow
 
-1. **Health check**: Verify the target service is reachable before sending work
-2. **Compile**: Call `compile` with metadata, reference_files, and generated_files
-3. **Evaluate**: Call `evaluate` with the same metadata and configs to test correctness + performance
-4. **Profile** (optional): Call `profile` to get NCU hardware metrics
-5. **Iterate**: Modify source code → increment `metadata.turn` → compile again
+1. **Target selection**: Determine local vs remote based on user instruction
+2. **Health check** (remote only): Verify the target service is reachable
+3. **Compile**: Call `compile` with target, metadata, reference_files, and generated_files
+4. **Evaluate**: Call `evaluate` with the same target and metadata, plus configs
+5. **Profile** (optional): Call `profile` to get NCU hardware metrics
+6. **Iterate**: Modify source code → increment `metadata.turn` → compile again
 
 ## Kernel Types
 
@@ -42,6 +71,7 @@ implementation provides the ground truth for correctness comparison.
 - New source code requires a new turn (increment metadata.turn)
 - Old turns are immutable — never recompile on a previous turn number
 - One compile fans out to many evaluate/profile calls with different configs
+- Use the same target for all calls within a turn
 
 ## Metadata
 
@@ -62,7 +92,7 @@ Every tool requires a `metadata` dict:
 
 ```json
 {
-  "reference_files": {"reference.py": "<content>"},
+  "reference_files": {"cutedsl.py": "<content>"},
   "generated_files": {"generated.cu": "<content>"}
 }
 ```
@@ -88,10 +118,12 @@ Configs are kernel-specific. Each config_slug is a stable identifier across eval
 - **Compile failure**: Check `all_ok` field. Use `/cuda:inspect` with `get_compile_data` field="tool_outputs" to see nvcc/ptxas errors.
 - **Evaluate failure**: Check per-config `status` and `correctness.passed`. Use `/cuda:inspect` to fetch full logs.
 - **Profile failure**: NCU profiling requires elevated permissions. Check `status` per config.
+- **Local GPU not found**: Check `gpu_index` matches available GPUs (`nvidia-smi`).
+- **Remote host unreachable**: Check host is running with `/cuda:service health <host>`.
 
 ## Available Fixtures
 
-Test workloads — reference/configs in `conf/fixtures/`, generated code in `data/generated/{arch}/`:
+Test workloads — reference/configs in `data/fixtures/`, generated code in `data/generated/{arch}/`:
 
 | Fixture | Description | Configs |
 |---------|-------------|---------|

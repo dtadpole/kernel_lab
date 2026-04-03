@@ -31,7 +31,8 @@ async def test_compile_vecadd(cuda_mcp, sample_metadata, vecadd_fixtures):
     """compile tool returns structured response."""
     result = await cuda_mcp.compile(
         metadata=sample_metadata,
-        reference_files={"reference.py": vecadd_fixtures["reference"]},
+        target={"mode": "remote", "host": "_one"},
+        reference_files={"cutedsl.py": vecadd_fixtures["reference"]},
         generated_files={"generated.cu": vecadd_fixtures["generated"]},
     )
     data = json.loads(result)
@@ -46,9 +47,26 @@ async def test_compile_has_ptx(cuda_mcp, sample_metadata, vecadd_fixtures):
     """compile produces PTX output."""
     result = await cuda_mcp.compile(
         metadata=sample_metadata,
-        reference_files={"reference.py": vecadd_fixtures["reference"]},
+        target={"mode": "remote", "host": "_one"},
+        reference_files={"cutedsl.py": vecadd_fixtures["reference"]},
         generated_files={"generated.cu": vecadd_fixtures["generated"]},
     )
     data = json.loads(result)
     ptx = data.get("artifacts", {}).get("ptx", {})
     assert ptx.get("path") is not None, "PTX artifact should have a path"
+
+
+@pytest.mark.gpu
+@pytest.mark.asyncio
+async def test_compile_vecadd_local(cuda_mcp, sample_metadata, vecadd_fixtures):
+    """compile tool works with local target."""
+    sample_metadata["turn"] = 9000  # unique turn to avoid conflicts
+    result = await cuda_mcp.compile(
+        metadata=sample_metadata,
+        target={"mode": "local", "gpu_index": 0},
+        reference_files={"cutedsl.py": vecadd_fixtures["reference"]},
+        generated_files={"generated.cu": vecadd_fixtures["generated"]},
+    )
+    data = json.loads(result)
+    assert data["all_ok"] is True
+    assert "artifacts" in data

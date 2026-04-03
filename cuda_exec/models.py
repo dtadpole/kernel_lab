@@ -48,7 +48,7 @@ class CompileRequest(RequestBase):
 
     Compile request contract:
     - `reference_files` must be non-empty
-    - `reference_files` must include a file keyed as `reference.py` (the entry point)
+    - `reference_files` must include a file keyed as `cutedsl.py` (the entry point)
     - `generated_files` must be non-empty
     - `generated_files` must contain exactly one `.cu` file, keyed as `generated.cu`
     - `generated_files` may include additional headers or inline helper files
@@ -63,7 +63,7 @@ class CompileRequest(RequestBase):
 
     reference_files: Dict[str, str] = Field(
         default_factory=dict,
-        description="Non-empty map of relative path to file content; must include reference.py as the entry point",
+        description="Non-empty map of relative path to file content; must include cutedsl.py as the entry point",
     )
     generated_files: Dict[str, str] = Field(
         default_factory=dict,

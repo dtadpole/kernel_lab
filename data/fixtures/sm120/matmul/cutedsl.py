@@ -1,4 +1,7 @@
-"""Blackwell GeForce CuTe DSL BF16 GEMM reference fixture for cuda_exec evaluation.
+"""Blackwell (SM120) CuTe DSL BF16 GEMM reference fixture for cuda_exec evaluation.
+
+Supports RTX 5090 (170 SMs) and RTX PRO 6000 (188 SMs).
+Use ``detect_sm120_device()`` to identify the current device variant.
 
 Wraps ``Sm120Gemm`` from ``cute_gemm.py`` into the ``Model(nn.Module)`` contract
 expected by the evaluation harness.  All inputs are ``torch.bfloat16``; the
@@ -10,7 +13,7 @@ Convention for all inputs/outputs:
     B: (K, N)  row-major BF16  — B.t() view (zero-copy) gives (N, K) N-major
     C: (M, N)  row-major BF16  — FP32->BF16 conversion in kernel epilogue
 
-Contract for cuda_exec reference Python files:
+Contract for cuda_exec CuTe DSL reference files (cutedsl.py):
 - export ``class Model(torch.nn.Module)``
 - export ``get_inputs(config)``
 - export ``get_init_inputs()``
@@ -25,7 +28,28 @@ from typing import Any
 import torch
 from torch import nn
 
-from cute_gemm import Sm120Gemm
+from dense_gemm import Sm120GemmKernel
+
+
+# ---------------------------------------------------------------------------
+#  SM120 device detection
+# ---------------------------------------------------------------------------
+
+_SM120_DEVICES = {
+    "rtx5090":      {"match": ["RTX 5090", "5090"],     "sms": 170, "bf16_tflops": 209.5},
+    "rtx_pro_6000": {"match": ["RTX PRO 6000", "PRO 6000"], "sms": 188, "bf16_tflops": 503.8},
+}
+
+
+def detect_sm120_device() -> str:
+    """Return the SM120 device key ('rtx5090' or 'rtx_pro_6000'), or 'unknown_sm120'."""
+    if not torch.cuda.is_available():
+        return "unknown_sm120"
+    name = torch.cuda.get_device_name().upper()
+    for key, info in _SM120_DEVICES.items():
+        if any(pat.upper() in name for pat in info["match"]):
+            return key
+    return "unknown_sm120"
 
 
 # ---------------------------------------------------------------------------
@@ -91,30 +115,30 @@ def _config_from_env() -> dict[str, Any]:
 class Model(nn.Module):
     """CuTe DSL BF16 GEMM reference kernel for Blackwell (SM120).
 
+    Uses NVIDIA's Sm120GemmKernel with TMA store epilogue for optimal
+    performance. Tile shape 128x128x64, 2 mainloop stages, 8 epilogue
+    stages, stmatrix R2S + TMA S2G for coalesced output writes.
+
     Computes C = A @ B where A is M×K, B is K×N, C is M×N.
-    Inputs are BF16 with FP32 accumulation; output is BF16 (converted in-kernel).
-
-    Zero-copy from row-major PyTorch tensors:
-        - A passed directly as (M, K) K-major CuTe tensor
-        - B passed as B.t() (zero-copy view) giving (N, K) N-major CuTe tensor
-        - C is BF16 row-major — FP32->BF16 conversion done in the kernel epilogue
-
-    The kernel is JIT-compiled once per unique (A.shape, B.shape) via
-    ``cute.compile()`` and reused for subsequent calls with the same shape.
-    Output buffer C is pre-allocated and reused across calls.
+    Inputs are BF16 with FP32 accumulation; output is BF16.
     """
 
     def __init__(self):
         super().__init__()
-        self._gemm = Sm120Gemm(output_bf16=True)
+        import cutlass
+        self._gemm = Sm120GemmKernel(
+            acc_dtype=cutlass.Float32,
+            tile_shape_mnk=(128, 128, 64),
+        )
         self._compiled = None
         self._stream = None
         self._cached_shape = None
-        self._cached_ptrs = None  # (A.data_ptr, B.data_ptr)
+        self._cached_ptrs = None
         self._a_cute = None
         self._b_cute = None
         self._c_cute = None
         self._C = None
+        self._max_active = None
 
     def _ensure_compiled(self, A: torch.Tensor, B: torch.Tensor) -> None:
         """JIT-compile the kernel on first call or when the matrix shape changes."""
@@ -122,7 +146,7 @@ class Model(nn.Module):
         if self._compiled is not None and self._cached_shape == shape_key:
             return
 
-        import cuda.bindings.driver as cuda_driver
+        import cutlass
         import cutlass.cute as cute
         from cutlass.cute.runtime import from_dlpack
 
@@ -130,13 +154,25 @@ class Model(nn.Module):
         _, N = B.shape
         self._C = torch.empty(M, N, dtype=torch.bfloat16, device=A.device)
 
-        self._a_cute = from_dlpack(A, assumed_align=16)
-        self._b_cute = from_dlpack(B.t(), assumed_align=16)
-        self._c_cute = from_dlpack(self._C, assumed_align=16)
+        # NVIDIA's kernel expects 3D batched tensors — add L=1 via unsqueeze
+        # A: (M, K) row-major → (M, K, 1) K-major
+        # B: (K, N) → B.t().contiguous() → (N, K) K-major → (N, K, 1)
+        # C: (M, N) row-major → (M, N, 1) N-major
+        self._B_nk = B.t().contiguous()  # make K-major contiguous copy
+        self._a_cute = from_dlpack(A.unsqueeze(-1), assumed_align=16)
+        self._b_cute = from_dlpack(self._B_nk.unsqueeze(-1), assumed_align=16)
+        self._c_cute = from_dlpack(self._C.unsqueeze(-1), assumed_align=16)
 
-        self._stream = cuda_driver.CUstream(torch.cuda.current_stream().cuda_stream)
-        self._compiled = cute.compile(self._gemm, self._a_cute, self._b_cute,
-                                      self._c_cute, stream=self._stream)
+        if self._max_active is None:
+            hardware_info = cutlass.utils.HardwareInfo()
+            self._max_active = hardware_info.get_max_active_clusters(1)
+
+        import cutlass.torch as cutlass_torch
+        self._stream = cutlass_torch.default_stream()
+        self._compiled = cute.compile(
+            self._gemm, self._a_cute, self._b_cute, self._c_cute,
+            self._max_active, self._stream,
+        )
         self._cached_shape = shape_key
         self._cached_ptrs = (A.data_ptr(), B.data_ptr())
 
@@ -150,16 +186,17 @@ class Model(nn.Module):
         if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
             raise ValueError(f"expected bfloat16 inputs, got {A.dtype} and {B.dtype}")
         if not A.is_cuda or not B.is_cuda:
-            raise ValueError("Sm120Gemm reference kernel requires CUDA tensors")
+            raise ValueError("requires CUDA tensors")
 
         self._ensure_compiled(A, B)
 
-        # Reuse cached CuTe tensors if input pointers haven't changed
+        # Rebuild CuTe tensor views if pointers changed
         ptr_key = (A.data_ptr(), B.data_ptr())
         if ptr_key != self._cached_ptrs:
             from cutlass.cute.runtime import from_dlpack
-            self._a_cute = from_dlpack(A, assumed_align=16)
-            self._b_cute = from_dlpack(B.t(), assumed_align=16)
+            self._B_nk = B.t().contiguous()
+            self._a_cute = from_dlpack(A.unsqueeze(-1), assumed_align=16)
+            self._b_cute = from_dlpack(self._B_nk.unsqueeze(-1), assumed_align=16)
             self._cached_ptrs = ptr_key
 
         self._compiled(self._a_cute, self._b_cute, self._c_cute, self._stream)

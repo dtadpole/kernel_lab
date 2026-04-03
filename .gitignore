@@ -23,6 +23,9 @@ dist/
 .claude/logs/
 .claude/worktrees/
 
+# Git worktrees for isolated development
+.worktrees/
+
 # Editors / OS
 .DS_Store
 .vscode/

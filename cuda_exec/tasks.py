@@ -529,12 +529,12 @@ def run_compile_task(
                     ),
                 )
 
-        if not any(path.name == "reference.py" for path in copied_reference):
+        if not any(path.name == "cutedsl.py" for path in copied_reference):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "reference_files must include a file named reference.py as the entry point. "
-                    "Rename your reference module to reference.py and resubmit. "
+                    "reference_files must include a file named cutedsl.py as the entry point. "
+                    "Rename your CuTe DSL reference module to cutedsl.py and resubmit. "
                     "Additional helper files may use any name."
                 ),
             )
@@ -889,11 +889,11 @@ def run_profile_task(
                 "--set", "detailed",
             ]
         elif side == "reference":
-            reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "reference.py"
+            reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "cutedsl.py"
             if not reference_py.exists():
                 raise HTTPException(
                     status_code=400,
-                    detail=f"reference.py not found at {reference_py} — compile first to stage inputs",
+                    detail=f"cutedsl.py not found at {reference_py} — compile first to stage inputs",
                 )
             command = [
                 "bash",

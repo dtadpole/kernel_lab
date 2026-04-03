@@ -1,16 +1,15 @@
 /*
- * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 3).
- * Unified 128 threads (1 warp group) + double-buffered K pipeline.
+ * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 3b).
+ * Unified 128 threads (1 warp group) + double-buffered K + dedicated V.
  *
  * Architecture: 128 threads, all threads cooperate on both cp.async
  * loads and WGMMA compute. No warp specialization.
  *
- * Pipeline: K[i+1] loads overlap with QK[i] compute + softmax.
- * V reuses the freed K buffer after QK consumes it.
+ * Pipeline: V[i] and K[i+1] loads overlap with QK[i] + softmax compute.
+ * V has its own dedicated SMEM buffer (no longer reuses K).
  *
  * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, 128 threads.
- * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + P(8KB) = 56KB total.
- *       V reuses K[cur_stage] after QK is done.
+ * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) + P(8KB) = 72KB.
  *
  * Target: NVIDIA H100 (SM90a, GH100). Compile with -arch=sm_90a.
  *
@@ -192,11 +191,11 @@ void fence_view_async_shared() {
 }
 
 /* ======================================================================
- *  WGMMA Flash Attention kernel — Phase 3 (unified + pipeline)
+ *  WGMMA Flash Attention kernel — Phase 3b (double-buffered K + dedicated V)
  *
  *  128 threads = 1 warp group (warps 0-3).
  *  Double-buffered K: loads K[i+1] during QK[i] + softmax.
- *  V reuses K[cur_stage] buffer after QK is done.
+ *  Dedicated V buffer: V[i] loads overlap with QK[i] + softmax.
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
@@ -215,18 +214,19 @@ void flash_attention_wgmma(
     constexpr int TB_SIZE = 128;
 
     /* SMEM layout:
-     *   Q:    BLOCK_Q * DIM * 2B    = 16KB  (persistent)
-     *   K[0]: BLOCK_KV * DIM * 2B   = 16KB  (stage 0)
-     *   K[1]: BLOCK_KV * DIM * 2B   = 16KB  (stage 1)
-     *   P:    BLOCK_Q * BLOCK_KV * 2B = 8KB  (softmax output for PV)
-     *   Total: 56KB
-     *   V reuses K[cur_stage] after QK consumes it. */
+     *   Q:    BLOCK_Q * DIM * 2B      = 16KB  (persistent)
+     *   K[0]: BLOCK_KV * DIM * 2B     = 16KB  (stage 0)
+     *   K[1]: BLOCK_KV * DIM * 2B     = 16KB  (stage 1)
+     *   V:    BLOCK_KV * DIM * 2B     = 16KB  (dedicated, loads overlap QK+softmax)
+     *   P:    BLOCK_Q * BLOCK_KV * 2B = 8KB   (softmax output for PV)
+     *   Total: 72KB */
     extern __shared__ nv_bfloat16 smem[];
     const uint32_t smem_base = __cvta_generic_to_shared(smem);
     const uint32_t Q_smem   = smem_base;
     const uint32_t K_smem_0 = Q_smem + BLOCK_Q * DIM * sizeof(nv_bfloat16);
     const uint32_t K_smem_1 = K_smem_0 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
-    const uint32_t P_smem   = K_smem_1 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
+    const uint32_t V_smem   = K_smem_1 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
+    const uint32_t P_smem   = V_smem + BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;         /* 0-3 */
@@ -307,21 +307,35 @@ void flash_attention_wgmma(
         __syncthreads();
     }
 
+    /* Precompute V descriptor base (V_smem is fixed across iterations) */
+    const uint64_t desc_v_base = make_wgmma_desc(V_smem, QKV_stride_bytes);
+
     /* ---- Main KV loop ---- */
     for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
         const int cur_stage  = kv_id & 1;
         const uint32_t cur_K_smem  = cur_stage ? K_smem_1 : K_smem_0;
         const uint32_t next_K_smem = cur_stage ? K_smem_0 : K_smem_1;
 
-        /* == Step 1: Start loading K[kv_id+1] (non-blocking) == */
-        if (kv_id + 1 < max_kv_iter) {
+        /* == Step 1a: Start loading V[kv_id] into V_smem (non-blocking) == */
+        const nv_bfloat16 *V_cur = V_base + kv_id * BLOCK_KV * seq_stride;
+        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
+            V_smem, V_cur, seq_stride, tid);
+        asm volatile("cp.async.commit_group;");
+        /* V load is now group 0 (newest) — will become group 1 if K is committed */
+
+        /* == Step 1b: Start loading K[kv_id+1] (non-blocking) == */
+        const bool has_next_k = (kv_id + 1 < max_kv_iter);
+        if (has_next_k) {
             const nv_bfloat16 *K_next = K_base + (kv_id + 1) * BLOCK_KV * seq_stride;
             global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
                 next_K_smem, K_next, seq_stride, tid);
             asm volatile("cp.async.commit_group;");
+            /* Now: group 0 = K[kv_id+1], group 1 = V[kv_id] */
         }
+        /* If !has_next_k: group 0 = V[kv_id] only */
 
         /* == Step 2: QK GEMM using K_smem[cur_stage] == */
+        /* K[kv_id] is already in cur_K_smem (loaded in prelude or prev iter) */
         float S_acc[32];
         #pragma unroll
         for (int i = 0; i < 32; i++) S_acc[i] = 0.0f;
@@ -343,7 +357,7 @@ void flash_attention_wgmma(
         wgmma_fence();  /* fence before reading accumulators */
 
         /* == Step 3: Softmax on S_acc -> P_smem == */
-        /* (runs while cp.async K[kv_id+1] may still be in flight) */
+        /* V[kv_id] and K[kv_id+1] may still be loading in background */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
             float row_vals[16];
@@ -428,21 +442,18 @@ void flash_attention_wgmma(
         /* Ensure P writes visible to WGMMA */
         fence_view_async_shared();
 
-        /* == Step 4: Wait for K[kv_id+1] load to complete == */
-        asm volatile("cp.async.wait_all;");
+        /* == Step 4: Wait for V[kv_id] load to complete == */
+        /* If K[kv_id+1] was also issued, V is group 1, K is group 0.
+         * wait_group 1 ensures V is done while K may still be in flight.
+         * If no K was issued, V is group 0 → wait_group 0. */
+        if (has_next_k) {
+            asm volatile("cp.async.wait_group 1;\n" ::: "memory");
+        } else {
+            asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+        }
         __syncthreads();
 
-        /* == Step 5: Load V[kv_id] into K_smem[cur_stage] (reuse freed buffer) == */
-        const nv_bfloat16 *V_cur = V_base + kv_id * BLOCK_KV * seq_stride;
-        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
-            cur_K_smem, V_cur, seq_stride, tid);
-        asm volatile("cp.async.commit_group;");
-        asm volatile("cp.async.wait_all;");
-        __syncthreads();
-
-        /* == Step 6: PV GEMM using P_smem x K_smem[cur_stage] (now holds V) == */
-        const uint64_t desc_v_base = make_wgmma_desc(cur_K_smem, QKV_stride_bytes);
-
+        /* == Step 5: PV GEMM using P_smem x V_smem == */
         wgmma_fence();
 
         #pragma unroll
@@ -455,9 +466,9 @@ void flash_attention_wgmma(
         wgmma_commit_group();
         wgmma_wait_group<0>();
 
-        /* wgmma_wait_group<0> synchronizes all warps in the warp group.
-         * Next iteration's cp.async writes to next_K_smem (different
-         * buffer from cur_K_smem that PV just read). No sync needed. */
+        /* == Step 6: Ensure K[kv_id+1] is ready for next iteration == */
+        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+        __syncthreads();
 
     } /* end kv_id loop */
 
@@ -573,9 +584,10 @@ extern "C" int kernel_run(
 
         int num_blocks = B * H * cdiv(S, BLOCK_Q);
 
-        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + P(8KB) = 56KB */
+        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) + P(8KB) = 72KB */
         int smem_size = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16)      /* Q: 16KB */
                       + 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16) /* K[0]+K[1]: 32KB */
+                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16)     /* V: 16KB */
                       + BLOCK_Q * BLOCK_KV * (int)sizeof(nv_bfloat16);      /* P: 8KB */
 
         auto kernel = flash_attention_wgmma<BLOCK_Q, BLOCK_KV, DIM_CONST>;

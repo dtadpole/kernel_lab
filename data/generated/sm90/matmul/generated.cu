@@ -3,7 +3,7 @@
  *
  * Hand-written kernel with zero CUTLASS dependency.
  * Uses:
- *   - WGMMA (warpgroup MMA) m64n128k16 for compute — 2 warpgroups, SS mode
+ *   - WGMMA (warpgroup MMA) m64n256k16 for compute — 2 warpgroups, SS mode
  *   - TMA (cp.async.bulk.tensor) for global→shared loads
  *   - mbarrier for pipeline synchronization
  *   - Persistent tile scheduling with L2 super-tiling
@@ -154,48 +154,234 @@ uint64_t gmma_desc_advance(uint64_t desc, int offset_16B) {
 }
 
 /* =========================================================================
- * WGMMA m64n128k16 — SS mode, BF16→F32
+ * WGMMA tile: fence + 4× m64n256k16 + commit in a SINGLE asm block.
  *
- * 64 F32 accumulator registers per call.
- * scaleA=1, scaleB=1, tnspA=0 (K-major), tnspB=0 (K-major)
+ * This eliminates ptxas C7515 pipeline serialization by ensuring no
+ * non-WGMMA instructions touch accumulators between fence and commit.
+ *
+ * 128 F32 accumulators cover the full 64×256 output per warpgroup.
+ * K-stepping via start_address advancement (2 units per step).
+ * scaleA=1, scaleB=1, tnspA=0 (K-major), tnspB=0 (K-major).
  * ========================================================================= */
 __device__ __forceinline__
-void wgmma_m64n128k16(float* acc, uint64_t desc_a, uint64_t desc_b, int scale_D) {
+void wgmma_tile_k64(float* acc,
+                    uint64_t da0, uint64_t db0, uint64_t da1, uint64_t db1,
+                    uint64_t da2, uint64_t db2, uint64_t da3, uint64_t db3,
+                    int scale_D) {
     asm volatile(
-    "{\n"
-    ".reg .pred p;\n"
-    "setp.ne.b32 p, %66, 0;\n"
-    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
-    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
-    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
-    " %16, %17, %18, %19, %20, %21, %22, %23, "
-    " %24, %25, %26, %27, %28, %29, %30, %31, "
-    " %32, %33, %34, %35, %36, %37, %38, %39, "
-    " %40, %41, %42, %43, %44, %45, %46, %47, "
-    " %48, %49, %50, %51, %52, %53, %54, %55, "
-    " %56, %57, %58, %59, %60, %61, %62, %63},"
-    " %64,"
-    " %65,"
-    " p, 1, 1, 0, 0;\n"
-    "}\n"
-    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
-      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
-      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
-      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
-      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
-      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
-      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
-      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
-      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
-      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
-      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
-      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
-      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
-      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
-      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
-      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
-    : "l"(desc_a), "l"(desc_b), "r"(scale_D));
+    "wgmma.fence.sync.aligned;\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, %136, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63,"
+    " %64, %65, %66, %67, %68, %69, %70, %71,"
+    " %72, %73, %74, %75, %76, %77, %78, %79,"
+    " %80, %81, %82, %83, %84, %85, %86, %87,"
+    " %88, %89, %90, %91, %92, %93, %94, %95,"
+    " %96, %97, %98, %99, %100, %101, %102, %103,"
+    " %104, %105, %106, %107, %108, %109, %110, %111,"
+    " %112, %113, %114, %115, %116, %117, %118, %119,"
+    " %120, %121, %122, %123, %124, %125, %126, %127},"
+    " %128, %129, p, 1, 1, 0, 0;\n}\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, 1, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63,"
+    " %64, %65, %66, %67, %68, %69, %70, %71,"
+    " %72, %73, %74, %75, %76, %77, %78, %79,"
+    " %80, %81, %82, %83, %84, %85, %86, %87,"
+    " %88, %89, %90, %91, %92, %93, %94, %95,"
+    " %96, %97, %98, %99, %100, %101, %102, %103,"
+    " %104, %105, %106, %107, %108, %109, %110, %111,"
+    " %112, %113, %114, %115, %116, %117, %118, %119,"
+    " %120, %121, %122, %123, %124, %125, %126, %127},"
+    " %130, %131, p, 1, 1, 0, 0;\n}\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, 1, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63,"
+    " %64, %65, %66, %67, %68, %69, %70, %71,"
+    " %72, %73, %74, %75, %76, %77, %78, %79,"
+    " %80, %81, %82, %83, %84, %85, %86, %87,"
+    " %88, %89, %90, %91, %92, %93, %94, %95,"
+    " %96, %97, %98, %99, %100, %101, %102, %103,"
+    " %104, %105, %106, %107, %108, %109, %110, %111,"
+    " %112, %113, %114, %115, %116, %117, %118, %119,"
+    " %120, %121, %122, %123, %124, %125, %126, %127},"
+    " %132, %133, p, 1, 1, 0, 0;\n}\n"
+    "{\n .reg .pred p;\n setp.ne.b32 p, 1, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 "
+    "{%0, %1, %2, %3, %4, %5, %6, %7,"
+    " %8, %9, %10, %11, %12, %13, %14, %15,"
+    " %16, %17, %18, %19, %20, %21, %22, %23,"
+    " %24, %25, %26, %27, %28, %29, %30, %31,"
+    " %32, %33, %34, %35, %36, %37, %38, %39,"
+    " %40, %41, %42, %43, %44, %45, %46, %47,"
+    " %48, %49, %50, %51, %52, %53, %54, %55,"
+    " %56, %57, %58, %59, %60, %61, %62, %63,"
+    " %64, %65, %66, %67, %68, %69, %70, %71,"
+    " %72, %73, %74, %75, %76, %77, %78, %79,"
+    " %80, %81, %82, %83, %84, %85, %86, %87,"
+    " %88, %89, %90, %91, %92, %93, %94, %95,"
+    " %96, %97, %98, %99, %100, %101, %102, %103,"
+    " %104, %105, %106, %107, %108, %109, %110, %111,"
+    " %112, %113, %114, %115, %116, %117, %118, %119,"
+    " %120, %121, %122, %123, %124, %125, %126, %127},"
+    " %134, %135, p, 1, 1, 0, 0;\n}\n"
+    "wgmma.commit_group.sync.aligned;\n"
+    :
+      "+f"(acc[0]),
+      "+f"(acc[1]),
+      "+f"(acc[2]),
+      "+f"(acc[3]),
+      "+f"(acc[4]),
+      "+f"(acc[5]),
+      "+f"(acc[6]),
+      "+f"(acc[7]),
+      "+f"(acc[8]),
+      "+f"(acc[9]),
+      "+f"(acc[10]),
+      "+f"(acc[11]),
+      "+f"(acc[12]),
+      "+f"(acc[13]),
+      "+f"(acc[14]),
+      "+f"(acc[15]),
+      "+f"(acc[16]),
+      "+f"(acc[17]),
+      "+f"(acc[18]),
+      "+f"(acc[19]),
+      "+f"(acc[20]),
+      "+f"(acc[21]),
+      "+f"(acc[22]),
+      "+f"(acc[23]),
+      "+f"(acc[24]),
+      "+f"(acc[25]),
+      "+f"(acc[26]),
+      "+f"(acc[27]),
+      "+f"(acc[28]),
+      "+f"(acc[29]),
+      "+f"(acc[30]),
+      "+f"(acc[31]),
+      "+f"(acc[32]),
+      "+f"(acc[33]),
+      "+f"(acc[34]),
+      "+f"(acc[35]),
+      "+f"(acc[36]),
+      "+f"(acc[37]),
+      "+f"(acc[38]),
+      "+f"(acc[39]),
+      "+f"(acc[40]),
+      "+f"(acc[41]),
+      "+f"(acc[42]),
+      "+f"(acc[43]),
+      "+f"(acc[44]),
+      "+f"(acc[45]),
+      "+f"(acc[46]),
+      "+f"(acc[47]),
+      "+f"(acc[48]),
+      "+f"(acc[49]),
+      "+f"(acc[50]),
+      "+f"(acc[51]),
+      "+f"(acc[52]),
+      "+f"(acc[53]),
+      "+f"(acc[54]),
+      "+f"(acc[55]),
+      "+f"(acc[56]),
+      "+f"(acc[57]),
+      "+f"(acc[58]),
+      "+f"(acc[59]),
+      "+f"(acc[60]),
+      "+f"(acc[61]),
+      "+f"(acc[62]),
+      "+f"(acc[63]),
+      "+f"(acc[64]),
+      "+f"(acc[65]),
+      "+f"(acc[66]),
+      "+f"(acc[67]),
+      "+f"(acc[68]),
+      "+f"(acc[69]),
+      "+f"(acc[70]),
+      "+f"(acc[71]),
+      "+f"(acc[72]),
+      "+f"(acc[73]),
+      "+f"(acc[74]),
+      "+f"(acc[75]),
+      "+f"(acc[76]),
+      "+f"(acc[77]),
+      "+f"(acc[78]),
+      "+f"(acc[79]),
+      "+f"(acc[80]),
+      "+f"(acc[81]),
+      "+f"(acc[82]),
+      "+f"(acc[83]),
+      "+f"(acc[84]),
+      "+f"(acc[85]),
+      "+f"(acc[86]),
+      "+f"(acc[87]),
+      "+f"(acc[88]),
+      "+f"(acc[89]),
+      "+f"(acc[90]),
+      "+f"(acc[91]),
+      "+f"(acc[92]),
+      "+f"(acc[93]),
+      "+f"(acc[94]),
+      "+f"(acc[95]),
+      "+f"(acc[96]),
+      "+f"(acc[97]),
+      "+f"(acc[98]),
+      "+f"(acc[99]),
+      "+f"(acc[100]),
+      "+f"(acc[101]),
+      "+f"(acc[102]),
+      "+f"(acc[103]),
+      "+f"(acc[104]),
+      "+f"(acc[105]),
+      "+f"(acc[106]),
+      "+f"(acc[107]),
+      "+f"(acc[108]),
+      "+f"(acc[109]),
+      "+f"(acc[110]),
+      "+f"(acc[111]),
+      "+f"(acc[112]),
+      "+f"(acc[113]),
+      "+f"(acc[114]),
+      "+f"(acc[115]),
+      "+f"(acc[116]),
+      "+f"(acc[117]),
+      "+f"(acc[118]),
+      "+f"(acc[119]),
+      "+f"(acc[120]),
+      "+f"(acc[121]),
+      "+f"(acc[122]),
+      "+f"(acc[123]),
+      "+f"(acc[124]),
+      "+f"(acc[125]),
+      "+f"(acc[126]),
+      "+f"(acc[127])
+    :
+      "l"(da0), "l"(db0), "l"(da1), "l"(db1),
+      "l"(da2), "l"(db2), "l"(da3), "l"(db3),
+      "r"(scale_D));
 }
+
 
 /* =========================================================================
  * Main WGMMA kernel: 128×256×64 tile, 256 threads, 4-stage pipeline
@@ -223,10 +409,9 @@ __global__ void wgmma_matmul(
     int nTilesM = totalTiles / nTilesN;
     int numKTiles = K / TILE_K;
 
-    /* Accumulator registers: 64 for N-half 0, 64 for N-half 1.
+    /* 128 F32 accumulators for full 64×256 output per warpgroup (m64n256k16).
      * NOT zero-initialized — first WGMMA call uses scale_D=0 (overwrite). */
-    float acc_lo[64];
-    float acc_hi[64];
+    float acc[128];
 
     /* Initialize mbarriers once */
     if (tid == 0)
@@ -305,47 +490,28 @@ __global__ void wgmma_matmul(
 
                 char* stage = smem + sc * SMEM_STAGE;
                 char* smem_A  = stage;
-                char* smem_B0 = stage + A_STAGE_BYTES;
-                char* smem_B1 = stage + A_STAGE_BYTES + B_SUB_BYTES;
+                char* smem_B  = stage + A_STAGE_BYTES;
+                /* B0 and B1 sub-tiles are contiguous → single B descriptor
+                 * covers all 256 N-rows (B0=0..127, B1=128..255) */
 
-                /* Pre-compute ALL descriptors before fence to keep
-                 * the fence→commit region free of non-WGMMA ops */
-                uint64_t da_base  = make_gmma_desc(smem_A + wg_a_offset);
-                uint64_t db0_base = make_gmma_desc(smem_B0);
-                uint64_t db1_base = make_gmma_desc(smem_B1);
+                /* Pre-compute descriptors for 4 K-steps */
+                uint64_t da_base = make_gmma_desc(smem_A + wg_a_offset);
+                uint64_t db_base = make_gmma_desc(smem_B);
 
-                uint64_t da0  = da_base;
-                uint64_t db00 = db0_base;
-                uint64_t db10 = db1_base;
-                uint64_t da1  = gmma_desc_advance(da_base,  2);
-                uint64_t db01 = gmma_desc_advance(db0_base, 2);
-                uint64_t db11 = gmma_desc_advance(db1_base, 2);
-                uint64_t da2  = gmma_desc_advance(da_base,  4);
-                uint64_t db02 = gmma_desc_advance(db0_base, 4);
-                uint64_t db12 = gmma_desc_advance(db1_base, 4);
-                uint64_t da3  = gmma_desc_advance(da_base,  6);
-                uint64_t db03 = gmma_desc_advance(db0_base, 6);
-                uint64_t db13 = gmma_desc_advance(db1_base, 6);
+                uint64_t da0 = da_base;
+                uint64_t db0 = db_base;
+                uint64_t da1 = gmma_desc_advance(da_base, 2);
+                uint64_t db1 = gmma_desc_advance(db_base, 2);
+                uint64_t da2 = gmma_desc_advance(da_base, 4);
+                uint64_t db2 = gmma_desc_advance(db_base, 4);
+                uint64_t da3 = gmma_desc_advance(da_base, 6);
+                uint64_t db3 = gmma_desc_advance(db_base, 6);
 
                 int scale_D = (kb == 0) ? 0 : 1;
 
-                /* WGMMA fence — only WGMMA instructions after this */
-                wgmma_fence();
-
-                /* K-step 0 */
-                wgmma_m64n128k16(acc_lo, da0, db00, scale_D);
-                wgmma_m64n128k16(acc_hi, da0, db10, scale_D);
-                /* K-step 1 (always accumulate) */
-                wgmma_m64n128k16(acc_lo, da1, db01, 1);
-                wgmma_m64n128k16(acc_hi, da1, db11, 1);
-                /* K-step 2 */
-                wgmma_m64n128k16(acc_lo, da2, db02, 1);
-                wgmma_m64n128k16(acc_hi, da2, db12, 1);
-                /* K-step 3 */
-                wgmma_m64n128k16(acc_lo, da3, db03, 1);
-                wgmma_m64n128k16(acc_hi, da3, db13, 1);
-
-                wgmma_commit_group();
+                /* Single asm block: fence + 4× m64n256k16 + commit */
+                wgmma_tile_k64(acc, da0, db0, da1, db1,
+                               da2, db2, da3, db3, scale_D);
 
                 /* Wait for PREVIOUS group — allows current to overlap with TMA */
                 if (kb > 0)
@@ -371,43 +537,33 @@ __global__ void wgmma_matmul(
 
         /* ---- Epilogue: write accumulators to global memory ---- */
         /*
-         * WGMMA m64n128k16 F32 output fragment layout (empirically verified):
+         * WGMMA m64n256k16 F32 output fragment layout:
          *
-         *   For register d[i] (i=0..63):
+         *   For register d[i] (i=0..127):
          *     half  = (i >> 1) & 1       (0 or 1 — top/bottom 8-row group)
-         *     pair4 = i >> 2             (0..15 — which 8-column chunk)
+         *     pair4 = i >> 2             (0..31 — which 8-column chunk)
          *     sub2  = i & 1              (0 or 1 — even/odd column within pair)
          *
          *     row = warp_in_wg * 16 + half * 8 + groupID
          *     col = pair4 * 8 + sub2 + thread_in_group * 2
          *
-         *   Registers d[4*p + 2*h] and d[4*p + 2*h + 1] are adjacent columns
-         *   at the same row, so they can be packed into bfloat162 stores.
+         *   Registers d[4*p + 2*h] and d[4*p + 2*h + 1] are adjacent columns.
          */
 
-        /* Vectorized bfloat162 stores — write pairs of adjacent columns */
+        /* Vectorized bfloat162 stores */
         #pragma unroll
-        for (int j = 0; j < 32; j++) {
-            int p4 = j / 2;    /* pair4 index (0..15) — column group */
+        for (int j = 0; j < 64; j++) {
+            int p4 = j / 2;    /* pair4 index (0..31) — column group */
             int h  = j % 2;    /* half (0 or 1) — row group */
 
             int row = mBase + wg_id * 64 + warp_in_wg * 16 + h * 8 + groupID;
-            int col_base = p4 * 8 + thread_in_group * 2;
+            int col = nBase + p4 * 8 + thread_in_group * 2;
 
             int idx = 4 * p4 + 2 * h;  /* base register index */
 
-            if (row < M) {
-                int col_lo = nBase + col_base;
-                int col_hi = nBase + N_SUB + col_base;
-
-                if (col_lo + 1 < N) {
-                    *reinterpret_cast<__nv_bfloat162*>(&C[row * N + col_lo]) =
-                        __floats2bfloat162_rn(acc_lo[idx], acc_lo[idx + 1]);
-                }
-                if (col_hi + 1 < N) {
-                    *reinterpret_cast<__nv_bfloat162*>(&C[row * N + col_hi]) =
-                        __floats2bfloat162_rn(acc_hi[idx], acc_hi[idx + 1]);
-                }
+            if (row < M && col + 1 < N) {
+                *reinterpret_cast<__nv_bfloat162*>(&C[row * N + col]) =
+                    __floats2bfloat162_rn(acc[idx], acc[idx + 1]);
             }
         }
     }

@@ -211,8 +211,12 @@ class Sm120GemmKernel:
         self.is_b_mcast = False
 
         self.occupancy = 1
-        # TODO: remove this hard code for user input ?
-        self.atom_layout = (2, 2, 1)
+        # atom_layout (M, N, K): distributes warps across M×N dimensions.
+        # (4,2,1) = 8 MMA warps: 4 along M, 2 along N.
+        # Doubles occupancy (10.4% → 18.75%) while halving per-thread
+        # accumulators (128 → 64 fp32 regs), enabling better latency hiding
+        # without changing SMEM usage.
+        self.atom_layout = (4, 2, 1)
         self.num_mma_warps = (
             self.atom_layout[0] * self.atom_layout[1] * self.atom_layout[2]
         )
@@ -238,7 +242,10 @@ class Sm120GemmKernel:
             num_threads=self.num_mma_warps * self.num_threads_per_warp,
         )
         self.load_register_requirement = 40
-        self.mma_register_requirement = 232
+        # With atom_layout (4,2,1): 64 fp32 accumulators/thread (was 128).
+        # Estimated total: ~148 registers (64 acc + ~84 fragments/control).
+        # Set hint to 168 for headroom (was 232).
+        self.mma_register_requirement = 168
 
     def _setup_attributes(self):
         # TODO: remove this hard code for user input ?

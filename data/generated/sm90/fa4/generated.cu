@@ -1,18 +1,20 @@
 /*
- * Flash Attention forward pass — BF16, SM90 Hopper tensor-core MMA kernel.
- * Unified architecture: 128 threads (4 warps), cooperative K/V loading,
- * Q cached in registers, single-buffered K/V with SMEM reuse.
+ * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 4: RS mode PV).
+ * Unified 128 threads (1 warp group) + double-buffered K + dedicated V.
  *
- * Target: NVIDIA H100 (SM90, GH100)
+ * Architecture: 128 threads, all threads cooperate on both cp.async
+ * loads and WGMMA compute. No warp specialization.
  *
- * Architecture vs baseline (warp-specialized, 160 threads):
- *   - Eliminates DMA warp and named barriers
- *   - 128 threads → more registers/thread (256 budget vs 204)
- *   - Q fragments cached in registers (saves 8 LDSM/iter)
- *   - K/V share same SMEM slot (loaded one at a time)
- *   - Simpler code → better compiler optimization
+ * Pipeline: V[i] and K[i+1] loads overlap with QK[i] + softmax compute.
+ * V has its own dedicated SMEM buffer (no longer reuses K).
  *
- * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, 4 warps (128 threads).
+ * PV GEMM uses WGMMA RS mode: P stays in registers after softmax,
+ * eliminating the P SMEM roundtrip (8KB store + fence + sync + read).
+ *
+ * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, 128 threads.
+ * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB.
+ *
+ * Target: NVIDIA H100 (SM90a, GH100). Compile with -arch=sm_90a.
  *
  * kernel_run contract:
  *   extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
@@ -26,8 +28,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cfloat>
-
-static constexpr int WARP_SIZE = 32;
 
 __device__ __host__ constexpr
 int cdiv(int a, int b) { return (a + b - 1) / b; }
@@ -48,91 +48,242 @@ float fast_rcp(float x) {
     return r;
 }
 
-/* --- Swizzle --------------------------------------------------------- */
+/* --- Swizzle<3,4,3> (128B swizzle) for B128 WGMMA layout ------------- */
 
-template <int STRIDE>
-__device__
-uint32_t swizzle(uint32_t index) {
-    if constexpr (STRIDE == 16)
-        return index;
-    uint32_t row_idx = (index / STRIDE) % 8;
-    uint32_t bits_to_xor = row_idx / max(64 / STRIDE, 1);
-    return index ^ (bits_to_xor << 4);
+__device__ __forceinline__
+uint32_t swizzle_B128(uint32_t byte_offset) {
+    /* Swizzle<3,4,3>: XOR bits [4:6] with bits [7:9] of byte address.
+     * Equivalent to: idx128[2:0] ^= idx128[5:3] where idx128 = byte/16. */
+    uint32_t idx = byte_offset >> 4;
+    idx ^= (idx >> 3) & 7;
+    return (idx << 4) | (byte_offset & 0xF);
 }
 
-/* --- cp.async global -> shared (swizzled) ----------------------------- */
+/* --- cp.async global -> shared (B128 swizzle layout) ----------------- */
+/*
+ * Store a [HEIGHT, WIDTH] bf16 tile from GMEM to SMEM in B128 swizzle
+ * layout.  The layout uses 128-byte-wide atoms (64 bf16 per row within
+ * each atom).  For WIDTH=128, two atoms are placed per 8-row group:
+ *
+ *   Group g: atom 0 (cols 0-63)  at SMEM offset g * 2048
+ *            atom 1 (cols 64-127) at SMEM offset g * 2048 + 1024
+ *
+ * Within each atom: 8 rows × 128 bytes/row = 1024 bytes, swizzled.
+ * Total SMEM per tile: HEIGHT/8 * 2 * 1024 = HEIGHT * 256 = HEIGHT*WIDTH*2.
+ */
 
 template <int HEIGHT, int WIDTH, int TB_SIZE>
 __device__ inline
-void global_to_shared_swizzle(uint32_t dst, const nv_bfloat16 *src,
-                              int src_stride, int tid) {
-    constexpr int num_elems = 16 / sizeof(nv_bfloat16);
+void global_to_shared_B128(uint32_t dst, const nv_bfloat16 *src,
+                           int src_stride, int tid) {
+    constexpr int ATOM_COLS  = 64;                          /* 64 bf16 = 128B */
+    constexpr int ATOM_BYTES = 8 * ATOM_COLS * (int)sizeof(nv_bfloat16); /* 1024 */
+    constexpr int GROUP_BYTES = (WIDTH / ATOM_COLS) * ATOM_BYTES;        /* 2048 for W=128 */
+
+    constexpr int num_elems = 16 / sizeof(nv_bfloat16);     /* 8 bf16 per 16B */
     constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
 
+    #pragma unroll
     for (int iter = 0; iter < num_iters; iter++) {
-        const int idx = (iter * TB_SIZE + tid) * num_elems;
-        const int row = idx / WIDTH;
-        const int col = idx % WIDTH;
+        const int idx  = (iter * TB_SIZE + tid) * num_elems;
+        const int row  = idx / WIDTH;
+        const int col  = idx % WIDTH;
 
-        const uint32_t dst_addr =
-            swizzle<WIDTH * sizeof(nv_bfloat16)>(
-                dst + (row * WIDTH + col) * sizeof(nv_bfloat16));
+        /* Atom-local coordinates */
+        const int atom        = col / ATOM_COLS;
+        const int col_in_atom = col % ATOM_COLS;
+        const int group       = row / 8;
+        const int row_in_grp  = row % 8;
+
+        /* Byte offset within atom, then swizzle */
+        const uint32_t atom_byte = row_in_grp * ATOM_COLS * (int)sizeof(nv_bfloat16)
+                                 + col_in_atom * (int)sizeof(nv_bfloat16);
+        const uint32_t dst_addr = dst + group * GROUP_BYTES
+                                      + atom  * ATOM_BYTES
+                                      + swizzle_B128(atom_byte);
+
         const nv_bfloat16 *src_addr = src + (row * src_stride + col);
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
                      :: "r"(dst_addr), "l"(src_addr));
     }
 }
 
-/* --- ldmatrix helpers ------------------------------------------------- */
+/* --- WGMMA synchronization ------------------------------------------ */
 
-__device__ inline
-void ldmatrix_x2(uint32_t regs[2], uint32_t addr) {
-    asm volatile(
-        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-        : "=r"(regs[0]), "=r"(regs[1])
-        : "r"(addr));
+__device__ __forceinline__
+void wgmma_fence() {
+    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
 }
 
-__device__ inline
-void ldmatrix_x4(uint32_t regs[4], uint32_t addr) {
-    asm volatile(
-        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-        : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
-        : "r"(addr));
+__device__ __forceinline__
+void wgmma_commit_group() {
+    asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
 }
 
-__device__ inline
-void ldmatrix_x2_trans(uint32_t regs[2], uint32_t addr) {
-    asm volatile(
-        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];"
-        : "=r"(regs[0]), "=r"(regs[1])
-        : "r"(addr));
+template<int N>
+__device__ __forceinline__
+void wgmma_wait_group() {
+    asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(N) : "memory");
 }
 
-/* --- mma.m16n8k16 ---------------------------------------------------- */
+/* --- WGMMA descriptor construction and advancement ------------------- */
 
-__device__ inline
-void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float D[4]) {
+__device__ __forceinline__
+uint64_t make_wgmma_desc(uint32_t smem_addr, int stride_bytes) {
+    uint64_t desc = 0;
+    desc |= (uint64_t)((smem_addr >> 4) & 0x3FFF);            // [0:14)  start_address
+    desc |= (uint64_t)(1) << 16;                               // [16:30) leading_byte_off = 1
+    desc |= (uint64_t)(((stride_bytes >> 4) & 0x3FFF)) << 32;  // [32:46) stride_byte_off
+    desc |= (uint64_t)(1) << 62;                                // [62:64) SWIZZLE_128B
+    return desc;
+}
+
+__device__ __forceinline__
+uint64_t gmma_desc_advance(uint64_t desc, int offset_16B) {
+    uint32_t lo = (uint32_t)desc + (uint32_t)offset_16B;
+    uint32_t hi = (uint32_t)(desc >> 32);
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+/* --- WGMMA m64n64k16 (QK GEMM) -------------------------------------- */
+
+__device__ __forceinline__
+void wgmma_m64n64k16_f32_bf16(float acc[32], uint64_t desc_a, uint64_t desc_b,
+                               int scale_D) {
     asm volatile(
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-        "{%0, %1, %2, %3}, "
-        "{%4, %5, %6, %7}, "
-        "{%8, %9}, "
-        "{%10, %11, %12, %13};"
-        : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
-          "r"(B[0]), "r"(B[1]),
-          "f"(D[0]), "f"(D[1]), "f"(D[2]), "f"(D[3]));
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %34, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31},"
+    " %32, %33, p, 1, 1, 0, 0;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31])
+    : "l"(desc_a), "l"(desc_b), "r"(scale_D));
+}
+
+/* --- WGMMA m64n128k16 (PV GEMM) ------------------------------------- */
+
+__device__ __forceinline__
+void wgmma_m64n128k16_f32_bf16(float acc[64], uint64_t desc_a, uint64_t desc_b,
+                                int scale_D) {
+    asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %66, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, "
+    " %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, "
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " %64, %65, p, 1, 1, 0, 1;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
+      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
+      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
+      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
+      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
+      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
+      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
+      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
+      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
+    : "l"(desc_a), "l"(desc_b), "r"(scale_D));
+}
+
+/* --- Pack two F32 values into BF16x2 -------------------------------- */
+
+__device__ __forceinline__
+uint32_t pack_bf16(float a, float b) {
+    uint32_t result;
+    asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(result) : "f"(a), "f"(b));
+    return result;
+}
+
+/* --- WGMMA m64n128k16 RS mode (A from registers, B from SMEM) ------- */
+
+__device__ __forceinline__
+void wgmma_m64n128k16_f32_bf16_RS(float acc[64],
+                                   uint32_t a0, uint32_t a1,
+                                   uint32_t a2, uint32_t a3,
+                                   uint64_t desc_b,
+                                   int scale_D) {
+    asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %69, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, "
+    " %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, "
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " {%64, %65, %66, %67},"
+    " %68, p, 1, 1, 1;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
+      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
+      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
+      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
+      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
+      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
+      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
+      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
+      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
+    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+      "l"(desc_b), "r"(scale_D));
+}
+
+/* --- fence_view_async_shared ----------------------------------------- */
+
+__device__ __forceinline__
+void fence_view_async_shared() {
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
 }
 
 /* ======================================================================
- *  Unified kernel — all 4 warps do both loading and compute
+ *  WGMMA Flash Attention kernel — Phase 4 (RS mode PV GEMM)
+ *
+ *  128 threads = 1 warp group (warps 0-3).
+ *  Double-buffered K: loads K[i+1] during QK[i] + softmax.
+ *  Dedicated V buffer: V[i] loads overlap with QK[i] + softmax.
+ *  PV GEMM: RS mode — P stays in registers, no SMEM roundtrip.
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
-__launch_bounds__(128, 2)
+__launch_bounds__(128, 1)   /* 128 threads, 1 block/SM */
 __global__
-void flash_attention_kernel_unified(
+void flash_attention_wgmma(
     const nv_bfloat16 *Q,
     const nv_bfloat16 *K,
     const nv_bfloat16 *V,
@@ -141,17 +292,28 @@ void flash_attention_kernel_unified(
     int len_q, int len_kv,
     int is_causal)
 {
-    constexpr int NUM_WARPS    = 4;
-    constexpr int TB_SIZE      = NUM_WARPS * WARP_SIZE;  /* 128 */
-    constexpr int WARP_Q       = BLOCK_Q / NUM_WARPS;    /* 16 */
-    constexpr int MMA_M        = 16;
-    constexpr int MMA_N        = 8;
-    constexpr int MMA_K        = 16;
-    const int bid = blockIdx.x;
-    const int tid = threadIdx.x;
-    const int warp_id = tid / WARP_SIZE;
-    const int lane_id = tid % WARP_SIZE;
+    /* Constants */
+    constexpr int TB_SIZE = 128;
 
+    /* SMEM layout (P eliminated — RS mode keeps P in registers):
+     *   Q:    BLOCK_Q * DIM * 2B  = 16KB  (persistent)
+     *   K[0]: BLOCK_KV * DIM * 2B = 16KB  (stage 0)
+     *   K[1]: BLOCK_KV * DIM * 2B = 16KB  (stage 1)
+     *   V:    BLOCK_KV * DIM * 2B = 16KB  (dedicated, loads overlap QK+softmax)
+     *   Total: 64KB */
+    extern __shared__ nv_bfloat16 smem[];
+    const uint32_t smem_base = __cvta_generic_to_shared(smem);
+    const uint32_t Q_smem   = smem_base;
+    const uint32_t K_smem_0 = Q_smem + BLOCK_Q * DIM * sizeof(nv_bfloat16);
+    const uint32_t K_smem_1 = K_smem_0 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
+    const uint32_t V_smem   = K_smem_1 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;         /* 0-3 */
+    const int lane_id = tid % 32;
+
+    /* Block -> (batch, head, q_block) mapping */
+    const int bid = blockIdx.x;
     const int num_q_blocks = cdiv(len_q, BLOCK_Q);
     const int bs_id       = bid / num_q_blocks;
     const int q_block_id  = bid % num_q_blocks;
@@ -166,272 +328,258 @@ void flash_attention_kernel_unified(
     nv_bfloat16       *O_base = O + batch_id * S * seq_stride + head_id * DIM
                                   + q_block_id * BLOCK_Q * seq_stride;
 
-    /* SMEM layout: Q (persistent) + KV (shared slot for K then V)
-     * Q:  BLOCK_Q * DIM * 2 = 16KB
-     * KV: BLOCK_KV * DIM * 2 = 16KB
-     * Total: 32KB */
-    extern __shared__ nv_bfloat16 smem[];
-    const uint32_t smem_base = __cvta_generic_to_shared(smem);
-    const uint32_t Q_smem  = smem_base;
-    const uint32_t KV_smem = smem_base + BLOCK_Q * DIM * sizeof(nv_bfloat16);
-
-    /* ---- Load Q to shared memory (all threads cooperate) ---- */
-    global_to_shared_swizzle<BLOCK_Q, DIM, TB_SIZE>(
-        Q_smem, Q_base, seq_stride, tid);
-    asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
-    __syncthreads();
-
-    /* ---- Cache Q fragments in registers (8 slices of 16-column width) ---- */
-    const int q_row_off = warp_id * WARP_Q + (lane_id % 16);
-    const int q_col_off = lane_id / 16 * 8;
-    uint32_t Q_smem_base = swizzle<DIM * sizeof(nv_bfloat16)>(
-        Q_smem + (q_row_off * DIM + q_col_off) * sizeof(nv_bfloat16));
-
-    uint32_t Q_regs[DIM / MMA_K][4];
-    #pragma unroll
-    for (int md = 0; md < DIM / MMA_K; md++) {
-        uint32_t qaddr = Q_smem_base;
-        qaddr ^= md * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(Q_regs[md], qaddr);
-    }
-
-    /* ---- K/V smem thread base addresses ---- */
-    uint32_t K_smem_thread;
-    {
-        const int row_off = lane_id % 8;
-        const int col_off = lane_id / 8 * 8;
-        K_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(
-            KV_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
-    }
-    uint32_t V_smem_thread;
-    {
-        const int row_off = lane_id % 16;
-        const int col_off = lane_id / 16 * 8;
-        V_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(
-            KV_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
-    }
-
-    /* ---- Accumulators ---- */
-    const float softmax_scale_log2 =
-        rsqrtf(static_cast<float>(DIM)) * 1.4426950408889634f;
-
-    float O_rmem[WARP_Q / MMA_M][DIM / MMA_N][4] = {};
-    float rowmax[WARP_Q / MMA_M][2];
-    float rowsumexp[WARP_Q / MMA_M][2] = {};
-    for (int mq = 0; mq < WARP_Q / MMA_M; mq++) {
-        rowmax[mq][0] = -FLT_MAX;
-        rowmax[mq][1] = -FLT_MAX;
-    }
-
-    /* ---- KV iteration loop ---- */
+    /* KV iteration bounds */
     const int num_kv_iter = cdiv(len_kv, BLOCK_KV);
     const int max_kv_iter = is_causal
         ? min(num_kv_iter, cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
         : num_kv_iter;
 
-    const nv_bfloat16 *K_ptr = K_base;
-    const nv_bfloat16 *V_ptr = V_base;
+    /* ---- Load Q to shared memory (all 128 threads) ---- */
+    global_to_shared_B128<BLOCK_Q, DIM, TB_SIZE>(
+        Q_smem, Q_base, seq_stride, tid);
+    asm volatile("cp.async.commit_group;");
+    asm volatile("cp.async.wait_all;");
+    __syncthreads();
 
+    /* WGMMA descriptor stride constant */
+    constexpr int QKV_stride_bytes = 8 * DIM * sizeof(nv_bfloat16);      /* 2048 */
+
+    const float softmax_scale_log2 =
+        rsqrtf(static_cast<float>(DIM)) * 1.4426950408889634f;
+
+    /* Initialize accumulators */
+    float O_acc[64];
+    #pragma unroll
+    for (int i = 0; i < 64; i++) O_acc[i] = 0.0f;
+
+    float rowmax[2] = {-FLT_MAX, -FLT_MAX};
+    float rowsumexp[2] = {0.0f, 0.0f};
+
+    /* Precompute base descriptor for Q (invariant across iterations) */
+    const uint64_t desc_q_base = make_wgmma_desc(Q_smem, QKV_stride_bytes);
+
+    /* ---- Prelude: load K[0] into stage 0 ---- */
+    if (max_kv_iter > 0) {
+        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
+            K_smem_0, K_base, seq_stride, tid);
+        asm volatile("cp.async.commit_group;");
+        asm volatile("cp.async.wait_all;");
+        __syncthreads();
+    }
+
+    /* Precompute V descriptor base (V_smem is fixed across iterations) */
+    const uint64_t desc_v_base = make_wgmma_desc(V_smem, QKV_stride_bytes);
+
+    /* ---- Main KV loop ---- */
     for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
+        const int cur_stage  = kv_id & 1;
+        const uint32_t cur_K_smem  = cur_stage ? K_smem_1 : K_smem_0;
+        const uint32_t next_K_smem = cur_stage ? K_smem_0 : K_smem_1;
 
-        /* ==== Load K tile to shared memory (all 128 threads) ==== */
-        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
-            KV_smem, K_ptr, seq_stride, tid);
-        K_ptr += BLOCK_KV * seq_stride;
+        /* == Step 1a: Start loading V[kv_id] into V_smem (non-blocking) == */
+        const nv_bfloat16 *V_cur = V_base + kv_id * BLOCK_KV * seq_stride;
+        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
+            V_smem, V_cur, seq_stride, tid);
         asm volatile("cp.async.commit_group;");
-        asm volatile("cp.async.wait_all;");
-        __syncthreads();
+        /* V load is now group 0 (newest) — will become group 1 if K is committed */
 
-        /* ==== QK matmul: Q_regs × K_smem → S_local ==== */
-        uint32_t P_rmem[WARP_Q / MMA_M][BLOCK_KV / MMA_K][4];
+        /* == Step 1b: Start loading K[kv_id+1] (non-blocking) == */
+        const bool has_next_k = (kv_id + 1 < max_kv_iter);
+        if (has_next_k) {
+            const nv_bfloat16 *K_next = K_base + (kv_id + 1) * BLOCK_KV * seq_stride;
+            global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
+                next_K_smem, K_next, seq_stride, tid);
+            asm volatile("cp.async.commit_group;");
+            /* Now: group 0 = K[kv_id+1], group 1 = V[kv_id] */
+        }
+        /* If !has_next_k: group 0 = V[kv_id] only */
 
-        for (int mq = 0; mq < WARP_Q / MMA_M; mq++) {
-            float S_local[BLOCK_KV / MMA_N][4] = {};
+        /* == Step 2: QK GEMM using K_smem[cur_stage] == */
+        /* K[kv_id] is already in cur_K_smem (loaded in prelude or prev iter) */
+        float S_acc[32];
+        #pragma unroll
+        for (int i = 0; i < 32; i++) S_acc[i] = 0.0f;
 
+        const uint64_t desc_k_base = make_wgmma_desc(cur_K_smem, QKV_stride_bytes);
+
+        wgmma_fence();
+
+        /* B128 layout: 128-byte-wide atoms (64 bf16 cols).  DIM=128 needs
+         * 2 atoms per row.  k-steps 0-3 → atom 0, k-steps 4-7 → atom 1.
+         * Atom offset = 1024 bytes = 64 units of 16B. */
+        #pragma unroll
+        for (int ks = 0; ks < DIM / 16; ks++) {
+            const int atom_off = (ks / 4) * 64;   /* 0 or 64 */
+            const int k_off    = (ks % 4) * 2;    /* 0, 2, 4, 6 */
+            uint64_t desc_q = gmma_desc_advance(desc_q_base, atom_off + k_off);
+            uint64_t desc_k = gmma_desc_advance(desc_k_base, atom_off + k_off);
+            wgmma_m64n64k16_f32_bf16(S_acc, desc_q, desc_k,
+                                      (ks == 0) ? 0 : 1);
+        }
+
+        wgmma_commit_group();
+        wgmma_wait_group<0>();
+        wgmma_fence();  /* fence before reading accumulators */
+
+        /* == Step 3: Softmax on S_acc (in-place, P stays in registers) == */
+        /* V[kv_id] and K[kv_id+1] may still be loading in background */
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            float row_vals[16];
             #pragma unroll
-            for (int md = 0; md < DIM / MMA_K; md++) {
-                #pragma unroll
-                for (int mk = 0; mk < BLOCK_KV / MMA_N; mk++) {
-                    uint32_t K_frag[2];
-                    uint32_t kaddr = K_smem_thread +
-                        mk * MMA_N * DIM * sizeof(nv_bfloat16);
-                    kaddr ^= md * MMA_K * sizeof(nv_bfloat16);
-                    ldmatrix_x2(K_frag, kaddr);
-                    mma_m16n8k16(Q_regs[md], K_frag, S_local[mk]);
-                }
+            for (int p4 = 0; p4 < 8; p4++) {
+                row_vals[p4 * 2 + 0] = S_acc[(p4 << 2) | (half << 1) | 0];
+                row_vals[p4 * 2 + 1] = S_acc[(p4 << 2) | (half << 1) | 1];
             }
 
-            /* ---- Scale ---- */
+            /* Scale */
             #pragma unroll
-            for (int i = 0; i < BLOCK_KV / MMA_N; i++)
-                #pragma unroll
-                for (int j = 0; j < 4; j++)
-                    S_local[i][j] *= softmax_scale_log2;
+            for (int c = 0; c < 16; c++)
+                row_vals[c] *= softmax_scale_log2;
 
-            /* ---- Causal mask ---- */
+            /* Causal mask */
             if (is_causal) {
-                const int q_first = q_block_id * BLOCK_Q +
-                                    warp_id * WARP_Q + mq * MMA_M;
-                const int kv_start = kv_id * BLOCK_KV;
-                const int kv_last = kv_start + BLOCK_KV - 1;
-
-                if (kv_last > q_first) {
-                    for (int i = 0; i < BLOCK_KV / MMA_N; i++) {
-                        int q0 = q_first + (lane_id / 4);
-                        int q1 = q0 + 8;
-                        int kv0 = kv_start + i * MMA_N + (lane_id % 4) * 2;
-                        int kv1 = kv0 + 1;
-                        if (kv0 > q0) S_local[i][0] = -FLT_MAX;
-                        if (kv1 > q0) S_local[i][1] = -FLT_MAX;
-                        if (kv0 > q1) S_local[i][2] = -FLT_MAX;
-                        if (kv1 > q1) S_local[i][3] = -FLT_MAX;
-                    }
-                }
-            }
-
-            /* ---- Online softmax with fast_exp2f ---- */
-            float this_rowmax[2];
-            for (int i = 0; i < BLOCK_KV / MMA_N; i++) {
-                float *r = S_local[i];
-                if (i == 0) {
-                    this_rowmax[0] = max(r[0], r[1]);
-                    this_rowmax[1] = max(r[2], r[3]);
-                } else {
-                    this_rowmax[0] = max(this_rowmax[0], max(r[0], r[1]));
-                    this_rowmax[1] = max(this_rowmax[1], max(r[2], r[3]));
-                }
-            }
-
-            this_rowmax[0] = max(this_rowmax[0],
-                __shfl_xor_sync(0xFFFFFFFF, this_rowmax[0], 1));
-            this_rowmax[0] = max(this_rowmax[0],
-                __shfl_xor_sync(0xFFFFFFFF, this_rowmax[0], 2));
-            this_rowmax[1] = max(this_rowmax[1],
-                __shfl_xor_sync(0xFFFFFFFF, this_rowmax[1], 1));
-            this_rowmax[1] = max(this_rowmax[1],
-                __shfl_xor_sync(0xFFFFFFFF, this_rowmax[1], 2));
-
-            this_rowmax[0] = max(this_rowmax[0], rowmax[mq][0]);
-            this_rowmax[1] = max(this_rowmax[1], rowmax[mq][1]);
-
-            float rescale[2];
-            rescale[0] = fast_exp2f(rowmax[mq][0] - this_rowmax[0]);
-            rescale[1] = fast_exp2f(rowmax[mq][1] - this_rowmax[1]);
-            #pragma unroll
-            for (int d = 0; d < DIM / MMA_N; d++) {
-                O_rmem[mq][d][0] *= rescale[0];
-                O_rmem[mq][d][1] *= rescale[0];
-                O_rmem[mq][d][2] *= rescale[1];
-                O_rmem[mq][d][3] *= rescale[1];
-            }
-
-            rowmax[mq][0] = this_rowmax[0];
-            rowmax[mq][1] = this_rowmax[1];
-
-            float this_rowsumexp[2];
-            #pragma unroll
-            for (int i = 0; i < BLOCK_KV / MMA_N; i++) {
-                float *r = S_local[i];
-                r[0] = fast_exp2f(r[0] - rowmax[mq][0]);
-                r[1] = fast_exp2f(r[1] - rowmax[mq][0]);
-                r[2] = fast_exp2f(r[2] - rowmax[mq][1]);
-                r[3] = fast_exp2f(r[3] - rowmax[mq][1]);
-
-                if (i == 0) {
-                    this_rowsumexp[0] = r[0] + r[1];
-                    this_rowsumexp[1] = r[2] + r[3];
-                } else {
-                    this_rowsumexp[0] += r[0] + r[1];
-                    this_rowsumexp[1] += r[2] + r[3];
-                }
-
-                nv_bfloat162 *p = reinterpret_cast<nv_bfloat162 *>(
-                    P_rmem[mq][i / 2]);
-                p[(i % 2) * 2]     = __float22bfloat162_rn({r[0], r[1]});
-                p[(i % 2) * 2 + 1] = __float22bfloat162_rn({r[2], r[3]});
-            }
-
-            this_rowsumexp[0] += __shfl_xor_sync(0xFFFFFFFF, this_rowsumexp[0], 1);
-            this_rowsumexp[0] += __shfl_xor_sync(0xFFFFFFFF, this_rowsumexp[0], 2);
-            this_rowsumexp[1] += __shfl_xor_sync(0xFFFFFFFF, this_rowsumexp[1], 1);
-            this_rowsumexp[1] += __shfl_xor_sync(0xFFFFFFFF, this_rowsumexp[1], 2);
-
-            rowsumexp[mq][0] = rowsumexp[mq][0] * rescale[0] + this_rowsumexp[0];
-            rowsumexp[mq][1] = rowsumexp[mq][1] * rescale[1] + this_rowsumexp[1];
-
-        } /* end mq loop */
-
-        /* ==== Sync before reusing KV_smem for V ==== */
-        __syncthreads();
-
-        /* ==== Load V tile to shared memory (reuses KV_smem) ==== */
-        global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(
-            KV_smem, V_ptr, seq_stride, tid);
-        V_ptr += BLOCK_KV * seq_stride;
-        asm volatile("cp.async.commit_group;");
-        asm volatile("cp.async.wait_all;");
-        __syncthreads();
-
-        /* ==== O += P @ V ==== */
-        {
-            uint32_t V_cur[2];
-            ldmatrix_x2_trans(V_cur, V_smem_thread);
-
-            #pragma unroll
-            for (int kv = 0; kv < BLOCK_KV / MMA_K; kv++) {
+                const int row = warp_id * 16 + half * 8 + (lane_id / 4);
+                const int q_pos = q_block_id * BLOCK_Q + row;
                 #pragma unroll
-                for (int d = 0; d < DIM / MMA_N; d++) {
-                    uint32_t V_next[2];
-                    const bool has_next_d = (d + 1 < DIM / MMA_N);
-                    const bool has_next_kv = (kv + 1 < BLOCK_KV / MMA_K);
-                    if (has_next_d) {
-                        uint32_t addr = V_smem_thread +
-                            kv * MMA_K * DIM * sizeof(nv_bfloat16);
-                        addr ^= (d + 1) * MMA_N * sizeof(nv_bfloat16);
-                        ldmatrix_x2_trans(V_next, addr);
-                    } else if (has_next_kv) {
-                        uint32_t addr = V_smem_thread +
-                            (kv + 1) * MMA_K * DIM * sizeof(nv_bfloat16);
-                        ldmatrix_x2_trans(V_next, addr);
-                    }
+                for (int p4 = 0; p4 < 8; p4++) {
                     #pragma unroll
-                    for (int mq = 0; mq < WARP_Q / MMA_M; mq++)
-                        mma_m16n8k16(P_rmem[mq][kv], V_cur, O_rmem[mq][d]);
-                    if (has_next_d || has_next_kv) {
-                        V_cur[0] = V_next[0]; V_cur[1] = V_next[1];
+                    for (int s2 = 0; s2 < 2; s2++) {
+                        const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
+                        const int kv_pos = kv_id * BLOCK_KV + col;
+                        if (kv_pos > q_pos)
+                            row_vals[p4 * 2 + s2] = -FLT_MAX;
                     }
                 }
+            }
+
+            /* Local max across 16 values */
+            float local_max = row_vals[0];
+            #pragma unroll
+            for (int c = 1; c < 16; c++)
+                local_max = fmaxf(local_max, row_vals[c]);
+
+            /* Warp reduce max across 4 threads (lane%4 groups -> full 64-col) */
+            local_max = fmaxf(local_max,
+                __shfl_xor_sync(0xFFFFFFFF, local_max, 1));
+            local_max = fmaxf(local_max,
+                __shfl_xor_sync(0xFFFFFFFF, local_max, 2));
+
+            /* Update running max */
+            float new_max = fmaxf(local_max, rowmax[half]);
+            float rescale = fast_exp2f(rowmax[half] - new_max);
+            rowmax[half] = new_max;
+
+            /* Rescale O accumulator for this row */
+            #pragma unroll
+            for (int p4 = 0; p4 < 16; p4++) {
+                O_acc[(p4 << 2) | (half << 1) | 0] *= rescale;
+                O_acc[(p4 << 2) | (half << 1) | 1] *= rescale;
+            }
+
+            /* Compute exp2(x - max) and sum */
+            float local_sum = 0.0f;
+            #pragma unroll
+            for (int c = 0; c < 16; c++) {
+                row_vals[c] = fast_exp2f(row_vals[c] - new_max);
+                local_sum += row_vals[c];
+            }
+
+            /* Warp reduce sum */
+            local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, 1);
+            local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, 2);
+
+            /* Update running sum */
+            rowsumexp[half] = rowsumexp[half] * rescale + local_sum;
+
+            /* Write softmax output back to S_acc (P stays in registers) */
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) {
+                S_acc[(p4 << 2) | (half << 1) | 0] = row_vals[p4 * 2 + 0];
+                S_acc[(p4 << 2) | (half << 1) | 1] = row_vals[p4 * 2 + 1];
             }
         }
 
-        /* Sync before next KV iteration loads new K */
+        /* == Step 4: Wait for V[kv_id] load to complete == */
+        /* If K[kv_id+1] was also issued, V is group 1, K is group 0.
+         * wait_group 1 ensures V is done while K may still be in flight.
+         * If no K was issued, V is group 0 → wait_group 0. */
+        if (has_next_k) {
+            asm volatile("cp.async.wait_group 1;\n" ::: "memory");
+        } else {
+            asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+        }
+        __syncthreads();
+
+        /* == Step 5: PV GEMM using RS mode (P from registers, V from SMEM) ==
+         *
+         * RS register layout (PTX ISA Figure 148):
+         *   a0 = bf16x2(P[row0, col], P[row0, col+1])       // row0, cols 0-7
+         *   a1 = bf16x2(P[row1, col], P[row1, col+1])       // row1, cols 0-7
+         *   a2 = bf16x2(P[row0, col+8], P[row0, col+8+1])   // row0, cols 8-15
+         *   a3 = bf16x2(P[row1, col+8], P[row1, col+8+1])   // row1, cols 8-15
+         *
+         * Mapping from S_acc (half=0 -> row0, half=1 -> row1):
+         *   a0 = pack(S_acc[ks*8+0], S_acc[ks*8+1])   // half=0, pair4=ks*2
+         *   a1 = pack(S_acc[ks*8+2], S_acc[ks*8+3])   // half=1, pair4=ks*2
+         *   a2 = pack(S_acc[ks*8+4], S_acc[ks*8+5])   // half=0, pair4=ks*2+1
+         *   a3 = pack(S_acc[ks*8+6], S_acc[ks*8+7])   // half=1, pair4=ks*2+1
+         */
+        wgmma_fence();
+
+        /* V K-stepping with tnspB=1: each K-step processes 16 ROWS of V.
+         * In B128 layout: 16 rows = 2 groups of 8 rows.
+         * Advance per K-step = 2 × group_bytes / 16 = 2 × 2048 / 16 = 256.
+         * (NOT ks*2 which advances 32B along columns — wrong axis!) */
+        constexpr int V_KS_ADVANCE = 2 * QKV_stride_bytes / 16;  /* 256 */
+
+        #pragma unroll
+        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+            uint32_t a0 = pack_bf16(S_acc[ks*8 + 0], S_acc[ks*8 + 1]);
+            uint32_t a1 = pack_bf16(S_acc[ks*8 + 2], S_acc[ks*8 + 3]);
+            uint32_t a2 = pack_bf16(S_acc[ks*8 + 4], S_acc[ks*8 + 5]);
+            uint32_t a3 = pack_bf16(S_acc[ks*8 + 6], S_acc[ks*8 + 7]);
+            uint64_t desc_v = gmma_desc_advance(desc_v_base, ks * V_KS_ADVANCE);
+            wgmma_m64n128k16_f32_bf16_RS(O_acc, a0, a1, a2, a3, desc_v, 1);
+        }
+
+        wgmma_commit_group();
+        wgmma_wait_group<0>();
+
+        /* == Step 6: Ensure K[kv_id+1] is ready for next iteration == */
+        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
         __syncthreads();
 
     } /* end kv_id loop */
 
-    /* ---- Write O — use fast_rcp instead of division ---- */
+    /* ---- Epilogue: finalize O and store to gmem ---- */
+    wgmma_fence();  /* fence before reading O_acc */
+
     #pragma unroll
-    for (int mq = 0; mq < WARP_Q / MMA_M; mq++) {
-        float inv_sum[2];
-        inv_sum[0] = fast_rcp(rowsumexp[mq][0]);
-        inv_sum[1] = fast_rcp(rowsumexp[mq][1]);
-
+    for (int half = 0; half < 2; half++) {
+        float inv_sum = fast_rcp(rowsumexp[half]);
         #pragma unroll
-        for (int d = 0; d < DIM / MMA_N; d++) {
-            const int row = warp_id * WARP_Q + mq * MMA_M + (lane_id / 4);
-            const int col = d * MMA_N + (lane_id % 4) * 2;
+        for (int p4 = 0; p4 < 16; p4++) {
+            O_acc[(p4 << 2) | (half << 1) | 0] *= inv_sum;
+            O_acc[(p4 << 2) | (half << 1) | 1] *= inv_sum;
+        }
+    }
 
-            float *regs = O_rmem[mq][d];
-            regs[0] *= inv_sum[0];
-            regs[1] *= inv_sum[0];
-            regs[2] *= inv_sum[1];
-            regs[3] *= inv_sum[1];
-
-            reinterpret_cast<nv_bfloat162 *>(O_base + (row + 0) * seq_stride + col)[0] =
-                __float22bfloat162_rn({regs[0], regs[1]});
-            reinterpret_cast<nv_bfloat162 *>(O_base + (row + 8) * seq_stride + col)[0] =
-                __float22bfloat162_rn({regs[2], regs[3]});
+    /* Write O to global memory */
+    #pragma unroll
+    for (int half = 0; half < 2; half++) {
+        const int row = warp_id * 16 + half * 8 + (lane_id / 4);
+        if (row < len_q - q_block_id * BLOCK_Q) {
+            #pragma unroll
+            for (int p4 = 0; p4 < 16; p4++) {
+                #pragma unroll
+                for (int s2 = 0; s2 < 2; s2++) {
+                    const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
+                    const int idx = (p4 << 2) | (half << 1) | s2;
+                    nv_bfloat16 val = __float2bfloat16(O_acc[idx]);
+                    O_base[row * seq_stride + col] = val;
+                }
+            }
         }
     }
 }
@@ -516,14 +664,14 @@ extern "C" int kernel_run(
 
         int num_blocks = B * H * cdiv(S, BLOCK_Q);
 
-        /* SMEM: Q(16KB) + KV(16KB) = 32KB */
-        int smem_size = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16)
-                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);
+        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB */
+        int smem_size = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16)      /* Q: 16KB */
+                      + 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16) /* K[0]+K[1]: 32KB */
+                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);    /* V: 16KB */
 
-        auto kernel = flash_attention_kernel_unified<BLOCK_Q, BLOCK_KV, DIM_CONST>;
-        if (smem_size > 48000)
-            cudaFuncSetAttribute(kernel,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+        auto kernel = flash_attention_wgmma<BLOCK_Q, BLOCK_KV, DIM_CONST>;
+        cudaFuncSetAttribute(kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
         kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
             inputs[0], inputs[1], inputs[2], outputs[0],

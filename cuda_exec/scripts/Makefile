@@ -268,6 +268,7 @@ compile: ensure-venv ## Stage reference + generated files and run the 5-step com
 
 .PHONY: evaluate
 evaluate: ensure-venv ## Run evaluate for one config (CONFIG=slug) or all (CONFIG=all)
+	@export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$$LD_LIBRARY_PATH
 	@set -euo pipefail
 	if [ "$(CONFIG_SLUG)" = "all" ]; then
 		SLUGS=$$($(VENV_PYTHON) -c "import json; print(' '.join(json.load(open('$(_CONFIG_FILE)')).keys()))")

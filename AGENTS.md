@@ -292,10 +292,15 @@ Each H100 host has 8 GPUs (0-7). Allocations are fixed to avoid contention:
 
 This applies to **both h8_3 and h8_4** identically. See `conf/hosts/default.yaml` for the canonical config.
 
-**When running benchmarks locally**, always set `CUDA_VISIBLE_DEVICES=4` (or `5`):
+**When running benchmarks locally**, always set `CUDA_VISIBLE_DEVICES=4` (or `5`).
+
+**cuDNN requires `libnvrtc.so.12`** for JIT-compiling flash attention kernels.
+On h8_3/h8_4, this library is at `/usr/local/cuda-12.8/lib64/` but not on the
+default `LD_LIBRARY_PATH`. Without it, cuDNN SDPA silently falls back to a
+much slower kernel (181 TFLOPS instead of 600+ TFLOPS). Always set both:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 python bench_script.py
+CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH python bench_script.py
 ```
 
 ### 10. Plugins

@@ -1,5 +1,5 @@
 /*
- * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 3b).
+ * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 4: RS mode PV).
  * Unified 128 threads (1 warp group) + double-buffered K + dedicated V.
  *
  * Architecture: 128 threads, all threads cooperate on both cp.async
@@ -8,8 +8,11 @@
  * Pipeline: V[i] and K[i+1] loads overlap with QK[i] + softmax compute.
  * V has its own dedicated SMEM buffer (no longer reuses K).
  *
+ * PV GEMM uses WGMMA RS mode: P stays in registers after softmax,
+ * eliminating the P SMEM roundtrip (8KB store + fence + sync + read).
+ *
  * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, 128 threads.
- * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) + P(8KB) = 72KB.
+ * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB.
  *
  * Target: NVIDIA H100 (SM90a, GH100). Compile with -arch=sm_90a.
  *
@@ -183,6 +186,59 @@ void wgmma_m64n128k16_f32_bf16(float acc[64], uint64_t desc_a, uint64_t desc_b,
     : "l"(desc_a), "l"(desc_b), "r"(scale_D));
 }
 
+/* --- Pack two F32 values into BF16x2 -------------------------------- */
+
+__device__ __forceinline__
+uint32_t pack_bf16(float a, float b) {
+    uint32_t result;
+    asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(result) : "f"(a), "f"(b));
+    return result;
+}
+
+/* --- WGMMA m64n128k16 RS mode (A from registers, B from SMEM) ------- */
+
+__device__ __forceinline__
+void wgmma_m64n128k16_f32_bf16_RS(float acc[64],
+                                   uint32_t a0, uint32_t a1,
+                                   uint32_t a2, uint32_t a3,
+                                   uint64_t desc_b,
+                                   int scale_D) {
+    asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %69, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, "
+    " %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, "
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " {%64, %65, %66, %67},"
+    " %68, p, 1, 1, 1;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
+      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
+      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
+      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
+      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
+      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
+      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
+      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
+      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
+    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+      "l"(desc_b), "r"(scale_D));
+}
+
 /* --- fence_view_async_shared ----------------------------------------- */
 
 __device__ __forceinline__
@@ -191,11 +247,12 @@ void fence_view_async_shared() {
 }
 
 /* ======================================================================
- *  WGMMA Flash Attention kernel — Phase 3b (double-buffered K + dedicated V)
+ *  WGMMA Flash Attention kernel — Phase 4 (RS mode PV GEMM)
  *
  *  128 threads = 1 warp group (warps 0-3).
  *  Double-buffered K: loads K[i+1] during QK[i] + softmax.
  *  Dedicated V buffer: V[i] loads overlap with QK[i] + softmax.
+ *  PV GEMM: RS mode — P stays in registers, no SMEM roundtrip.
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
@@ -213,20 +270,18 @@ void flash_attention_wgmma(
     /* Constants */
     constexpr int TB_SIZE = 128;
 
-    /* SMEM layout:
-     *   Q:    BLOCK_Q * DIM * 2B      = 16KB  (persistent)
-     *   K[0]: BLOCK_KV * DIM * 2B     = 16KB  (stage 0)
-     *   K[1]: BLOCK_KV * DIM * 2B     = 16KB  (stage 1)
-     *   V:    BLOCK_KV * DIM * 2B     = 16KB  (dedicated, loads overlap QK+softmax)
-     *   P:    BLOCK_Q * BLOCK_KV * 2B = 8KB   (softmax output for PV)
-     *   Total: 72KB */
+    /* SMEM layout (P eliminated — RS mode keeps P in registers):
+     *   Q:    BLOCK_Q * DIM * 2B  = 16KB  (persistent)
+     *   K[0]: BLOCK_KV * DIM * 2B = 16KB  (stage 0)
+     *   K[1]: BLOCK_KV * DIM * 2B = 16KB  (stage 1)
+     *   V:    BLOCK_KV * DIM * 2B = 16KB  (dedicated, loads overlap QK+softmax)
+     *   Total: 64KB */
     extern __shared__ nv_bfloat16 smem[];
     const uint32_t smem_base = __cvta_generic_to_shared(smem);
     const uint32_t Q_smem   = smem_base;
     const uint32_t K_smem_0 = Q_smem + BLOCK_Q * DIM * sizeof(nv_bfloat16);
     const uint32_t K_smem_1 = K_smem_0 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
     const uint32_t V_smem   = K_smem_1 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
-    const uint32_t P_smem   = V_smem + BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;         /* 0-3 */
@@ -261,9 +316,8 @@ void flash_attention_wgmma(
     asm volatile("cp.async.wait_all;");
     __syncthreads();
 
-    /* WGMMA descriptor stride constants */
+    /* WGMMA descriptor stride constant */
     constexpr int QKV_stride_bytes = 8 * DIM * sizeof(nv_bfloat16);      /* 2048 */
-    constexpr int P_stride_bytes   = 8 * BLOCK_KV * sizeof(nv_bfloat16); /* 1024 */
 
     const float softmax_scale_log2 =
         rsqrtf(static_cast<float>(DIM)) * 1.4426950408889634f;
@@ -276,27 +330,8 @@ void flash_attention_wgmma(
     float rowmax[2] = {-FLT_MAX, -FLT_MAX};
     float rowsumexp[2] = {0.0f, 0.0f};
 
-    /* Precompute base descriptors for Q and P (invariant across iterations) */
+    /* Precompute base descriptor for Q (invariant across iterations) */
     const uint64_t desc_q_base = make_wgmma_desc(Q_smem, QKV_stride_bytes);
-    const uint64_t desc_p_base = make_wgmma_desc(P_smem, P_stride_bytes);
-
-    /* Precompute P SMEM store addresses per thread.
-     * Each thread stores 8 packed b32 values per half (16 total).
-     * p_row: determined by warp_id, half, lane_id.
-     * p_col_base: determined by p4, lane_id.
-     * With 128B swizzle on BLOCK_KV=64 width (128B stride),
-     * addresses are just base + offset since stride == 128B = 1 swizzle line. */
-    uint32_t p_addrs[2][8];  /* [half][p4] */
-    #pragma unroll
-    for (int half = 0; half < 2; half++) {
-        const int p_row = warp_id * 16 + half * 8 + (lane_id / 4);
-        #pragma unroll
-        for (int p4 = 0; p4 < 8; p4++) {
-            const int p_col_base = p4 * 8 + (lane_id % 4) * 2;
-            p_addrs[half][p4] = swizzle<BLOCK_KV * (int)sizeof(nv_bfloat16)>(
-                P_smem + (p_row * BLOCK_KV + p_col_base) * sizeof(nv_bfloat16));
-        }
-    }
 
     /* ---- Prelude: load K[0] into stage 0 ---- */
     if (max_kv_iter > 0) {
@@ -356,7 +391,7 @@ void flash_attention_wgmma(
         wgmma_wait_group<0>();
         wgmma_fence();  /* fence before reading accumulators */
 
-        /* == Step 3: Softmax on S_acc -> P_smem == */
+        /* == Step 3: Softmax on S_acc (in-place, P stays in registers) == */
         /* V[kv_id] and K[kv_id+1] may still be loading in background */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
@@ -427,20 +462,13 @@ void flash_attention_wgmma(
             /* Update running sum */
             rowsumexp[half] = rowsumexp[half] * rescale + local_sum;
 
-            /* Store P to SMEM — packed b32 stores using precomputed addresses */
+            /* Write softmax output back to S_acc (P stays in registers) */
             #pragma unroll
             for (int p4 = 0; p4 < 8; p4++) {
-                nv_bfloat16 v0 = __float2bfloat16(row_vals[p4 * 2 + 0]);
-                nv_bfloat16 v1 = __float2bfloat16(row_vals[p4 * 2 + 1]);
-                uint32_t packed = (uint32_t)(*(uint16_t*)&v0) |
-                                  ((uint32_t)(*(uint16_t*)&v1) << 16);
-                asm volatile("st.shared.b32 [%0], %1;"
-                             :: "r"(p_addrs[half][p4]), "r"(packed));
+                S_acc[(p4 << 2) | (half << 1) | 0] = row_vals[p4 * 2 + 0];
+                S_acc[(p4 << 2) | (half << 1) | 1] = row_vals[p4 * 2 + 1];
             }
         }
-
-        /* Ensure P writes visible to WGMMA */
-        fence_view_async_shared();
 
         /* == Step 4: Wait for V[kv_id] load to complete == */
         /* If K[kv_id+1] was also issued, V is group 1, K is group 0.
@@ -453,14 +481,30 @@ void flash_attention_wgmma(
         }
         __syncthreads();
 
-        /* == Step 5: PV GEMM using P_smem x V_smem == */
+        /* == Step 5: PV GEMM using RS mode (P from registers, V from SMEM) ==
+         *
+         * RS register layout (PTX ISA Figure 148):
+         *   a0 = bf16x2(P[row0, col], P[row0, col+1])       // row0, cols 0-7
+         *   a1 = bf16x2(P[row1, col], P[row1, col+1])       // row1, cols 0-7
+         *   a2 = bf16x2(P[row0, col+8], P[row0, col+8+1])   // row0, cols 8-15
+         *   a3 = bf16x2(P[row1, col+8], P[row1, col+8+1])   // row1, cols 8-15
+         *
+         * Mapping from S_acc (half=0 -> row0, half=1 -> row1):
+         *   a0 = pack(S_acc[ks*8+0], S_acc[ks*8+1])   // half=0, pair4=ks*2
+         *   a1 = pack(S_acc[ks*8+2], S_acc[ks*8+3])   // half=1, pair4=ks*2
+         *   a2 = pack(S_acc[ks*8+4], S_acc[ks*8+5])   // half=0, pair4=ks*2+1
+         *   a3 = pack(S_acc[ks*8+6], S_acc[ks*8+7])   // half=1, pair4=ks*2+1
+         */
         wgmma_fence();
 
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint64_t desc_p = gmma_desc_advance(desc_p_base, ks * 2);
+            uint32_t a0 = pack_bf16(S_acc[ks*8 + 0], S_acc[ks*8 + 1]);
+            uint32_t a1 = pack_bf16(S_acc[ks*8 + 2], S_acc[ks*8 + 3]);
+            uint32_t a2 = pack_bf16(S_acc[ks*8 + 4], S_acc[ks*8 + 5]);
+            uint32_t a3 = pack_bf16(S_acc[ks*8 + 6], S_acc[ks*8 + 7]);
             uint64_t desc_v = gmma_desc_advance(desc_v_base, ks * 2);
-            wgmma_m64n128k16_f32_bf16(O_acc, desc_p, desc_v, 1);
+            wgmma_m64n128k16_f32_bf16_RS(O_acc, a0, a1, a2, a3, desc_v, 1);
         }
 
         wgmma_commit_group();
@@ -584,11 +628,10 @@ extern "C" int kernel_run(
 
         int num_blocks = B * H * cdiv(S, BLOCK_Q);
 
-        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) + P(8KB) = 72KB */
+        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB */
         int smem_size = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16)      /* Q: 16KB */
                       + 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16) /* K[0]+K[1]: 32KB */
-                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16)     /* V: 16KB */
-                      + BLOCK_Q * BLOCK_KV * (int)sizeof(nv_bfloat16);      /* P: 8KB */
+                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);    /* V: 16KB */
 
         auto kernel = flash_attention_wgmma<BLOCK_Q, BLOCK_KV, DIM_CONST>;
         cudaFuncSetAttribute(kernel,

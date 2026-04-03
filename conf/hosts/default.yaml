@@ -14,6 +14,20 @@
 #     SSH ports: _one=41922, _two=42922
 #     Service ports must be within the host's internet-visible range.
 #   h8_3/h8_4 are directly accessible Meta devvms (no gateway).
+#
+# Internet access:
+#   _one/_two: full internet (direct)
+#   h8_3: full internet via fwdproxy
+#   h8_4: NO internet — fwdproxy blocks CONNECT tunnels.
+#         Deploy via rsync from h8_3 (venvs + HF model cache).
+#         kb_embed systemd unit must set HF_HUB_OFFLINE=1.
+#
+# SSH alias availability:
+#   _one/_two SSH aliases are in personal ~/.ssh/config only,
+#   not resolvable from Meta devvms.
+#
+# Shared-devvm port conflicts:
+#   Check port availability before deploying: sudo ss -tlnp | grep <port>
 
 hosts:
   _one:
@@ -50,7 +64,7 @@ hosts:
         port: 8980
         cuda_visible_devices: "7"
       kb_embed:
-        port: 46982
+        port: 46983
         cuda_visible_devices: "6"
 
   h8_4:
@@ -63,5 +77,5 @@ hosts:
         port: 8980
         cuda_visible_devices: "7"
       kb_embed:
-        port: 46982
+        port: 46984          # was 46982, changed due to port conflict (aarontao's MCP server)
         cuda_visible_devices: "6"

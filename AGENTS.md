@@ -157,7 +157,91 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - the agent (`agent.py`) uses `claude-agent-sdk` to run a single long optimization session
 - the agent manages its own iteration loop internally — Claude decides when to compile, evaluate, modify, and converge
 
-### 8. Plugins
+### 8. Service deployment
+
+#### Infrastructure
+
+- Host inventory and service-to-host mapping live in `conf/hosts/default.yaml` (single source of truth)
+- Deploy CLIs: `plugins/cuda/deploy/cli.py` (cuda_exec), `plugins/kb/deploy/cli.py` (kb_embed)
+- Deploy CLIs require PyYAML — run with `.venv/bin/python`, not system `python3` (Meta devvms lack PyYAML and block pip)
+
+#### Host-specific constraints
+
+| Host | Internet | Notes |
+|------|----------|-------|
+| _one, _two | yes | SSH aliases in personal `~/.ssh/config` only — not resolvable from devvms |
+| h8_3 (devvm8490) | yes | fwdproxy works for PyPI and HuggingFace |
+| h8_4 (devvm8491) | **no** | fwdproxy blocks CONNECT tunnels — `uv pip install` and HF model downloads fail |
+
+#### Deploying to an online host
+
+```bash
+.venv/bin/python plugins/cuda/deploy/cli.py deploy <host>
+.venv/bin/python plugins/cuda/deploy/cli.py start <host>
+.venv/bin/python plugins/kb/deploy/cli.py deploy <host>
+.venv/bin/python plugins/kb/deploy/cli.py start <host>
+```
+
+#### Deploying to an offline host (e.g., h8_4)
+
+The deploy CLI assumes internet on the target. For offline hosts:
+
+1. Run deploy CLI — code sync succeeds, dependency install fails at step 3:
+   `.venv/bin/python plugins/cuda/deploy/cli.py deploy h8_4`
+2. Rsync venvs from an online host (e.g., h8_3):
+   ```bash
+   rsync -az ~/.cuda_exec_service/.venv/ devvm8491:~/.cuda_exec_service/.venv/
+   rsync -az ~/.kb_embed_service/.venv/ devvm8491:~/.kb_embed_service/.venv/
+   ```
+3. Rsync HuggingFace model cache for kb_embed:
+   ```bash
+   rsync -az ~/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-4B/ \
+     devvm8491:~/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-4B/
+   ```
+4. Add `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` to the kb-embed systemd unit on the target
+5. Manually install the systemd unit if the CLI didn't complete steps 4-5, then start
+
+#### Pre-flight checks for shared devvms
+
+Before deploying, verify the configured port is not occupied by another user:
+
+```bash
+sudo ss -tlnp | grep <port>
+sudo lsof -i :<port>
+```
+
+If occupied, update the port in `conf/hosts/default.yaml` and redeploy.
+
+Known conflict: port 46982 on h8_4 is used by another user — kb_embed moved to 46984.
+
+#### Health endpoints
+
+- cuda_exec: `GET /healthz` → `{"ok":true,"service":"cuda_exec"}`
+- kb_embed: `GET /health` → `{"status":"ok"}`
+- kb_embed functional: `POST /v1/embeddings` with `{"input":"test"}` → OpenAI-compatible response
+
+#### SM-architecture-specific code and environments
+
+Generated kernels are architecture-specific: `data/generated/<arch>/matmul/generated.cu`.
+Each arch folder contains kernels optimized for that SM version — **do not copy between arches**.
+
+| Host | GPU | SM arch | `data/generated/` folder |
+|------|-----|---------|--------------------------|
+| h8_3, h8_4 | H100 | SM90 (Hopper) | `sm90/` |
+| _one, _two | RTX PRO 6000 | SM120 (Blackwell) | `sm120/` |
+
+**Key architecture differences:**
+- SM90 (H100): optimal MMA is **WGMMA** (warpgroup, 4 warps, 64×N×K shapes). Per-warp `mma.sync m16n8k16` runs but achieves only ~40% of cuBLAS.
+- SM120 (Blackwell GeForce): uses per-warp `mma.sync m16n8k16`. WGMMA not available on GeForce SM120.
+- TMA (`cp.async.bulk.tensor`) works on both SM90+ and SM120.
+
+**CuTe DSL venv compatibility:**
+- The service venv (`~/.cuda_exec_service/.venv`) has `cuda-python==13.2.0` → requires CUDA 13.x driver.
+- h8_3 has driver 550.90.07 (CUDA 12.4) → CuTe DSL **fails** with `cudaErrorInsufficientDriver`.
+- Workaround: create a local venv with `cuda-bindings==12.8.0` + `nvidia-cutlass-dsl==4.4.2 --no-deps` + `torch==2.6.0+cu124`. Set `CUTE_DSL_ARCH=sm_90a`.
+- _one/_two have driver 595.45.04 (CUDA 13.2) → CuTe DSL works natively.
+
+### 9. Plugins
 
 - Plugins live in `plugins/` — each is a Claude Code plugin with `.claude-plugin/plugin.json`
 - Each plugin can contain: MCP servers (`.mcp.json`), Skills (`skills/`), hooks, agents

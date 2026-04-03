@@ -16,6 +16,7 @@ KB-specific defaults come from conf/kb/default.yaml.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -176,7 +177,9 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
             transformers \
             'fastapi>=0.116,<1.0' \
             'uvicorn[standard]>=0.35,<1.0' \
-            accelerate 2>&1
+            accelerate \
+            protobuf \
+            sentencepiece 2>&1
     """)
     if r.returncode != 0:
         print(f"  Dependency install failed.", file=sys.stderr)
@@ -198,6 +201,19 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
         service_content = "\n".join(
             line for line in service_content.split("\n")
             if "__CUDA_VISIBLE_DEVICES__" not in line
+        )
+
+    # Forward proxy env from deployer to service (needed on Meta devvms)
+    proxy_lines = []
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                "no_proxy", "NO_PROXY"):
+        val = os.environ.get(var)
+        if val:
+            proxy_lines.append(f"Environment={var}={val}")
+    if proxy_lines:
+        service_content = service_content.replace(
+            "[Install]",
+            "\n".join(proxy_lines) + "\n\n[Install]",
         )
 
     _ssh(ssh_host, f"""

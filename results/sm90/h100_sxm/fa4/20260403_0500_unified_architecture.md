@@ -54,14 +54,18 @@ FLOPs formula:
 - **Non-causal**: `4 × B × H × S² × D`
 - **Causal**: `2 × B × H × S² × D` (triangular ≈ half)
 
-| Config | Unified (ms) | Unified TF | Baseline (ms) | Baseline TF | cuDNN (ms) | cuDNN TF | Speedup |
-|--------|-------------|------------|---------------|-------------|------------|----------|---------|
-| causal b8-s4096 | 4.626 | 118.8 | 5.118 | 107.4 | 1.032 | 532.6 | 1.11x |
-| causal b4-s8192 | 6.503 | 169.1 | 9.942 | 110.6 | 1.956 | 562.1 | 1.53x |
-| causal b2-s16384 | 15.201 | 144.7 | 19.711 | 111.6 | 6.281 | 350.1 | 1.30x |
-| noncausal b8-s4096 | 6.387 | 172.1 | 9.827 | 111.9 | 1.764 | 623.2 | 1.54x |
-| noncausal b4-s8192 | 14.860 | 148.0 | 19.438 | 113.1 | 5.975 | 368.1 | 1.31x |
-| noncausal b2-s16384 | 31.962 | 137.6 | 41.217 | 106.7 | 14.381 | 305.8 | 1.29x |
+| Config | cuDNN TF | CuTe DSL TF | Generated TF | Gen vs Baseline | Gen vs cuDNN |
+|--------|----------|-------------|--------------|-----------------|--------------|
+| causal b8-s4096 | 533.6 | 626.5 | 118.9 | 1.11x | 0.22x |
+| causal b4-s8192 | 561.6 | 693.3 | 169.0 | 1.53x | 0.30x |
+| causal b2-s16384 | 350.0 | 397.7 | 144.6 | 1.30x | 0.41x |
+| noncausal b8-s4096 | 621.4 | 749.7 | 172.2 | 1.54x | 0.28x |
+| noncausal b4-s8192 | 368.3 | 414.2 | 148.0 | 1.31x | 0.40x |
+| noncausal b2-s16384 | 305.4 | 421.9 | 137.9 | 1.29x | 0.45x |
+
+Reference implementations:
+- **cuDNN**: `torch.nn.functional.scaled_dot_product_attention` with `CUDNN_ATTENTION` backend (service venv)
+- **FA4 CuTe DSL**: `flash_attn.cute.flash_attn_func` via `~/.fa4_venv` (cuda-bindings==12.8.0, CUTE_DSL_ARCH=sm_90a)
 
 ## Analysis
 
@@ -80,4 +84,4 @@ The reduced SMEM (32KB vs 80KB) and thread count (128 vs 160) maintain the same 
 
 ### Remaining gap
 
-Still 3–5x behind cuDNN (305–623 TFLOPS). The fundamental bottleneck remains: synchronous `mma.sync.m16n8k16` prevents overlap between tensor core compute and scalar softmax work. Closing this gap requires SM90-native WGMMA (async warp group MMA).
+Still 3–5x behind cuDNN (305–622 TFLOPS) and FA4 CuTe DSL (398–750 TFLOPS). The fundamental bottleneck remains: synchronous `mma.sync.m16n8k16` prevents overlap between tensor core compute and scalar softmax work. Closing this gap requires SM90-native WGMMA (async warp group MMA).

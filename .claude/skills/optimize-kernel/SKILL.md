@@ -66,18 +66,36 @@ most recent.
 Then run a fresh evaluation to get ground-truth numbers for this session:
 
 1. Use `/cuda:exec` to **compile** the current generated code
-2. Use `/cuda:exec` to **evaluate** across ALL configs in `data/fixtures/{arch}/{kernel}/configs.json`
+2. Use `/cuda:exec` to **evaluate** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
 3. Record latency for generated code vs reference (CuTe DSL) vs cuDNN/cuBLAS
 
-Build a comparison table:
+**After every full evaluation, output a performance comparison table** like the
+example below. This table is mandatory after evaluate-all in both Phase 1 and
+Phase 5. Use box-drawing characters for the table border.
 
 ```
-Config             | Generated | Reference | cuDNN | Gap vs Best
--------------------|-----------|-----------|-------|------------
-causal-b8-s4096    | 1.67ms    | 1.43ms    | N/A   | -14.4%
-noncausal-b8-s4096 | 1.52ms    | 1.52ms    | N/A   | 0%
-...
+┌────────────────────┬─────────────┬───────────────┬───────────────────┬──────────────┬───────────────────┐
+│  Config            │   cuDNN     │   CuTe DSL    │  Generated CUDA   │ CuTe DSL vs  │ Generated CUDA vs │
+│                    │  (TFLOPS)   │   (TFLOPS)    │     (TFLOPS)      │    cuDNN     │       cuDNN       │
+├────────────────────┼─────────────┼───────────────┼───────────────────┼──────────────┼───────────────────┤
+│ causal-b8-s4096    │ 354.1       │ 336.2         │ 329.4             │ 0.95x        │ 0.93x             │
+├────────────────────┼─────────────┼───────────────┼───────────────────┼──────────────┼───────────────────┤
+│ causal-b4-s8192    │ 379.3       │ 361.4         │ 350.7             │ 0.95x        │ 0.92x             │
+├────────────────────┼─────────────┼───────────────┼───────────────────┼──────────────┼───────────────────┤
+│ causal-b2-s16384   │ 390.8       │ 369.9         │ 359.8             │ 0.95x        │ 0.92x             │
+├────────────────────┼─────────────┼───────────────┼───────────────────┼──────────────┼───────────────────┤
+│ nc-b8-s4096        │ 399.1       │ 417.8         │ 367.6             │ 1.05x        │ 0.92x             │
+├────────────────────┼─────────────┼───────────────┼───────────────────┼──────────────┼───────────────────┤
+│ nc-b4-s8192        │ 407.5       │ 428.0         │ 375.0             │ 1.05x        │ 0.92x             │
+├────────────────────┼─────────────┼───────────────┼───────────────────┼──────────────┼───────────────────┤
+│ nc-b2-s16384       │ 405.8       │ 442.5         │ 380.0             │ 1.09x        │ 0.94x             │
+└────────────────────┴─────────────┴───────────────┴───────────────────┴──────────────┴───────────────────┘
 ```
+
+Column definitions:
+- **cuDNN / CuTe DSL / Generated CUDA (TFLOPS)**: Effective throughput = FLOPs / latency
+- **CuTe DSL vs cuDNN**: Speedup ratio (>1.0 = CuTe DSL is faster)
+- **Generated CUDA vs cuDNN**: Speedup ratio (>1.0 = generated is faster)
 
 #### 1b. Profile Selectively
 
@@ -173,20 +191,34 @@ Use web search for **grounded, verifiable** information:
 reproducible benchmarks > blog posts > forum posts. Discard any advice that
 lacks measurable evidence or conflicts with official documentation.
 
-#### 2e. Study Previous Implementations
+#### 2e. Study Previous Implementations and Results
 
-Use `git log` to find earlier versions of the generated code:
-```bash
-git log --oneline --all -- data/generated/{arch}/{kernel}/generated.cu
-```
+Two key sources of institutional knowledge beyond docs and profiles:
 
-Read previous versions for ideas:
-```bash
-git show <commit>:data/generated/{arch}/{kernel}/generated.cu
-```
+**Previous implementations** — compare different implementations of the same
+kernel to understand what techniques each uses:
+- Compare CuTe DSL reference (`data/fixtures/{arch}/{kernel}/cutedsl.py`) vs
+  hand-written CUDA (`data/generated/{arch}/{kernel}/generated.cu`) — what
+  instructions, tile sizes, and pipeline strategies does each use?
+- Use `git log` to find earlier versions of the generated code:
+  ```bash
+  git log --oneline --all -- data/generated/{arch}/{kernel}/generated.cu
+  ```
+- Read previous versions for ideas:
+  ```bash
+  git show <commit>:data/generated/{arch}/{kernel}/generated.cu
+  ```
 
-Also check commit messages and result files for documented insights from
-previous optimization attempts.
+**Previous results** — the `results/{arch}/{gpu_name}/{kernel}/` folder is a
+knowledge base of past optimization attempts. Each results file documents:
+- What was tried and why
+- NCU profiling data before/after
+- What worked, what didn't, and root cause analysis
+- Architectural insights discovered during optimization
+
+Always read ALL results files for the target kernel before brainstorming.
+Failed experiments are especially valuable — they document constraints and
+dead ends that should not be revisited.
 
 ### Phase 3: Brainstorm Ideas
 
@@ -224,11 +256,14 @@ idea to implement first.
    - Check compile output: register count, spill bytes, shared memory
    - If compile fails, fix and retry (up to 3 compile attempts)
    - If register spills increased substantially, reconsider the approach
-2. **Evaluate** across ALL configs
+2. **Evaluate** across **ALL** configs (every config, no exceptions)
    - Check correctness first — all configs must pass
    - If correctness fails, fix and retry (up to 3 correctness attempts)
-3. **Profile** the modified code on the **same config(s)** profiled in Phase 1b
-   to confirm the optimization hit the expected hardware metric
+   - **Output the performance comparison table** (same format as Phase 1a)
+     after evaluate-all completes — this is mandatory
+3. **Profile selectively** — NCU profiling is expensive. Only profile the
+   **same 1-2 config(s)** profiled in Phase 1b, to compare the specific NCU
+   metrics targeted by this optimization. Do NOT profile all configs.
 4. **Compare** new latency vs baseline from Phase 1
 
 #### Decision Point
@@ -262,26 +297,14 @@ idea to implement first.
                         (next idea on list)
 ```
 
-- **Improvement confirmed** (any config improved, no config regressed > 2%) -> Phase 6
-- **No improvement** -> Do NOT revert yet. Profile this attempt first to
-  understand why. The profiling data is valuable evidence. Then revert to
-  baseline and try the next idea from Phase 3.
-- **Regression** -> Revert to baseline immediately:
-  ```bash
-  cp data/generated/{arch}/{kernel}/generated.cu.baseline data/generated/{arch}/{kernel}/generated.cu
-  ```
-  Analyze why it regressed (check registers, spills, occupancy). Update your
-  mental model. Return to Phase 3 with new evidence.
-- **Correctness failure after 3 fix attempts** -> Revert to baseline. The idea
-  may be fundamentally flawed. Move to the next idea.
-- **After 3 failed ideas** -> Profile the latest state vs baseline one more
-  time with fresh eyes. Consult NVIDIA docs again for anything missed. Try one
-  final idea informed by all accumulated evidence.
-- **After 4 total failed ideas** -> Revert to baseline, write a findings
-  summary (what was tried, what was learned, why nothing worked), save it to
-  results, and stop. Do not commit a regression.
+- **Improvement confirmed** (any config improved, no config regressed > 2%) → **Phase 6** (commit)
+- **No improvement or regression** → **Phase 7** (revert, learn, retry)
+- **Correctness failure after 3 fix attempts** → **Phase 7** (revert, move to next idea)
 
-### Phase 6: Commit Results
+### Phase 6: Commit Results (only if improvement confirmed)
+
+**Gate: only enter this phase if Phase 5 confirmed improvement.** If there was
+no improvement or a regression, skip to Phase 7 instead.
 
 #### 6a. Write Results
 
@@ -320,6 +343,41 @@ Change: {description}
 Result: {improvement summary across configs}
 Commit: {hash}
 ```
+
+### Phase 7: Retry Loop (no improvement or regression)
+
+**Enter this phase when Phase 5 shows no improvement or a regression.**
+
+#### 7a. Revert to Baseline
+
+```bash
+cp data/generated/{arch}/{kernel}/generated.cu.baseline data/generated/{arch}/{kernel}/generated.cu
+```
+
+For no-improvement cases: profile the failed attempt BEFORE reverting to
+extract learning from the NCU data. For regressions: revert immediately.
+
+#### 7b. Update Mental Model
+
+Record what was tried and why it didn't work:
+- Which NCU metrics changed (or didn't)
+- What the profiling data revealed about the failed hypothesis
+- Any new constraints or insights discovered
+
+#### 7c. Loop Back
+
+Return to **Phase 2** (re-analyze with new evidence) and **Phase 3** (pick
+the next idea from the ranked list). Then proceed through Phase 4 → Phase 5
+again.
+
+#### 7d. Stop Conditions
+
+- **After 3 failed ideas**: Profile baseline one final time with fresh eyes.
+  Consult NVIDIA docs for anything missed. Try one last idea informed by all
+  accumulated evidence.
+- **After 4 total failed ideas**: Revert to baseline, write a findings summary
+  to results (what was tried, what was learned, why nothing worked), and stop.
+  **Never commit a regression.**
 
 ## Key Principles
 

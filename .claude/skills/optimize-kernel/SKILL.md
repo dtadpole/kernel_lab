@@ -262,26 +262,14 @@ idea to implement first.
                         (next idea on list)
 ```
 
-- **Improvement confirmed** (any config improved, no config regressed > 2%) -> Phase 6
-- **No improvement** -> Do NOT revert yet. Profile this attempt first to
-  understand why. The profiling data is valuable evidence. Then revert to
-  baseline and try the next idea from Phase 3.
-- **Regression** -> Revert to baseline immediately:
-  ```bash
-  cp data/generated/{arch}/{kernel}/generated.cu.baseline data/generated/{arch}/{kernel}/generated.cu
-  ```
-  Analyze why it regressed (check registers, spills, occupancy). Update your
-  mental model. Return to Phase 3 with new evidence.
-- **Correctness failure after 3 fix attempts** -> Revert to baseline. The idea
-  may be fundamentally flawed. Move to the next idea.
-- **After 3 failed ideas** -> Profile the latest state vs baseline one more
-  time with fresh eyes. Consult NVIDIA docs again for anything missed. Try one
-  final idea informed by all accumulated evidence.
-- **After 4 total failed ideas** -> Revert to baseline, write a findings
-  summary (what was tried, what was learned, why nothing worked), save it to
-  results, and stop. Do not commit a regression.
+- **Improvement confirmed** (any config improved, no config regressed > 2%) → **Phase 6** (commit)
+- **No improvement or regression** → **Phase 7** (revert, learn, retry)
+- **Correctness failure after 3 fix attempts** → **Phase 7** (revert, move to next idea)
 
-### Phase 6: Commit Results
+### Phase 6: Commit Results (only if improvement confirmed)
+
+**Gate: only enter this phase if Phase 5 confirmed improvement.** If there was
+no improvement or a regression, skip to Phase 7 instead.
 
 #### 6a. Write Results
 
@@ -320,6 +308,41 @@ Change: {description}
 Result: {improvement summary across configs}
 Commit: {hash}
 ```
+
+### Phase 7: Retry Loop (no improvement or regression)
+
+**Enter this phase when Phase 5 shows no improvement or a regression.**
+
+#### 7a. Revert to Baseline
+
+```bash
+cp data/generated/{arch}/{kernel}/generated.cu.baseline data/generated/{arch}/{kernel}/generated.cu
+```
+
+For no-improvement cases: profile the failed attempt BEFORE reverting to
+extract learning from the NCU data. For regressions: revert immediately.
+
+#### 7b. Update Mental Model
+
+Record what was tried and why it didn't work:
+- Which NCU metrics changed (or didn't)
+- What the profiling data revealed about the failed hypothesis
+- Any new constraints or insights discovered
+
+#### 7c. Loop Back
+
+Return to **Phase 2** (re-analyze with new evidence) and **Phase 3** (pick
+the next idea from the ranked list). Then proceed through Phase 4 → Phase 5
+again.
+
+#### 7d. Stop Conditions
+
+- **After 3 failed ideas**: Profile baseline one final time with fresh eyes.
+  Consult NVIDIA docs for anything missed. Try one last idea informed by all
+  accumulated evidence.
+- **After 4 total failed ideas**: Revert to baseline, write a findings summary
+  to results (what was tried, what was learned, why nothing worked), and stop.
+  **Never commit a regression.**
 
 ## Key Principles
 

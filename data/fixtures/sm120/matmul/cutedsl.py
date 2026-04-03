@@ -119,6 +119,10 @@ class Model(nn.Module):
     performance. Tile shape 128x128x64, 2 mainloop stages, 8 epilogue
     stages, stmatrix R2S + TMA S2G for coalesced output writes.
 
+    atom_layout (4,2,1) distributes work across 8 MMA warps (+ 1 DMA),
+    giving 18.75% theoretical occupancy (vs 10.42% with 4 MMA warps)
+    and halving per-thread accumulator registers (64 vs 128 fp32).
+
     Computes C = A @ B where A is M×K, B is K×N, C is M×N.
     Inputs are BF16 with FP32 accumulation; output is BF16.
     """

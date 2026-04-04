@@ -440,6 +440,19 @@ fix it first. Do not push performance-only improvements that have correctness re
 The cuDNN reference (`cudnn.py`) uses `torch.mm()` which dispatches to cuBLAS `cublasGemmEx`.
 This is the vendor-optimized baseline. Do **not** use CUTLASS for the cuDNN baseline.
 
+#### Never write custom benchmark scripts
+
+**Never** write ad-hoc Python or CUDA benchmark scripts (e.g., `bench_all.py`, standalone
+timing loops). All benchmarking **must** go through the existing eval infrastructure:
+
+1. **Generated kernels**: compile via `compile.sh` + run via `eval_harness.cu`
+2. **Reference/cuDNN**: run via `evaluate.py` (which calls the harness + reference modules)
+3. **Local convenience**: use the Makefile targets or cuda_exec service API
+
+Custom scripts bypass cold-L2 flushing, fresh-pointer allocation, and fair comparison
+methodology. Results from custom scripts are unreliable and must not be used for
+optimization decisions.
+
 ## License
 
 MIT — see `LICENSE`.

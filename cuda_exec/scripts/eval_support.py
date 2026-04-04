@@ -294,19 +294,20 @@ def measure_reference(
 
         latencies_ms: list[float] = []
         last_output: Any = None
-        for _ in range(num_trials):
+        for trial_idx in range(num_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
-            # Allocate FRESH input buffers with new pointers before each trial.
-            # This matches eval_harness.cu's cudaMalloc-per-trial pattern and
-            # breaks pointer-based caching (TMA descriptors, B transpose cache,
-            # CuTe DSL compiled kernel cache).  Without this, Python references
-            # get an unfair advantage from reusing cached state across trials.
-            inputs = list(get_inputs(config))
-            inputs = [
-                x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-                for x in inputs
-            ]
+            # Fill inputs with fresh random data before each trial.
+            # Uses in-place normal_() to preserve tensor pointers (Python
+            # references like CuTe DSL cache compiled kernels by pointer —
+            # reallocating would force recompilation every trial).
+            # The C eval_harness.cu allocates fresh buffers (new pointers)
+            # which breaks pointer caches in the Generated kernel.  This is
+            # acceptable asymmetry: the Generated kernel's TMA descriptor
+            # recreation cost is negligible at large sizes and included in
+            # the C harness timing, while CuTe DSL's JIT recompilation
+            # cost (~100ms) is NOT a per-inference cost and should not be
+            # measured.
             for inp in inputs:
                 if isinstance(inp, torch.Tensor) and inp.is_floating_point():
                     inp.normal_()

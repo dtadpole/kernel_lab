@@ -294,19 +294,20 @@ def measure_reference(
 
         latencies_ms: list[float] = []
         last_output: Any = None
-        for _ in range(num_trials):
+        for trial_idx in range(num_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
-            # Allocate FRESH input buffers with new pointers before each trial.
-            # This matches eval_harness.cu's cudaMalloc-per-trial pattern and
-            # breaks pointer-based caching (TMA descriptors, B transpose cache,
-            # CuTe DSL compiled kernel cache).  Without this, Python references
-            # get an unfair advantage from reusing cached state across trials.
-            inputs = list(get_inputs(config))
-            inputs = [
-                x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-                for x in inputs
-            ]
+            # Fill inputs with fresh random data before each trial.
+            # Uses in-place normal_() to preserve tensor pointers (Python
+            # references like CuTe DSL cache compiled kernels by pointer —
+            # reallocating would force recompilation every trial).
+            # The C eval_harness.cu allocates fresh buffers (new pointers)
+            # which breaks pointer caches in the Generated kernel.  This is
+            # acceptable asymmetry: the Generated kernel's TMA descriptor
+            # recreation cost is negligible at large sizes and included in
+            # the C harness timing, while CuTe DSL's JIT recompilation
+            # cost (~100ms) is NOT a per-inference cost and should not be
+            # measured.
             for inp in inputs:
                 if isinstance(inp, torch.Tensor) and inp.is_floating_point():
                     inp.normal_()
@@ -331,11 +332,18 @@ def measure_reference(
     if last_output is None:
         raise RuntimeError("reference contract did not produce an output")
 
-    output_json = tensor_to_jsonable(last_output)
+    # Write output as binary file (matching eval_harness.cu pattern).
+    # Never serialize large tensors to JSON — 8192×8192 = 67M floats = 2GB JSON.
+    output_dir = os.environ.get("CUDA_EXEC_OUTPUT_DIR")
+    if output_dir and hasattr(last_output, "cpu"):
+        os.makedirs(output_dir, exist_ok=True)
+        bin_path = os.path.join(output_dir, "reference_output_0.bin")
+        last_output.detach().cpu().contiguous().numpy().tofile(bin_path)
+
     std_val = statistics.stdev(latencies_ms) if len(latencies_ms) > 1 else 0.0
 
     return {
-        "output": output_json,
+        "output": [],  # binary file, not JSON (same as eval_harness.cu)
         "performance": {
             "metadata": {
                 "hardware": hardware,

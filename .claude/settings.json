@@ -1,7 +1,6 @@
 {
   "enabledPlugins": {
-    "kb@kernel-lab": true,
-    "cuda@kernel-lab": true
+    "ik@kernel-lab": true
   },
   "extraKnownMarketplaces": {
     "kernel-lab": {

@@ -5,14 +5,9 @@
   },
   "plugins": [
     {
-      "name": "kb",
-      "source": "./kb",
-      "description": "CUDA documentation search, reading, and index management via CLI"
-    },
-    {
-      "name": "cuda",
-      "source": "./cuda",
-      "description": "Remote CUDA kernel compilation, evaluation, profiling, and execution via the cuda_exec service"
+      "name": "ik",
+      "source": "./ik",
+      "description": "Kernel optimization toolkit — CUDA execution, documentation search, and autonomous optimization"
     }
   ]
 }

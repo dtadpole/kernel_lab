@@ -1,5 +1,5 @@
 ---
-name: optimize-kernel
+name: optimize
 description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify, commit
 user-invocable: true
 disable-model-invocation: true
@@ -22,9 +22,9 @@ one, verifies improvement, and commits if successful.
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
 ```
-/optimize-kernel fa4
-/optimize-kernel matmul --impl reference
-/optimize-kernel fa4 --target sm90
+/ik:optimize fa4
+/ik:optimize matmul --impl reference
+/ik:optimize fa4 --target sm90
 ```
 
 ## Auto-Detection
@@ -47,7 +47,7 @@ Before starting, know where things live:
 | Generated code | `data/generated/{arch}/{kernel}/generated.cu` |
 | Results | `results/{arch}/{gpu_name}/{kernel}/` |
 | Roofline specs | `docs/roofline/` |
-| NVIDIA docs (local) | Use `/kb:docs` to search indexed CUDA Toolkit docs |
+| NVIDIA docs (local) | Use `/ik:docs` to search indexed CUDA Toolkit docs |
 | NVIDIA docs (online) | Web search for official NVIDIA docs, PTX ISA, tuning guides |
 
 ## The Loop
@@ -65,8 +65,8 @@ most recent.
 
 Then run a fresh evaluation to get ground-truth numbers for this session:
 
-1. Use `/cuda:exec` to **compile** the current generated code
-2. Use `/cuda:exec` to **evaluate** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
+1. Use `/ik:exec` to **compile** the current generated code
+2. Use `/ik:exec` to **evaluate** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
 3. Record latency for generated code vs reference (CuTe DSL) vs cuDNN/cuBLAS
 
 **After every full evaluation, output a performance comparison table** like the
@@ -81,16 +81,6 @@ Phase 5. Use box-drawing characters for the table border.
 │ mha-causal-b8-s4096    │  565.5  (0.972)  │  549.2  (1.001)  │  381.7  (1.440)  │  0.97×   │  0.67×   │
 ├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
 │ mha-causal-b4-s8192    │  599.8  (1.833)  │  558.6  (1.968)  │  388.7  (2.829)  │  0.93×   │  0.65×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-causal-b2-s16384   │  619.3  (3.551)  │  591.2  (3.720)  │  412.8  (5.327)  │  0.95×   │  0.67×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-noncausal-b8-s4096 │  625.2  (1.759)  │  647.1  (1.699)  │  432.9  (2.540)  │  1.04×   │  0.69×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-noncausal-b4-s8192 │  616.3  (3.568)  │  633.3  (3.472)  │  452.2  (4.863)  │  1.03×   │  0.73×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-noncausal-b2-s16384│  597.2  (7.365)  │  655.2  (6.712)  │  469.4  (9.370)  │  1.10×   │  0.79×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ % of peak (best cfg)   │      78.2%       │      81.9%       │      58.7%       │          │ 800.0TF  │
 └────────────────────────┴──────────────────┴──────────────────┴──────────────────┴──────────┴──────────┘
 ```
 
@@ -101,7 +91,6 @@ Column definitions:
 - **% of peak**: Best config's TFLOPS / GPU theoretical peak
 - Header row 1: GPU model, host name. Row 2: GPU index, torch version
 - Reference columns show library version: cuDNN version, flash-attn-4 version
-- Reference columns show library version: cuDNN version, flash-attn-4 version
 
 #### 1b. Profile Selectively
 
@@ -110,7 +99,7 @@ are most representative or most interesting based on the evaluation results:
 - The config with the **largest gap** vs reference/cuDNN (biggest opportunity)
 - One **representative** config (e.g., the most common batch/seq_len combo)
 
-Use `/cuda:exec` to **profile** with NCU on the selected config(s):
+Use `/ik:exec` to **profile** with NCU on the selected config(s):
 - Profile the **generated** kernel
 - Profile the **reference** kernel (CuTe DSL side) on the same config
 
@@ -125,7 +114,7 @@ Collect key NCU metrics:
 
 #### 1c. Examine Assembly
 
-Use `/cuda:inspect` to review:
+Use `/ik:inspect` to review:
 - **SASS** — actual GPU instructions, look for inefficiencies
 - **PTX** — compiler input, check for unnecessary barriers or redundant ops
 - **Resource usage** — registers per thread, shared memory, spill bytes
@@ -154,7 +143,7 @@ which hardware resource is the bottleneck:
 **Documentation is the ground truth. Always consult docs before forming
 hypotheses.** Use two complementary channels:
 
-**Local indexed docs** — `/kb:docs`:
+**Local indexed docs** — `/ik:docs`:
 - CUDA C++ Programming Guide (memory model, warp-level primitives, async copy)
 - PTX ISA Reference (instruction semantics, latency, constraints)
 - CUDA Best Practices Guide / Tuning Guide
@@ -258,7 +247,7 @@ idea to implement first.
 
 ### Phase 5: Verify
 
-1. **Compile** the modified code via `/cuda:exec`
+1. **Compile** the modified code via `/ik:exec`
    - Check compile output: register count, spill bytes, shared memory
    - If compile fails, fix and retry (up to 3 compile attempts)
    - If register spills increased substantially, reconsider the approach

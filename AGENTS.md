@@ -8,12 +8,11 @@ See `docs/SYSTEM_DESIGN.md` for the multi-agent architecture (Supervisor / Solve
 
 ## Current components
 
-- `cuda_exec/` — FastAPI-based remote CUDA execution service
-- `cuda_agent/` — MCP-based CUDA kernel optimization agent (uses cuda_exec via MCP tools)
+- `cuda_exec/` — CUDA kernel compile/evaluate/profile engine (FastAPI server + direct Python API)
 - `doc_retrieval/` — NVIDIA CUDA Toolkit document retrieval system (BM25 + dense search)
-- `plugins/` — Claude Code / Agent SDK plugins (MCP servers + Skills)
-  - `plugins/kb/` — Knowledge search (doc retrieval MCP server)
-  - `plugins/cuda/` — CUDA Toolkit execution service (compile/evaluate/profile MCP server)
+- `plugins/ik/` — Unified Claude Code plugin (CLI-based skills, no MCP server)
+  - Skills: `exec` (compile/evaluate/profile), `inspect` (review results), `docs` (search NVIDIA docs), `index` (manage search index), `optimize` (autonomous optimization loop)
+- `plugins/deprecated/` — Archived plugins (`cuda/`, `kb/`) replaced by `ik`
 
 ## Repo-level conventions
 
@@ -166,7 +165,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 #### Infrastructure
 
 - Host inventory and service-to-host mapping live in `conf/hosts/default.yaml` (single source of truth)
-- Deploy CLIs: `plugins/cuda/deploy/cli.py` (cuda_exec), `plugins/kb/deploy/cli.py` (kb_embed)
+- Deploy CLIs: `plugins/deprecated/cuda/deploy/cli.py` (cuda_exec), `plugins/deprecated/kb/deploy/cli.py` (kb_embed)
 - Deploy CLIs require PyYAML — run with `.venv/bin/python`, not system `python3` (Meta devvms lack PyYAML and block pip)
 
 #### Host-specific constraints
@@ -180,10 +179,10 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 #### Deploying to an online host
 
 ```bash
-.venv/bin/python plugins/cuda/deploy/cli.py deploy <host>
-.venv/bin/python plugins/cuda/deploy/cli.py start <host>
-.venv/bin/python plugins/kb/deploy/cli.py deploy <host>
-.venv/bin/python plugins/kb/deploy/cli.py start <host>
+.venv/bin/python plugins/deprecated/cuda/deploy/cli.py deploy <host>
+.venv/bin/python plugins/deprecated/cuda/deploy/cli.py start <host>
+.venv/bin/python plugins/deprecated/kb/deploy/cli.py deploy <host>
+.venv/bin/python plugins/deprecated/kb/deploy/cli.py start <host>
 ```
 
 #### Deploying to an offline host (e.g., h8_4)
@@ -191,7 +190,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 The deploy CLI assumes internet on the target. For offline hosts:
 
 1. Run deploy CLI — code sync succeeds, dependency install fails at step 3:
-   `.venv/bin/python plugins/cuda/deploy/cli.py deploy h8_4`
+   `.venv/bin/python plugins/deprecated/cuda/deploy/cli.py deploy h8_4`
 2. Rsync venvs from an online host (e.g., h8_3):
    ```bash
    rsync -az ~/.cuda_exec_service/.venv/ devvm8491:~/.cuda_exec_service/.venv/
@@ -327,12 +326,13 @@ much slower kernel (181 TFLOPS instead of 600+ TFLOPS). Always set both:
 CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH python bench_script.py
 ```
 
-### 10. Plugins
+### 10. Plugin: `ik`
 
-- Plugins live in `plugins/` — each is a Claude Code plugin with `.claude-plugin/plugin.json`
-- Each plugin can contain: MCP servers (`.mcp.json`), Skills (`skills/`), hooks, agents
-- Plugins work in both Claude Code CLI (`--plugin-dir`) and Agent SDK (`mcp_servers={}`)
-- MCP servers use the project's `.venv/bin/python` and `PYTHONPATH` set to repo root
+- Single unified plugin at `plugins/ik/` — Claude Code plugin with `.claude-plugin/plugin.json`
+- CLI-only: all skills use bash/Python CLI commands, no MCP server
+- Skills: `exec`, `inspect`, `docs`, `index`, `optimize`
+- Invocation: `/ik:exec`, `/ik:inspect`, `/ik:docs`, `/ik:index`, `/ik:optimize`
+- Old plugins (`cuda`, `kb`) archived in `plugins/deprecated/`
 
 ### 11. Git worktrees
 

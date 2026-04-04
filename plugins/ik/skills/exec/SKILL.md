@@ -1,0 +1,119 @@
+---
+name: exec
+description: Compile, evaluate, and profile CUDA kernels on local GPUs
+user-invocable: true
+argument-hint: <action> [options]
+---
+
+# CUDA Kernel Execution (Local)
+
+Compile, evaluate, and profile CUDA kernels on local GPUs by calling `cuda_exec` handlers directly via Python CLI.
+
+## GPU Selection
+
+Set `CUDA_VISIBLE_DEVICES` to select the GPU. Check `CLAUDE.md` or `AGENTS.md` for the assigned GPU indices for the current host.
+
+## Actions
+
+All commands run from the project root:
+
+```bash
+cd /home/zhenc/kernel_lab
+```
+
+### Compile
+
+```bash
+CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
+from cuda_exec.main import compile_endpoint
+from cuda_exec.models import CompileRequest
+import json
+
+req = CompileRequest(
+    metadata={'run_tag': 'optim_001', 'version': 'v1', 'direction_id': 7, 'direction_slug': 'vector-add', 'turn': 1},
+    reference_files={'cutedsl.py': open('data/fixtures/sm90/vecadd/cutedsl.py').read()},
+    generated_files={'generated.cu': open('data/generated/sm90/vecadd/generated.cu').read()},
+)
+resp = compile_endpoint(req)
+print(json.dumps(resp.model_dump(), indent=2, default=str))
+"
+```
+
+Returns: `all_ok`, `artifacts` (ptx, sass, resource_usage), `tool_outputs` (nvcc/ptxas stderr).
+
+### Evaluate
+
+```bash
+CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
+from cuda_exec.main import evaluate_endpoint
+from cuda_exec.models import EvaluateRequest
+import json
+
+req = EvaluateRequest(
+    metadata={'run_tag': 'optim_001', 'version': 'v1', 'direction_id': 7, 'direction_slug': 'vector-add', 'turn': 1},
+    configs=json.load(open('data/fixtures/sm90/vecadd/configs.json')),
+)
+resp = evaluate_endpoint(req)
+print(json.dumps(resp.model_dump(), indent=2, default=str))
+"
+```
+
+Returns: `all_ok`, `configs` with per-config `status`, `correctness`, `performance`.
+
+### Profile
+
+```bash
+CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
+from cuda_exec.main import profile_endpoint
+from cuda_exec.models import ProfileRequest
+import json
+
+req = ProfileRequest(
+    metadata={'run_tag': 'optim_001', 'version': 'v1', 'direction_id': 7, 'direction_slug': 'vector-add', 'turn': 1},
+    configs={'vec1d-n65536': {'shape': [65536], 'rank': 1, 'input_size': 65536, 'shape_kind': '1d'}},
+    side='generated',
+)
+resp = profile_endpoint(req)
+print(json.dumps(resp.model_dump(), indent=2, default=str))
+"
+```
+
+Returns: `all_ok`, `configs` with per-config `status`, `summary` (NCU metrics).
+
+## Workflow
+
+1. **Compile** once per turn with reference + generated source files
+2. **Evaluate** against all configs — check correctness and latency
+3. **Profile** selectively (1-2 configs) — NCU hardware metrics
+
+## Rules
+
+- Compile exactly once per turn before evaluate or profile
+- New source code requires a new turn (increment `metadata.turn`)
+- Old turns are immutable — never recompile on a previous turn number
+- One compile fans out to many evaluate/profile calls with different configs
+
+## Metadata
+
+Every action requires a `metadata` dict:
+```json
+{
+  "run_tag": "optim_001",
+  "version": "v1",
+  "direction_id": 7,
+  "direction_slug": "vector-add",
+  "turn": 1
+}
+```
+
+## Available Fixtures
+
+| Fixture | Description | Path |
+|---------|-------------|------|
+| `vecadd` | BF16 vector addition | `data/fixtures/{arch}/vecadd/` |
+| `matmul` | Matrix multiplication | `data/fixtures/{arch}/matmul/` |
+| `fa4` | Flash Attention v4 | `data/fixtures/{arch}/fa4/` |
+
+## Reviewing Results
+
+Use `/ik:inspect` to review compile, evaluate, and profile results from past turns.

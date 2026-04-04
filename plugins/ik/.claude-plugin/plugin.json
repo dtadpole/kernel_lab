@@ -1,0 +1,8 @@
+{
+  "name": "ik",
+  "description": "Kernel optimization toolkit — CUDA execution, documentation search, and autonomous optimization",
+  "version": "0.1.0",
+  "author": {
+    "name": "D.Tadpole"
+  }
+}

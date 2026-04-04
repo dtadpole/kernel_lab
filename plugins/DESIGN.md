@@ -1,40 +1,32 @@
-# Plugin Design: KB & CUDA
+# Plugin Design: `ik`
 
-Two Claude Code plugins for the kernel_lab project.
-
----
-
-## KB Plugin (`knowledge-search`)
-
-MCP Server: 1 (BM25/dense/hybrid search over indexed NVIDIA docs)
-
-| Skill | User Intent | MCP Tools Used |
-|-------|-------------|----------------|
-| `search` | Query documentation | search_docs, lookup_doc_section, browse_toc, read_section |
-| `ingest` | Add new documents to the index | parse + index pipeline |
-| `rebuild` | Rebuild the entire search index | full reindex pipeline |
-| `download` | Fetch latest raw docs from NVIDIA | downloader pipeline |
-
-Invocation: `/kb:search`, `/kb:ingest`, `/kb:rebuild`, `/kb:download`
+Single unified Claude Code plugin for kernel_lab. CLI-only — no MCP server.
 
 ---
 
-## CUDA Plugin (`cuda-toolkit-exec`)
+## Skills
 
-MCP Server: 1 (proxies cuda_exec HTTP API + local data store)
-
-| Skill | User Intent | MCP Tools Used |
+| Skill | User Intent | Implementation |
 |-------|-------------|----------------|
-| `exec` | Compile, evaluate, profile a kernel | compile, evaluate, profile, execute, read_file |
-| `inspect` | Review results from past runs | get_compile_data, get_evaluate_data, get_profile_data, get_data_point |
-| `deploy` | Start, stop, health-check the cuda_exec service | shell commands (uvicorn lifecycle, /healthz) |
+| `exec` | Compile, evaluate, profile a kernel locally | Python CLI: calls `cuda_exec` handlers directly |
+| `inspect` | Review results from past runs | File reads from `~/.cuda_exec/` data store |
+| `docs` | Search NVIDIA documentation | Python CLI: `doc_retrieval` module |
+| `index` | Manage documentation search index | Python CLI: `doc_retrieval` download/parse/index |
+| `optimize` | Autonomous kernel optimization loop | Orchestration: calls exec, inspect, docs |
 
-Invocation: `/cuda:exec`, `/cuda:inspect`, `/cuda:deploy`
+Invocation: `/ik:exec`, `/ik:inspect`, `/ik:docs`, `/ik:index`, `/ik:optimize`
 
 ---
 
 ## Design Principles
 
-- **One skill = one distinct user intent.** Steps that always chain together (compile → evaluate) belong in the same skill. Actions a user initiates independently (run vs. inspect vs. deploy) are separate skills.
-- **Skills orchestrate tools, not mirror them.** A skill may use many MCP tools; an MCP tool may be used by multiple skills. The mapping is not 1:1.
-- **MCP tools are not user-facing.** Users invoke skills (`/plugin:skill`); Claude decides which MCP tools to call during execution.
+- **CLI-only.** Skills describe bash/Python commands for Claude to run. No MCP server overhead.
+- **One skill = one distinct user intent.** Steps that always chain together (compile → evaluate) belong in the same skill. Actions a user initiates independently (run vs. inspect) are separate skills.
+- **Local execution.** All CUDA work runs on local GPUs via `CUDA_VISIBLE_DEVICES`. No remote dispatch.
+- **Skills orchestrate, not mirror.** `optimize` calls `exec`, `inspect`, and `docs` — skills compose.
+
+---
+
+## Deprecated
+
+Old plugins (`plugins/deprecated/cuda/`, `plugins/deprecated/kb/`) had MCP servers and remote dispatch. Replaced by `ik` for simplicity.

@@ -988,6 +988,17 @@ static __nv_bfloat16* s_B_t = nullptr;
 static size_t s_B_t_size = 0;
 static const __nv_bfloat16* s_B_last = nullptr;  /* cache: skip transpose if same B */
 
+/* Cached TMA descriptors — avoid per-call cuTensorMapEncodeTiled overhead.
+ * cuTensorMapEncodeTiled is a CPU driver call (~1-3 us each).  Two calls per
+ * kernel_run = 2-6 us overhead, which is 20-60% of total time at 256×256
+ * but negligible at 8192×8192.  Cache and only recreate when pointer changes. */
+static CUtensorMap s_tma_A_big, s_tma_B_big;
+static const void* s_tma_A_ptr_big = nullptr;
+static const void* s_tma_B_ptr_big = nullptr;
+static CUtensorMap s_tma_A_small, s_tma_B_small;
+static const void* s_tma_A_ptr_small = nullptr;
+static const void* s_tma_B_ptr_small = nullptr;
+
 extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
                           __nv_bfloat16** outputs, int num_outputs,
                           int n, cudaStream_t stream) {
@@ -1030,34 +1041,46 @@ extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
     bool use_big = (M >= TILE_M && N >= TILE_N && K >= TILE_K);
 
     if (use_big) {
-        CUtensorMap tma_A, tma_B;
-        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)M}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={TILE_K,TILE_M}; cuuint32_t el[2]={1,1};
-          if (s_encodeTiled(&tma_A,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)A,dims,str,box,el,
-              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
-              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -2; }
-        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)N}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={TILE_K,N_SUB}; cuuint32_t el[2]={1,1};
-          if (s_encodeTiled(&tma_B,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)s_B_t,dims,str,box,el,
-              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
-              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -3; }
+        /* Cache TMA descriptors — only recreate when data pointer changes */
+        if (s_tma_A_ptr_big != (const void*)A) {
+            cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)M}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={TILE_K,TILE_M}; cuuint32_t el[2]={1,1};
+            if (s_encodeTiled(&s_tma_A_big,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)A,dims,str,box,el,
+                CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -2;
+            s_tma_A_ptr_big = (const void*)A;
+        }
+        if (s_tma_B_ptr_big != (const void*)s_B_t) {
+            cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)N}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={TILE_K,N_SUB}; cuuint32_t el[2]={1,1};
+            if (s_encodeTiled(&s_tma_B_big,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)s_B_t,dims,str,box,el,
+                CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -3;
+            s_tma_B_ptr_big = (const void*)s_B_t;
+        }
         static bool cfg_big = false;
         if (!cfg_big) { cudaFuncSetAttribute(wgmma_matmul, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES); cfg_big = true; }
         int nTilesM=M/TILE_M, nTilesN=N/TILE_N, totalTiles=nTilesM*nTilesN;
         int gridSize = (totalTiles < s_numSMs) ? totalTiles : s_numSMs;
-        wgmma_matmul<<<gridSize, THREADS, SMEM_BYTES, stream>>>(C,M,N,K,totalTiles,nTilesN,tma_A,tma_B);
+        wgmma_matmul<<<gridSize, THREADS, SMEM_BYTES, stream>>>(C,M,N,K,totalTiles,nTilesN,s_tma_A_big,s_tma_B_big);
     } else {
-        CUtensorMap tma_A, tma_B;
-        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)M}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={SMALL_TILE_K,(cuuint32_t)SMALL_TILE_M}; cuuint32_t el[2]={1,1};
-          if (s_encodeTiled(&tma_A,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)A,dims,str,box,el,
-              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
-              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -2; }
-        { cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)N}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={SMALL_TILE_K,(cuuint32_t)SMALL_TILE_N}; cuuint32_t el[2]={1,1};
-          if (s_encodeTiled(&tma_B,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)s_B_t,dims,str,box,el,
-              CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
-              CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -3; }
+        /* Cache TMA descriptors — only recreate when data pointer changes */
+        if (s_tma_A_ptr_small != (const void*)A) {
+            cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)M}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={SMALL_TILE_K,(cuuint32_t)SMALL_TILE_M}; cuuint32_t el[2]={1,1};
+            if (s_encodeTiled(&s_tma_A_small,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)A,dims,str,box,el,
+                CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -2;
+            s_tma_A_ptr_small = (const void*)A;
+        }
+        if (s_tma_B_ptr_small != (const void*)s_B_t) {
+            cuuint64_t dims[2]={(cuuint64_t)K,(cuuint64_t)N}; cuuint64_t str[1]={(cuuint64_t)K*2}; cuuint32_t box[2]={SMALL_TILE_K,(cuuint32_t)SMALL_TILE_N}; cuuint32_t el[2]={1,1};
+            if (s_encodeTiled(&s_tma_B_small,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)s_B_t,dims,str,box,el,
+                CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)!=CUDA_SUCCESS) return -3;
+            s_tma_B_ptr_small = (const void*)s_B_t;
+        }
         static bool cfg_small = false;
         if (!cfg_small) { cudaFuncSetAttribute(wgmma_matmul_small, cudaFuncAttributeMaxDynamicSharedMemorySize, SMALL_SMEM_BYTES); cfg_small = true; }
         int nTilesM=M/SMALL_TILE_M, nTilesN=N/SMALL_TILE_N, totalTiles=nTilesM*nTilesN;
-        wgmma_matmul_small<<<totalTiles, THREADS, SMALL_SMEM_BYTES, stream>>>(C,M,N,K,totalTiles,nTilesN,tma_A,tma_B);
+        wgmma_matmul_small<<<totalTiles, THREADS, SMALL_SMEM_BYTES, stream>>>(C,M,N,K,totalTiles,nTilesN,s_tma_A_small,s_tma_B_small);
     }
 
     return 0;

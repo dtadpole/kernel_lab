@@ -2,6 +2,10 @@
 
 A repository for kernel optimization experiments and related tooling.
 
+## System design
+
+See `docs/SYSTEM_DESIGN.md` for the multi-agent architecture (Supervisor / Solver / Harness / Evaluator / Reflector) and the two-repo split (kernel-lab + kernel-lab-kb).
+
 ## Current components
 
 - `cuda_exec/` — FastAPI-based remote CUDA execution service
@@ -288,10 +292,15 @@ Each H100 host has 8 GPUs (0-7). Allocations are fixed to avoid contention:
 
 This applies to **both h8_3 and h8_4** identically. See `conf/hosts/default.yaml` for the canonical config.
 
-**When running benchmarks locally**, always set `CUDA_VISIBLE_DEVICES=4` (or `5`):
+**When running benchmarks locally**, always set `CUDA_VISIBLE_DEVICES=4` (or `5`).
+
+**cuDNN requires `libnvrtc.so.12`** for JIT-compiling flash attention kernels.
+On h8_3/h8_4, this library is at `/usr/local/cuda-12.8/lib64/` but not on the
+default `LD_LIBRARY_PATH`. Without it, cuDNN SDPA silently falls back to a
+much slower kernel (181 TFLOPS instead of 600+ TFLOPS). Always set both:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 python bench_script.py
+CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH python bench_script.py
 ```
 
 ### 10. Plugins
@@ -407,6 +416,19 @@ The harness implements:
 
 Running directly (e.g., `torch.mm()` in a Python loop) inflates numbers by up to 15% at large
 sizes due to warm L2, causing unfair comparisons.
+
+#### Never write custom benchmark scripts
+
+**Never** write ad-hoc Python or CUDA benchmark scripts (e.g., `bench_all.py`, standalone
+timing loops). All benchmarking **must** go through the existing eval infrastructure:
+
+1. **Generated kernels**: compile via `compile.sh` + run via `eval_harness.cu`
+2. **Reference/cuDNN**: run via `evaluate.py` (which calls the harness + reference modules)
+3. **Local convenience**: use the Makefile targets or cuda_exec service API
+
+Custom scripts bypass cold-L2 flushing, fresh-pointer allocation, and fair comparison
+methodology. Results from custom scripts are unreliable and must not be used for
+optimization decisions.
 
 #### Correctness is a hard gate
 

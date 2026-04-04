@@ -60,7 +60,10 @@ NVCC="${CUDA_HOME}/bin/nvcc"
 PTXAS="${CUDA_HOME}/bin/ptxas"
 CUOBJDUMP="${CUDA_HOME}/bin/cuobjdump"
 NVDISASM="${CUDA_HOME}/bin/nvdisasm"
-PTXAS_ARCH="${PTXAS_ARCH:-sm_120}"
+# Default PTXAS_ARCH to match the ARCH passed to nvcc.
+# nvcc generates .target without the 'a' suffix (e.g., sm_90 instead of sm_90a),
+# but ptxas needs the 'a' to enable architecture-specific features like WGMMA.
+PTXAS_ARCH="${PTXAS_ARCH:-${ARCH}}"
 PTXAS_FLAGS="${PTXAS_FLAGS:--v}"
 NVDISASM_FLAGS="${NVDISASM_FLAGS:---print-code --print-instruction-encoding --print-life-ranges}"
 

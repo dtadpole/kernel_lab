@@ -297,8 +297,16 @@ def measure_reference(
         for _ in range(num_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
-            # Re-randomize inputs before each trial to prevent kernels from
-            # caching preprocessed results across calls (outside timed region)
+            # Allocate FRESH input buffers with new pointers before each trial.
+            # This matches eval_harness.cu's cudaMalloc-per-trial pattern and
+            # breaks pointer-based caching (TMA descriptors, B transpose cache,
+            # CuTe DSL compiled kernel cache).  Without this, Python references
+            # get an unfair advantage from reusing cached state across trials.
+            inputs = list(get_inputs(config))
+            inputs = [
+                x.cuda(device=device) if isinstance(x, torch.Tensor) else x
+                for x in inputs
+            ]
             for inp in inputs:
                 if isinstance(inp, torch.Tensor) and inp.is_floating_point():
                     inp.normal_()

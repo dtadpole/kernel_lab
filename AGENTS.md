@@ -403,16 +403,26 @@ data/
 
 ### 12. Benchmarking rules
 
-#### All benchmarks must go through the eval harness
+#### All benchmarks must go through the unified eval harness
 
-All code — cuDNN/cuBLAS, CuTe DSL, and Generated CUDA — **must** be run through
-the eval harness (`cuda_exec/scripts/eval_harness.cu`). **Never** run benchmarks
-directly (e.g., via standalone Python scripts like `bench_all_three.py` or `torch.mm()`).
+All code — cuDNN/cuBLAS, CuTe DSL, and Generated CUDA — **must** be timed through
+the unified eval harness. There are two harness implementations that enforce
+identical methodology:
 
-The harness implements:
-- **Cold-L2 conditions**: L2 flush via `cudaMemsetAsync(flush_buf, 0, l2_size)` before each trial
-- **Fresh input buffers**: `cudaMalloc` + `fill_random_bf16` per trial (new pointers break pointer caches)
-- **Fair comparison**: identical measurement methodology for all three implementations
+1. **C harness** (`eval_harness.cu`): for Generated CUDA kernels via `kernel_run()`
+2. **Python harness** (`measure_reference()` in `eval_support.py`): for CuTe DSL
+   and cuDNN/cuBLAS Python modules
+
+Both harnesses enforce:
+- **Cold-L2 conditions**: L2 flush before each trial
+- **Fresh input buffers**: new allocations per trial (new pointers break pointer caches)
+- **Standardized timing**: CUDA events, 5 warmup + 10 trials (configurable)
+- **Fair comparison**: identical methodology across all three implementations
+
+**Fixture files (`cutedsl.py`, `cudnn.py`) must NOT contain their own timing code.**
+They define only `Model`, `get_inputs()`, and `get_init_inputs()` — the harness
+provides all measurement infrastructure. Any `main()`, timing loop, or CUDA event
+code in fixture files is a bug and must be removed.
 
 Running directly (e.g., `torch.mm()` in a Python loop) inflates numbers by up to 15% at large
 sizes due to warm L2, causing unfair comparisons.

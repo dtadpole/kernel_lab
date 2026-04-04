@@ -244,6 +244,7 @@ compile: ensure-venv ## Stage reference + generated files and run the 5-step com
 	bash "$(COMPILE_SH)" \
 		--source "$(WORKSPACE)/inputs/generated/generated.cu" \
 		--output "$(ARTIFACTS)/compile.attempt_001.generated.bin" \
+		--arch "$(ARCH)" \
 		$$HARNESS_FLAG
 	# Write the compile manifest so evaluate/profile can find the binary
 	cat > "$(STATE)/compile.attempt_001.json" <<'MANIFEST_EOF'

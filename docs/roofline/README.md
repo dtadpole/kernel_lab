@@ -8,7 +8,7 @@ Peak compute and memory bandwidth specs for roofline analysis.
 |---|---|---|---|
 | A100 80GB SXM | 312 | 2,039 | 153 |
 | H100 SXM (NVIDIA spec) | 989.5 | 3,350 | 295 |
-| H100 SXM (Meta 650W cap) | ~712 burst | 2,447 | ~291 |
+| H100 SXM (Meta 650W cap) | 800 | 2,447 | 327 |
 | B200 (HGX) | 2,250 | 7,700 | 292 |
 | RTX 5090 | 209.5 | 1,792 | 117 |
 | **RTX PRO 6000 BW** | **503.8** | **1,792** | **281** |

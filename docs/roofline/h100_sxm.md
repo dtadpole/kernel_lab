@@ -69,8 +69,10 @@ characteristics:
 
 - **TDP was originally 500W**, later increased to **650W** across all Ads
   dedicated reservations. The increase yielded ~10% QPS improvement.
-- **BF16 peak ~800 TFLOPS** is the power-capped value at 500W TDP. At 650W
-  the effective peak is higher but still below the 989.5 TF NVIDIA spec.
+- **BF16 peak 800 TFLOPS** is the official rated value at this TDP/SKU
+  configuration (from NVIDIA spec sheet for this variant, hardcoded in
+  Meta's Ads MFU profiler). This is the correct roofline ceiling for any
+  H100 running at 650W power cap.
 - Memory bandwidth of **2,400 GB/s** corresponds to **HBM3 with 6144-bit bus
   @ ~1562 MHz** (slightly downclocked from standard 1593 MHz). Note: some
   internal docs label this as "HBM2e" but 2,400 GB/s is not achievable with
@@ -122,18 +124,18 @@ but shares the same H100 SXM hardware.
 
 ### Effective Peak at Current Power Limit
 
+The rated BF16 peak for this SKU at 650W is **800 TFLOPS** (from NVIDIA
+spec sheet, hardcoded in Meta's Ads MFU profiler). This is the correct
+roofline ceiling — not the 989.5 TFLOPS NVIDIA reference spec which
+assumes 700W TDP.
+
 The GPU is **power-limited, not thermal-limited**. Under sustained BF16
 matmul load, the 650W power limit forces SM clock down from 1980 MHz to
-~1300 MHz.
+~1300 MHz sustained (bursts to ~1425 MHz). Temperature stays at 50–55°C.
 
-```
-Theoretical peak @ 1980 MHz:  989.5 TFLOPS (NVIDIA spec)
-Clock-corrected @ 1300 MHz:   989.5 × (1300/1980) = 650 TFLOPS (sustained)
-Clock-corrected @ 1425 MHz:   989.5 × (1425/1980) = 712 TFLOPS (burst)
-```
-
-Measured cuBLAS sustained performance: **~700 TFLOPS** (short bursts to ~750).
-This is consistent with the clock-corrected estimate.
+Measured cuBLAS performance: **~740 TFLOPS** (short benchmark, 20 trials).
+This is **92.5% of the 800 TFLOPS peak** — consistent with expected
+pipeline overhead (epilogue, barriers, K-loop drain).
 
 ### What It Would Take to Reach 989.5 TFLOPS
 

@@ -1,18 +1,20 @@
 /*
- * Flash Attention forward pass — BF16, SM90 WGMMA kernel (Phase 4: RS mode PV).
- * Unified 128 threads (1 warp group) + double-buffered K + dedicated V.
+ * Flash Attention forward pass — BF16, SM90 TMA + WGMMA kernel.
+ * Unified 128 threads (1 warp group) + TMA loads + double-buffered K.
  *
- * Architecture: 128 threads, all threads cooperate on both cp.async
- * loads and WGMMA compute. No warp specialization.
+ * Architecture: 128 threads, thread 0 issues TMA loads, all threads
+ * participate in WGMMA compute. TMA produces SWIZZLE_128B layout
+ * natively — no software address swizzling needed.
  *
- * Pipeline: V[i] and K[i+1] loads overlap with QK[i] + softmax compute.
- * V has its own dedicated SMEM buffer (no longer reuses K).
+ * Pipeline: V[i] and K[i+1] TMA loads overlap with QK[i] + softmax.
+ * PV GEMM uses WGMMA RS mode: P stays in registers after softmax.
  *
- * PV GEMM uses WGMMA RS mode: P stays in registers after softmax,
- * eliminating the P SMEM roundtrip (8KB store + fence + sync + read).
+ * DIM=128 split into 2×64 for SWIZZLE_128B (boxDim[0]*2B = 128B).
  *
  * Constants: BLOCK_Q=64, BLOCK_KV=64, DIM=128, 128 threads.
- * SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB.
+ * SMEM: Q_lo(8KB) + Q_hi(8KB) + K0_lo(8KB) + K0_hi(8KB)
+ *     + K1_lo(8KB) + K1_hi(8KB) + V_lo(8KB)  + V_hi(8KB)
+ *     + mbarriers(32B) = 64KB + 32B
  *
  * Target: NVIDIA H100 (SM90a, GH100). Compile with -arch=sm_90a.
  *
@@ -28,6 +30,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cfloat>
+#include <dlfcn.h>
+#include <cuda.h>
 
 __device__ __host__ constexpr
 int cdiv(int a, int b) { return (a + b - 1) / b; }
@@ -48,64 +52,64 @@ float fast_rcp(float x) {
     return r;
 }
 
-/* --- Swizzle<3,4,3> (128B swizzle) for B128 WGMMA layout ------------- */
+/* --- mbarrier helpers ------------------------------------------------ */
 
 __device__ __forceinline__
-uint32_t swizzle_B128(uint32_t byte_offset) {
-    /* Swizzle<3,4,3>: XOR bits [4:6] with bits [7:9] of byte address.
-     * Equivalent to: idx128[2:0] ^= idx128[5:3] where idx128 = byte/16. */
-    uint32_t idx = byte_offset >> 4;
-    idx ^= (idx >> 3) & 7;
-    return (idx << 4) | (byte_offset & 0xF);
+void mbarrier_init(uint64_t* mbar, unsigned count) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.init.shared.b64 [%0], %1;"
+                 :: "r"(addr), "r"(count));
 }
 
-/* --- cp.async global -> shared (B128 swizzle layout) ----------------- */
-/*
- * Store a [HEIGHT, WIDTH] bf16 tile from GMEM to SMEM in B128 swizzle
- * layout.  The layout uses 128-byte-wide atoms (64 bf16 per row within
- * each atom).  For WIDTH=128, two atoms are placed per 8-row group:
- *
- *   Group g: atom 0 (cols 0-63)  at SMEM offset g * 2048
- *            atom 1 (cols 64-127) at SMEM offset g * 2048 + 1024
- *
- * Within each atom: 8 rows × 128 bytes/row = 1024 bytes, swizzled.
- * Total SMEM per tile: HEIGHT/8 * 2 * 1024 = HEIGHT * 256 = HEIGHT*WIDTH*2.
- */
+__device__ __forceinline__
+void mbarrier_arrive_expect_tx(uint64_t* mbar, unsigned tx_bytes) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;"
+                 :: "r"(addr), "r"(tx_bytes));
+}
 
-template <int HEIGHT, int WIDTH, int TB_SIZE>
-__device__ inline
-void global_to_shared_B128(uint32_t dst, const nv_bfloat16 *src,
-                           int src_stride, int tid) {
-    constexpr int ATOM_COLS  = 64;                          /* 64 bf16 = 128B */
-    constexpr int ATOM_BYTES = 8 * ATOM_COLS * (int)sizeof(nv_bfloat16); /* 1024 */
-    constexpr int GROUP_BYTES = (WIDTH / ATOM_COLS) * ATOM_BYTES;        /* 2048 for W=128 */
-
-    constexpr int num_elems = 16 / sizeof(nv_bfloat16);     /* 8 bf16 per 16B */
-    constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
-
-    #pragma unroll
-    for (int iter = 0; iter < num_iters; iter++) {
-        const int idx  = (iter * TB_SIZE + tid) * num_elems;
-        const int row  = idx / WIDTH;
-        const int col  = idx % WIDTH;
-
-        /* Atom-local coordinates */
-        const int atom        = col / ATOM_COLS;
-        const int col_in_atom = col % ATOM_COLS;
-        const int group       = row / 8;
-        const int row_in_grp  = row % 8;
-
-        /* Byte offset within atom, then swizzle */
-        const uint32_t atom_byte = row_in_grp * ATOM_COLS * (int)sizeof(nv_bfloat16)
-                                 + col_in_atom * (int)sizeof(nv_bfloat16);
-        const uint32_t dst_addr = dst + group * GROUP_BYTES
-                                      + atom  * ATOM_BYTES
-                                      + swizzle_B128(atom_byte);
-
-        const nv_bfloat16 *src_addr = src + (row * src_stride + col);
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;"
-                     :: "r"(dst_addr), "l"(src_addr));
+__device__ __forceinline__
+void mbarrier_wait_parity(uint64_t* mbar, unsigned phase) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    uint32_t result;
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  mbarrier.try_wait.parity.shared.b64 p, [%1], %2;\n"
+        "  selp.u32 %0, 1, 0, p;\n"
+        "}\n"
+        : "=r"(result) : "r"(addr), "r"(phase));
+    while (result == 0) {
+        asm volatile(
+            "{\n"
+            "  .reg .pred p;\n"
+            "  mbarrier.try_wait.parity.shared.b64 p, [%1], %2;\n"
+            "  selp.u32 %0, 1, 0, p;\n"
+            "}\n"
+            : "=r"(result) : "r"(addr), "r"(phase));
     }
+}
+
+__device__ __forceinline__
+void mbarrier_inval(uint64_t* mbar) {
+    uint32_t addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.inval.shared.b64 [%0];" :: "r"(addr));
+}
+
+/* --- TMA load: cp.async.bulk.tensor.2d ------------------------------- */
+
+__device__ __forceinline__
+void tma_load_2d(void* smem_dst, const void* tma_desc,
+                 int coord0, int coord1, uint64_t* mbar) {
+    uint32_t smem_addr = __cvta_generic_to_shared(smem_dst);
+    uint32_t mbar_addr = __cvta_generic_to_shared(mbar);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+        ".mbarrier::complete_tx::bytes"
+        " [%0], [%1, {%2, %3}], [%4];\n"
+        :: "r"(smem_addr), "l"(tma_desc),
+           "r"(coord0), "r"(coord1), "r"(mbar_addr)
+        : "memory");
 }
 
 /* --- WGMMA synchronization ------------------------------------------ */
@@ -126,7 +130,7 @@ void wgmma_wait_group() {
     asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(N) : "memory");
 }
 
-/* --- WGMMA descriptor construction and advancement ------------------- */
+/* --- WGMMA descriptor construction ---------------------------------- */
 
 __device__ __forceinline__
 uint64_t make_wgmma_desc(uint32_t smem_addr, int stride_bytes) {
@@ -170,6 +174,38 @@ void wgmma_m64n64k16_f32_bf16(float acc[32], uint64_t desc_a, uint64_t desc_b,
       "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
       "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31])
     : "l"(desc_a), "l"(desc_b), "r"(scale_D));
+}
+
+/* --- WGMMA m64n64k16 RS mode (A from registers, B from SMEM) -------- */
+
+__device__ __forceinline__
+void wgmma_m64n64k16_f32_bf16_RS(float acc[32],
+                                  uint32_t a0, uint32_t a1,
+                                  uint32_t a2, uint32_t a3,
+                                  uint64_t desc_b,
+                                  int scale_D) {
+    asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %37, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31},"
+    " {%32, %33, %34, %35},"
+    " %36, p, 1, 1, 1;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31])
+    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+      "l"(desc_b), "r"(scale_D));
 }
 
 /* --- WGMMA m64n128k16 (PV GEMM) ------------------------------------- */
@@ -272,44 +308,66 @@ void fence_view_async_shared() {
 }
 
 /* ======================================================================
- *  WGMMA Flash Attention kernel — Phase 4 (RS mode PV GEMM)
+ *  TMA + WGMMA Flash Attention kernel
  *
  *  128 threads = 1 warp group (warps 0-3).
- *  Double-buffered K: loads K[i+1] during QK[i] + softmax.
- *  Dedicated V buffer: V[i] loads overlap with QK[i] + softmax.
+ *  Thread 0 issues TMA loads; all threads do WGMMA compute.
+ *  Double-buffered K: TMA loads K[i+1] during QK[i] + softmax.
+ *  Dedicated V buffer: V[i] TMA loads overlap with QK[i] + softmax.
  *  PV GEMM: RS mode — P stays in registers, no SMEM roundtrip.
+ *
+ *  SMEM layout (split-DIM: each tile split into lo[0:63] + hi[64:127]):
+ *    Q_lo(8KB) + Q_hi(8KB) = 16KB  (persistent)
+ *    K0_lo(8KB) + K0_hi(8KB) = 16KB (stage 0)
+ *    K1_lo(8KB) + K1_hi(8KB) = 16KB (stage 1)
+ *    V_lo(8KB) + V_hi(8KB) = 16KB   (dedicated)
+ *    mbarriers: 4 × 8B = 32B
+ *    Total: 64KB + 32B
  * ====================================================================== */
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM>
-__launch_bounds__(128, 1)   /* 128 threads, 1 block/SM */
+__launch_bounds__(128, 1)
 __global__
-void flash_attention_wgmma(
+void flash_attention_tma_wgmma(
     const nv_bfloat16 *Q,
     const nv_bfloat16 *K,
     const nv_bfloat16 *V,
     nv_bfloat16 *O,
     int B, int S, int H,
     int len_q, int len_kv,
-    int is_causal)
+    int is_causal,
+    const CUtensorMap *tma_Q,
+    const CUtensorMap *tma_K,
+    const CUtensorMap *tma_V)
 {
-    /* Constants */
-    constexpr int TB_SIZE = 128;
+    constexpr int HALF_DIM = DIM / 2;                        /* 64 */
+    constexpr int HALF_TILE_BYTES = BLOCK_Q * HALF_DIM * sizeof(nv_bfloat16);  /* 8KB */
+    constexpr int KV_HALF_BYTES = BLOCK_KV * HALF_DIM * sizeof(nv_bfloat16);   /* 8KB */
+    constexpr int FULL_Q_BYTES = 2 * HALF_TILE_BYTES;        /* 16KB */
+    constexpr int FULL_KV_BYTES = 2 * KV_HALF_BYTES;         /* 16KB */
 
-    /* SMEM layout (P eliminated — RS mode keeps P in registers):
-     *   Q:    BLOCK_Q * DIM * 2B  = 16KB  (persistent)
-     *   K[0]: BLOCK_KV * DIM * 2B = 16KB  (stage 0)
-     *   K[1]: BLOCK_KV * DIM * 2B = 16KB  (stage 1)
-     *   V:    BLOCK_KV * DIM * 2B = 16KB  (dedicated, loads overlap QK+softmax)
-     *   Total: 64KB */
-    extern __shared__ nv_bfloat16 smem[];
+    /* SMEM layout: split-DIM with 8KB sections */
+    extern __shared__ char smem_raw[];
+    nv_bfloat16 *smem = reinterpret_cast<nv_bfloat16*>(smem_raw);
     const uint32_t smem_base = __cvta_generic_to_shared(smem);
-    const uint32_t Q_smem   = smem_base;
-    const uint32_t K_smem_0 = Q_smem + BLOCK_Q * DIM * sizeof(nv_bfloat16);
-    const uint32_t K_smem_1 = K_smem_0 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
-    const uint32_t V_smem   = K_smem_1 + BLOCK_KV * DIM * sizeof(nv_bfloat16);
+
+    const uint32_t Q_lo_smem  = smem_base;                              /* 0KB */
+    const uint32_t Q_hi_smem  = smem_base + HALF_TILE_BYTES;            /* 8KB */
+    const uint32_t K0_lo_smem = smem_base + 2 * HALF_TILE_BYTES;        /* 16KB */
+    const uint32_t K0_hi_smem = smem_base + 3 * HALF_TILE_BYTES;        /* 24KB */
+    const uint32_t K1_lo_smem = smem_base + 4 * HALF_TILE_BYTES;        /* 32KB */
+    const uint32_t K1_hi_smem = smem_base + 5 * HALF_TILE_BYTES;        /* 40KB */
+    const uint32_t V_lo_smem  = smem_base + 6 * HALF_TILE_BYTES;        /* 48KB */
+    const uint32_t V_hi_smem  = smem_base + 7 * HALF_TILE_BYTES;        /* 56KB */
+
+    /* mbarriers at the end of SMEM */
+    uint64_t *mbar_Q  = reinterpret_cast<uint64_t*>(smem_raw + 8 * HALF_TILE_BYTES);
+    uint64_t *mbar_K0 = mbar_Q + 1;
+    uint64_t *mbar_K1 = mbar_Q + 2;
+    uint64_t *mbar_V  = mbar_Q + 3;
 
     const int tid = threadIdx.x;
-    const int warp_id = tid / 32;         /* 0-3 */
+    const int warp_id = tid / 32;
     const int lane_id = tid % 32;
 
     /* Block -> (batch, head, q_block) mapping */
@@ -319,14 +377,21 @@ void flash_attention_wgmma(
     const int q_block_id  = bid % num_q_blocks;
     const int batch_id    = bs_id / H;
     const int head_id     = bs_id % H;
+    const int bh_id       = batch_id * H + head_id;
     const int seq_stride  = H * DIM;
 
-    const nv_bfloat16 *Q_base = Q + batch_id * S * seq_stride + head_id * DIM
-                                   + q_block_id * BLOCK_Q * seq_stride;
-    const nv_bfloat16 *K_base = K + batch_id * S * seq_stride + head_id * DIM;
-    const nv_bfloat16 *V_base = V + batch_id * S * seq_stride + head_id * DIM;
-    nv_bfloat16       *O_base = O + batch_id * S * seq_stride + head_id * DIM
-                                  + q_block_id * BLOCK_Q * seq_stride;
+    /* Select per-batch/head TMA descriptors */
+    const CUtensorMap *tma_Q_bh = &tma_Q[bh_id];
+    const CUtensorMap *tma_K_bh = &tma_K[bh_id];
+    const CUtensorMap *tma_V_bh = &tma_V[bh_id];
+
+    /* O output base (still uses strided global stores) */
+    nv_bfloat16 *O_base = const_cast<nv_bfloat16*>(Q) - Q + O
+                          + batch_id * S * seq_stride + head_id * DIM
+                          + q_block_id * BLOCK_Q * seq_stride;
+    /* Fix: compute O_base directly */
+    O_base = O + batch_id * S * seq_stride + head_id * DIM
+               + q_block_id * BLOCK_Q * seq_stride;
 
     /* KV iteration bounds */
     const int num_kv_iter = cdiv(len_kv, BLOCK_KV);
@@ -334,15 +399,29 @@ void flash_attention_wgmma(
         ? min(num_kv_iter, cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
         : num_kv_iter;
 
-    /* ---- Load Q to shared memory (all 128 threads) ---- */
-    global_to_shared_B128<BLOCK_Q, DIM, TB_SIZE>(
-        Q_smem, Q_base, seq_stride, tid);
-    asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
+    /* ---- Initialize mbarriers (thread 0 only) ---- */
+    if (tid == 0) {
+        mbarrier_init(mbar_Q,  1);
+        mbarrier_init(mbar_K0, 1);
+        mbarrier_init(mbar_K1, 1);
+        mbarrier_init(mbar_V,  1);
+    }
     __syncthreads();
 
-    /* WGMMA descriptor stride constant */
-    constexpr int QKV_stride_bytes = 8 * DIM * sizeof(nv_bfloat16);      /* 2048 */
+    /* ---- Load Q via TMA (thread 0 only) ---- */
+    if (tid == 0) {
+        mbarrier_arrive_expect_tx(mbar_Q, FULL_Q_BYTES);
+        tma_load_2d(reinterpret_cast<void*>(Q_lo_smem), tma_Q_bh,
+                    0,  q_block_id * BLOCK_Q, mbar_Q);
+        tma_load_2d(reinterpret_cast<void*>(Q_hi_smem), tma_Q_bh,
+                    64, q_block_id * BLOCK_Q, mbar_Q);
+    }
+    mbarrier_wait_parity(mbar_Q, 0);
+
+    /* WGMMA descriptor stride: for split-DIM with SWIZZLE_128B,
+     * each 8-row group = 8 × 64 × 2B = 1024B.
+     * The stride for wgmma descriptor is this group stride. */
+    constexpr int SPLIT_STRIDE_BYTES = 8 * HALF_DIM * sizeof(nv_bfloat16);  /* 1024 */
 
     const float softmax_scale_log2 =
         rsqrtf(static_cast<float>(DIM)) * 1.4426950408889634f;
@@ -355,74 +434,101 @@ void flash_attention_wgmma(
     float rowmax[2] = {-FLT_MAX, -FLT_MAX};
     float rowsumexp[2] = {0.0f, 0.0f};
 
-    /* Precompute base descriptor for Q (invariant across iterations) */
-    const uint64_t desc_q_base = make_wgmma_desc(Q_smem, QKV_stride_bytes);
+    /* Precompute Q descriptors (split: lo at Q_lo_smem, hi at Q_hi_smem) */
+    const uint64_t desc_q_lo = make_wgmma_desc(Q_lo_smem, SPLIT_STRIDE_BYTES);
+    const uint64_t desc_q_hi = make_wgmma_desc(Q_hi_smem, SPLIT_STRIDE_BYTES);
 
-    /* ---- Prelude: load K[0] into stage 0 ---- */
+    /* ---- Prelude: TMA load K[0] ---- */
+    if (max_kv_iter > 0 && tid == 0) {
+        mbarrier_arrive_expect_tx(mbar_K0, FULL_KV_BYTES);
+        tma_load_2d(reinterpret_cast<void*>(K0_lo_smem), tma_K_bh,
+                    0,  0, mbar_K0);
+        tma_load_2d(reinterpret_cast<void*>(K0_hi_smem), tma_K_bh,
+                    64, 0, mbar_K0);
+    }
     if (max_kv_iter > 0) {
-        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
-            K_smem_0, K_base, seq_stride, tid);
-        asm volatile("cp.async.commit_group;");
-        asm volatile("cp.async.wait_all;");
-        __syncthreads();
+        mbarrier_wait_parity(mbar_K0, 0);
     }
 
-    /* Precompute V descriptor base (V_smem is fixed across iterations) */
-    const uint64_t desc_v_base = make_wgmma_desc(V_smem, QKV_stride_bytes);
+    /* V descriptor base (V SMEM location is fixed) */
+    const uint64_t desc_v_lo = make_wgmma_desc(V_lo_smem, SPLIT_STRIDE_BYTES);
+    const uint64_t desc_v_hi = make_wgmma_desc(V_hi_smem, SPLIT_STRIDE_BYTES);
+
+    /* Phase tracking for double-buffered K mbarriers */
+    unsigned k0_phase = 1;  /* K[0] loaded at phase 0, next use is phase 1 */
+    unsigned k1_phase = 0;  /* K[1] not yet loaded */
+    unsigned v_phase = 0;   /* V first loads at phase 0 */
 
     /* ---- Main KV loop ---- */
     for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
         const int cur_stage  = kv_id & 1;
-        const uint32_t cur_K_smem  = cur_stage ? K_smem_1 : K_smem_0;
-        const uint32_t next_K_smem = cur_stage ? K_smem_0 : K_smem_1;
+        const uint32_t cur_K_lo = cur_stage ? K1_lo_smem : K0_lo_smem;
+        const uint32_t cur_K_hi = cur_stage ? K1_hi_smem : K0_hi_smem;
 
-        /* == Step 1a: Start loading V[kv_id] into V_smem (non-blocking) == */
-        const nv_bfloat16 *V_cur = V_base + kv_id * BLOCK_KV * seq_stride;
-        global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
-            V_smem, V_cur, seq_stride, tid);
-        asm volatile("cp.async.commit_group;");
-        /* V load is now group 0 (newest) — will become group 1 if K is committed */
-
-        /* == Step 1b: Start loading K[kv_id+1] (non-blocking) == */
-        const bool has_next_k = (kv_id + 1 < max_kv_iter);
-        if (has_next_k) {
-            const nv_bfloat16 *K_next = K_base + (kv_id + 1) * BLOCK_KV * seq_stride;
-            global_to_shared_B128<BLOCK_KV, DIM, TB_SIZE>(
-                next_K_smem, K_next, seq_stride, tid);
-            asm volatile("cp.async.commit_group;");
-            /* Now: group 0 = K[kv_id+1], group 1 = V[kv_id] */
+        /* == Step 1a: TMA load V[kv_id] (thread 0 only, non-blocking) == */
+        if (tid == 0) {
+            mbarrier_arrive_expect_tx(mbar_V, FULL_KV_BYTES);
+            tma_load_2d(reinterpret_cast<void*>(V_lo_smem), tma_V_bh,
+                        0,  kv_id * BLOCK_KV, mbar_V);
+            tma_load_2d(reinterpret_cast<void*>(V_hi_smem), tma_V_bh,
+                        64, kv_id * BLOCK_KV, mbar_V);
         }
-        /* If !has_next_k: group 0 = V[kv_id] only */
 
-        /* == Step 2: QK GEMM using K_smem[cur_stage] == */
-        /* K[kv_id] is already in cur_K_smem (loaded in prelude or prev iter) */
+        /* == Step 1b: TMA load K[kv_id+1] (thread 0 only, non-blocking) == */
+        const bool has_next_k = (kv_id + 1 < max_kv_iter);
+        if (has_next_k && tid == 0) {
+            const uint32_t next_K_lo = cur_stage ? K0_lo_smem : K1_lo_smem;
+            const uint32_t next_K_hi = cur_stage ? K0_hi_smem : K1_hi_smem;
+            uint64_t *mbar_k_next = cur_stage ? mbar_K0 : mbar_K1;
+            mbarrier_arrive_expect_tx(mbar_k_next, FULL_KV_BYTES);
+            tma_load_2d(reinterpret_cast<void*>(next_K_lo), tma_K_bh,
+                        0,  (kv_id + 1) * BLOCK_KV, mbar_k_next);
+            tma_load_2d(reinterpret_cast<void*>(next_K_hi), tma_K_bh,
+                        64, (kv_id + 1) * BLOCK_KV, mbar_k_next);
+        }
+
+        /* == Step 2: QK GEMM using current K from SMEM ==
+         * K was loaded by TMA into split-DIM layout (lo + hi).
+         * Q is also in split-DIM layout.
+         * For m64n64k16: 8 k-steps total.
+         *   k-steps 0-3 use lo halves (cols 0-63)
+         *   k-steps 4-7 use hi halves (cols 64-127)
+         */
         float S_acc[32];
         #pragma unroll
         for (int i = 0; i < 32; i++) S_acc[i] = 0.0f;
 
-        const uint64_t desc_k_base = make_wgmma_desc(cur_K_smem, QKV_stride_bytes);
+        const uint64_t desc_k_lo = make_wgmma_desc(cur_K_lo, SPLIT_STRIDE_BYTES);
+        const uint64_t desc_k_hi = make_wgmma_desc(cur_K_hi, SPLIT_STRIDE_BYTES);
 
         wgmma_fence();
 
-        /* B128 layout: 128-byte-wide atoms (64 bf16 cols).  DIM=128 needs
-         * 2 atoms per row.  k-steps 0-3 → atom 0, k-steps 4-7 → atom 1.
-         * Atom offset = 1024 bytes = 64 units of 16B. */
+        /* K-stepping: within each half, 4 k-steps of 16 columns.
+         * Each k-step advances 2 units of 16B = 32B = 16 bf16 elements.
+         * In split-DIM with SWIZZLE_128B:
+         *   - Within a half-tile (64 cols), 8-row groups are 1024B apart
+         *   - Each k-step is 2 × 16B = 32B within the group */
         #pragma unroll
         for (int ks = 0; ks < DIM / 16; ks++) {
-            const int atom_off = (ks / 4) * 64;   /* 0 or 64 */
-            const int k_off    = (ks % 4) * 2;    /* 0, 2, 4, 6 */
-            uint64_t desc_q = gmma_desc_advance(desc_q_base, atom_off + k_off);
-            uint64_t desc_k = gmma_desc_advance(desc_k_base, atom_off + k_off);
+            uint64_t desc_q, desc_k;
+            if (ks < 4) {
+                /* lo half: cols 0-63 */
+                desc_q = gmma_desc_advance(desc_q_lo, ks * 2);
+                desc_k = gmma_desc_advance(desc_k_lo, ks * 2);
+            } else {
+                /* hi half: cols 64-127 */
+                desc_q = gmma_desc_advance(desc_q_hi, (ks - 4) * 2);
+                desc_k = gmma_desc_advance(desc_k_hi, (ks - 4) * 2);
+            }
             wgmma_m64n64k16_f32_bf16(S_acc, desc_q, desc_k,
                                       (ks == 0) ? 0 : 1);
         }
 
         wgmma_commit_group();
         wgmma_wait_group<0>();
-        wgmma_fence();  /* fence before reading accumulators */
+        wgmma_fence();
 
         /* == Step 3: Softmax on S_acc (in-place, P stays in registers) == */
-        /* V[kv_id] and K[kv_id+1] may still be loading in background */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
             float row_vals[16];
@@ -492,7 +598,7 @@ void flash_attention_wgmma(
             /* Update running sum */
             rowsumexp[half] = rowsumexp[half] * rescale + local_sum;
 
-            /* Write softmax output back to S_acc (P stays in registers) */
+            /* Write softmax output back to S_acc */
             #pragma unroll
             for (int p4 = 0; p4 < 8; p4++) {
                 S_acc[(p4 << 2) | (half << 1) | 0] = row_vals[p4 * 2 + 0];
@@ -500,60 +606,96 @@ void flash_attention_wgmma(
             }
         }
 
-        /* == Step 4: Wait for V[kv_id] load to complete == */
-        /* If K[kv_id+1] was also issued, V is group 1, K is group 0.
-         * wait_group 1 ensures V is done while K may still be in flight.
-         * If no K was issued, V is group 0 → wait_group 0. */
-        if (has_next_k) {
-            asm volatile("cp.async.wait_group 1;\n" ::: "memory");
-        } else {
-            asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        }
-        __syncthreads();
+        /* == Step 4: Wait for V[kv_id] TMA load == */
+        mbarrier_wait_parity(mbar_V, v_phase);
+        v_phase ^= 1;
 
         /* == Step 5: PV GEMM using RS mode (P from registers, V from SMEM) ==
+         * V is in split-DIM layout: V_lo (cols 0-63) + V_hi (cols 64-127).
+         * PV is m64n128k16: n=128 = DIM, so we need the full 128 columns.
+         * For tnspB=1 (V transposed): k-steps advance through rows of V.
+         * Each k-step processes 16 rows of V.
+         * BLOCK_KV=64 → 4 k-steps.
          *
-         * RS register layout (PTX ISA Figure 148):
-         *   a0 = bf16x2(P[row0, col], P[row0, col+1])       // row0, cols 0-7
-         *   a1 = bf16x2(P[row1, col], P[row1, col+1])       // row1, cols 0-7
-         *   a2 = bf16x2(P[row0, col+8], P[row0, col+8+1])   // row0, cols 8-15
-         *   a3 = bf16x2(P[row1, col+8], P[row1, col+8+1])   // row1, cols 8-15
+         * For split-DIM V: the n=128 output dimension spans both lo and hi.
+         * We need wgmma m64n128k16 where B descriptor covers 128 columns.
+         * But our V is split into two 64-col halves.
          *
-         * Mapping from S_acc (half=0 -> row0, half=1 -> row1):
-         *   a0 = pack(S_acc[ks*8+0], S_acc[ks*8+1])   // half=0, pair4=ks*2
-         *   a1 = pack(S_acc[ks*8+2], S_acc[ks*8+3])   // half=1, pair4=ks*2
-         *   a2 = pack(S_acc[ks*8+4], S_acc[ks*8+5])   // half=0, pair4=ks*2+1
-         *   a3 = pack(S_acc[ks*8+6], S_acc[ks*8+7])   // half=1, pair4=ks*2+1
+         * Solution: use wgmma m64n64k16 for each half separately.
+         * PV_lo = P × V_lo  (output cols 0-63)
+         * PV_hi = P × V_hi  (output cols 64-127)
+         *
+         * Wait — this doesn't work because m64n64k16 with RS would need
+         * different O_acc layout. Instead, we should use the full m64n128k16
+         * with a descriptor that spans both halves.
+         *
+         * For m64n128k16 with SWIZZLE_128B and tnspB=1:
+         * The B descriptor needs to cover 128 output columns and 16 input rows.
+         * With split-DIM, V_lo and V_hi are contiguous in SMEM (V_lo at 48KB,
+         * V_hi at 56KB). Each half is 8KB.
+         * For tnspB=1, the descriptor stride advances through rows.
+         *
+         * Actually, for PV with tnspB=1 (transposed V):
+         * - N dimension = DIM = 128 (output width)
+         * - K dimension = BLOCK_KV = 64 (reduction over KV positions)
+         * - The B matrix is V^T: each k-step reads 16 "rows" of V
+         *   (which are 16 KV positions), producing 128 output columns.
+         *
+         * With SWIZZLE_128B and split-DIM layout:
+         * V_lo has 64 rows × 64 cols = 64 values per row.
+         * For tnspB=1, wgmma reads 128 columns but we only have 64 per half.
+         *
+         * We must use TWO m64n64k16 RS GEMMs instead:
+         *   PV_lo = P × V_lo^T → O_acc[0:31]  (cols 0-63)
+         *   PV_hi = P × V_hi^T → O_acc[32:63] (cols 64-127)
+         * Each produces 64 output columns, mapping to the lo/hi halves.
          */
+
         wgmma_fence();
 
-        /* V K-stepping with tnspB=1: each K-step processes 16 ROWS of V.
-         * In B128 layout: 16 rows = 2 groups of 8 rows.
-         * Advance per K-step = 2 × group_bytes / 16 = 2 × 2048 / 16 = 256.
-         * (NOT ks*2 which advances 32B along columns — wrong axis!) */
-        constexpr int V_KS_ADVANCE = 2 * QKV_stride_bytes / 16;  /* 256 */
+        /* V k-stepping with tnspB=1 and split-DIM:
+         * Each k-step processes 16 rows of V. With split-DIM SWIZZLE_128B:
+         * 16 rows = 2 groups of 8 rows. Group stride = 1024B.
+         * k-step advance = 2 × 1024B / 16 = 128 units of 16B. */
+        constexpr int V_KS_ADVANCE = 2 * SPLIT_STRIDE_BYTES / 16;  /* 128 */
 
+        /* PV_lo: P × V_lo^T → output cols 0-63 (O_acc[0:31]) */
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
             uint32_t a0 = pack_bf16(S_acc[ks*8 + 0], S_acc[ks*8 + 1]);
             uint32_t a1 = pack_bf16(S_acc[ks*8 + 2], S_acc[ks*8 + 3]);
             uint32_t a2 = pack_bf16(S_acc[ks*8 + 4], S_acc[ks*8 + 5]);
             uint32_t a3 = pack_bf16(S_acc[ks*8 + 6], S_acc[ks*8 + 7]);
-            uint64_t desc_v = gmma_desc_advance(desc_v_base, ks * V_KS_ADVANCE);
-            wgmma_m64n128k16_f32_bf16_RS(O_acc, a0, a1, a2, a3, desc_v, 1);
+            uint64_t desc_v = gmma_desc_advance(desc_v_lo, ks * V_KS_ADVANCE);
+            wgmma_m64n64k16_f32_bf16_RS(O_acc, a0, a1, a2, a3, desc_v, 1);
+        }
+
+        /* PV_hi: P × V_hi^T → output cols 64-127 (O_acc[32:63]) */
+        #pragma unroll
+        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+            uint32_t a0 = pack_bf16(S_acc[ks*8 + 0], S_acc[ks*8 + 1]);
+            uint32_t a1 = pack_bf16(S_acc[ks*8 + 2], S_acc[ks*8 + 3]);
+            uint32_t a2 = pack_bf16(S_acc[ks*8 + 4], S_acc[ks*8 + 5]);
+            uint32_t a3 = pack_bf16(S_acc[ks*8 + 6], S_acc[ks*8 + 7]);
+            uint64_t desc_v = gmma_desc_advance(desc_v_hi, ks * V_KS_ADVANCE);
+            wgmma_m64n64k16_f32_bf16_RS(O_acc + 32, a0, a1, a2, a3, desc_v, 1);
         }
 
         wgmma_commit_group();
         wgmma_wait_group<0>();
 
-        /* == Step 6: Ensure K[kv_id+1] is ready for next iteration == */
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
+        /* == Step 6: Wait for K[kv_id+1] TMA load == */
+        if (has_next_k) {
+            unsigned *phase_ptr = cur_stage ? &k0_phase : &k1_phase;
+            uint64_t *mbar_k_next = cur_stage ? mbar_K0 : mbar_K1;
+            mbarrier_wait_parity(mbar_k_next, *phase_ptr);
+            *phase_ptr ^= 1;
+        }
 
     } /* end kv_id loop */
 
     /* ---- Epilogue: finalize O and store to gmem ---- */
-    wgmma_fence();  /* fence before reading O_acc */
+    wgmma_fence();
 
     #pragma unroll
     for (int half = 0; half < 2; half++) {
@@ -582,11 +724,54 @@ void flash_attention_wgmma(
             }
         }
     }
+
+    /* Invalidate mbarriers before exit */
+    __syncthreads();
+    if (tid == 0) {
+        mbarrier_inval(mbar_Q);
+        mbarrier_inval(mbar_K0);
+        mbarrier_inval(mbar_K1);
+        mbarrier_inval(mbar_V);
+    }
 }
 
 /* ======================================================================
- *  Helpers + kernel_run
+ *  TMA descriptor creation + kernel_run
  * ====================================================================== */
+
+/* Dynamic loader for cuTensorMapEncodeTiled (CUDA 12.0+ driver API) */
+typedef CUresult (*cuTensorMapEncodeTiled_fn)(
+    CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*,
+    const cuuint64_t*, const cuuint64_t*,
+    const cuuint32_t*, const cuuint32_t*,
+    CUtensorMapInterleave, CUtensorMapSwizzle,
+    CUtensorMapL2promotion, CUtensorMapFloatOOBfill);
+
+static cuTensorMapEncodeTiled_fn s_encodeTiled = nullptr;
+
+static bool init_tma_encoder() {
+    if (s_encodeTiled) return true;
+    void *handle = dlopen("libcuda.so.1", RTLD_LAZY);
+    if (!handle) return false;
+
+    /* Try direct symbol first */
+    s_encodeTiled = reinterpret_cast<cuTensorMapEncodeTiled_fn>(
+        dlsym(handle, "cuTensorMapEncodeTiled"));
+    if (s_encodeTiled) return true;
+
+    /* Fallback: cuGetProcAddress */
+    typedef CUresult (*getProc_fn)(const char*, void**, int,
+                                   cuuint64_t, CUdriverProcAddressQueryResult*);
+    getProc_fn getProc = reinterpret_cast<getProc_fn>(
+        dlsym(handle, "cuGetProcAddress_v2"));
+    if (!getProc) return false;
+
+    CUdriverProcAddressQueryResult status;
+    CUresult res = getProc("cuTensorMapEncodeTiled",
+                           reinterpret_cast<void**>(&s_encodeTiled),
+                           12000, CU_GET_PROC_ADDRESS_DEFAULT, &status);
+    return (res == CUDA_SUCCESS && s_encodeTiled);
+}
 
 static int parse_int_env(const char *name, int fallback) {
     const char *v = getenv(name);
@@ -656,27 +841,106 @@ extern "C" int kernel_run(
 
     if (D != 128) return -2;
 
-    {
-        const int BLOCK_Q   = 64;
-        const int BLOCK_KV  = 64;
-        const int DIM_CONST = 128;
-        const int TB_SIZE   = 128;
+    /* Initialize TMA encoder */
+    if (!init_tma_encoder()) return -3;
 
-        int num_blocks = B * H * cdiv(S, BLOCK_Q);
+    const int BLOCK_Q   = 64;
+    const int BLOCK_KV  = 64;
+    const int DIM_CONST = 128;
+    const int HALF_DIM  = 64;
+    const int TB_SIZE   = 128;
 
-        /* SMEM: Q(16KB) + K[0](16KB) + K[1](16KB) + V(16KB) = 64KB */
-        int smem_size = BLOCK_Q * DIM_CONST * (int)sizeof(nv_bfloat16)      /* Q: 16KB */
-                      + 2 * BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16) /* K[0]+K[1]: 32KB */
-                      + BLOCK_KV * DIM_CONST * (int)sizeof(nv_bfloat16);    /* V: 16KB */
+    int BH = B * H;
 
-        auto kernel = flash_attention_wgmma<BLOCK_Q, BLOCK_KV, DIM_CONST>;
-        cudaFuncSetAttribute(kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    /* Create TMA descriptors on host, one per (batch, head) */
+    CUtensorMap *h_tma_Q = new CUtensorMap[BH];
+    CUtensorMap *h_tma_K = new CUtensorMap[BH];
+    CUtensorMap *h_tma_V = new CUtensorMap[BH];
 
-        kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
-            inputs[0], inputs[1], inputs[2], outputs[0],
-            B, S, H, S, S, causal ? 1 : 0);
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            int idx = b * H + h;
+            /* TMA sees a 2D tensor: [S rows, DIM cols] for each (batch, head).
+             * Global dims: dim[0] = DIM (fast axis), dim[1] = S (slow axis).
+             * Global stride: from row i to row i+1 = H * DIM * sizeof(bf16).
+             * Box: [HALF_DIM cols, BLOCK_Q or BLOCK_KV rows].
+             *
+             * Base pointer: &Q[b * S * H * D + h * D]  (start of this head). */
+            void *q_base = static_cast<void*>(
+                const_cast<nv_bfloat16*>(inputs[0]) + b * S * H * D + h * D);
+            void *k_base = static_cast<void*>(
+                const_cast<nv_bfloat16*>(inputs[1]) + b * S * H * D + h * D);
+            void *v_base = static_cast<void*>(
+                const_cast<nv_bfloat16*>(inputs[2]) + b * S * H * D + h * D);
+
+            cuuint64_t globalDim[2]    = {(cuuint64_t)DIM_CONST, (cuuint64_t)S};
+            cuuint64_t globalStride[1] = {(cuuint64_t)(H * DIM_CONST * sizeof(nv_bfloat16))};
+            cuuint32_t boxDim_Q[2]     = {(cuuint32_t)HALF_DIM, (cuuint32_t)BLOCK_Q};
+            cuuint32_t boxDim_KV[2]    = {(cuuint32_t)HALF_DIM, (cuuint32_t)BLOCK_KV};
+            cuuint32_t elemStrides[2]  = {1, 1};
+
+            CUresult res;
+            res = s_encodeTiled(&h_tma_Q[idx],
+                CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, q_base,
+                globalDim, globalStride, boxDim_Q, elemStrides,
+                CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+                CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+            if (res != CUDA_SUCCESS) { delete[] h_tma_Q; delete[] h_tma_K; delete[] h_tma_V; return -4; }
+
+            res = s_encodeTiled(&h_tma_K[idx],
+                CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, k_base,
+                globalDim, globalStride, boxDim_KV, elemStrides,
+                CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+                CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+            if (res != CUDA_SUCCESS) { delete[] h_tma_Q; delete[] h_tma_K; delete[] h_tma_V; return -5; }
+
+            res = s_encodeTiled(&h_tma_V[idx],
+                CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, v_base,
+                globalDim, globalStride, boxDim_KV, elemStrides,
+                CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+                CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+            if (res != CUDA_SUCCESS) { delete[] h_tma_Q; delete[] h_tma_K; delete[] h_tma_V; return -6; }
+        }
     }
+
+    /* Copy TMA descriptors to device */
+    CUtensorMap *d_tma_Q, *d_tma_K, *d_tma_V;
+    cudaMalloc(&d_tma_Q, BH * sizeof(CUtensorMap));
+    cudaMalloc(&d_tma_K, BH * sizeof(CUtensorMap));
+    cudaMalloc(&d_tma_V, BH * sizeof(CUtensorMap));
+    cudaMemcpyAsync(d_tma_Q, h_tma_Q, BH * sizeof(CUtensorMap),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_tma_K, h_tma_K, BH * sizeof(CUtensorMap),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_tma_V, h_tma_V, BH * sizeof(CUtensorMap),
+                    cudaMemcpyHostToDevice, stream);
+
+    int num_blocks = B * H * cdiv(S, BLOCK_Q);
+
+    /* SMEM: 8 × 8KB tiles + 32B mbarriers = 65568B */
+    int smem_size = 8 * BLOCK_Q * HALF_DIM * (int)sizeof(nv_bfloat16)  /* 64KB */
+                  + 4 * (int)sizeof(uint64_t);                          /* 32B */
+
+    auto kernel = flash_attention_tma_wgmma<BLOCK_Q, BLOCK_KV, DIM_CONST>;
+    cudaFuncSetAttribute(kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+    kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
+        inputs[0], inputs[1], inputs[2], outputs[0],
+        B, S, H, S, S, causal ? 1 : 0,
+        d_tma_Q, d_tma_K, d_tma_V);
+
+    /* Cleanup: sync and free TMA descriptors */
+    cudaStreamSynchronize(stream);
+    cudaFree(d_tma_Q);
+    cudaFree(d_tma_K);
+    cudaFree(d_tma_V);
+    delete[] h_tma_Q;
+    delete[] h_tma_K;
+    delete[] h_tma_V;
 
     return 0;
 }

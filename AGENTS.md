@@ -224,6 +224,30 @@ Known conflict: port 46982 on h8_4 is used by another user — kb_embed moved to
 - kb_embed: `GET /health` → `{"status":"ok"}`
 - kb_embed functional: `POST /v1/embeddings` with `{"input":"test"}` → OpenAI-compatible response
 
+#### SM arch vs SM arch-a (accelerated) compilation targets
+
+NVIDIA GPUs report a base compute capability (e.g. 9.0), but the `nvcc`/`ptxas`
+compilation target determines which instructions are available. The `-a` suffix
+enables architecture-specific accelerator instructions:
+
+| Target | Architecture | Key accelerated instructions enabled by `-a` |
+|--------|-------------|----------------------------------------------|
+| `sm_90` | Hopper (base) | Standard CUDA ISA for SM90 |
+| `sm_90a` | Hopper (accel) | **WGMMA** (warpgroup MMA), **TMA** (tensor memory accelerator), **mbarrier** async, cluster launch |
+| `sm_100` | Blackwell (base) | Standard CUDA ISA for SM100 |
+| `sm_100a` | Blackwell (accel) | **TMEM** (tensor memory), **tcgen05** MMA, **TMA multicast**, **2-CTA clusters** |
+| `sm_120` | Blackwell GeForce (base) | SM120 base ISA |
+| `sm_120a` | Blackwell GeForce (accel) | Subset of SM100a — `mma.sync` but **no WGMMA/tcgen05/TMEM** |
+
+**Rules:**
+- All H100 hardware supports `sm_90a` — always compile with `-arch=sm_90a`
+- All B200/B100 hardware supports `sm_100a`
+- GeForce Blackwell (RTX 5090, RTX PRO 6000) is `sm_120a` — **not** `sm_100a`
+- `torch.cuda.get_device_capability()` returns the base version (e.g. `(9, 0)`),
+  not the `-a` variant. The `-a` is purely a compilation choice.
+- CuTe DSL auto-detects and uses `sm_90a` on H100 (via `CUTE_DSL_ARCH` env var
+  or GPU auto-detection). No manual override needed.
+
 #### SM-architecture-specific code and environments
 
 Generated kernels are architecture-specific: `data/generated/<arch>/matmul/generated.cu`.

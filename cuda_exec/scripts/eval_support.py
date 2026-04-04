@@ -331,11 +331,18 @@ def measure_reference(
     if last_output is None:
         raise RuntimeError("reference contract did not produce an output")
 
-    output_json = tensor_to_jsonable(last_output)
+    # Write output as binary file (matching eval_harness.cu pattern).
+    # Never serialize large tensors to JSON — 8192×8192 = 67M floats = 2GB JSON.
+    output_dir = os.environ.get("CUDA_EXEC_OUTPUT_DIR")
+    if output_dir and hasattr(last_output, "cpu"):
+        os.makedirs(output_dir, exist_ok=True)
+        bin_path = os.path.join(output_dir, "reference_output_0.bin")
+        last_output.detach().cpu().contiguous().numpy().tofile(bin_path)
+
     std_val = statistics.stdev(latencies_ms) if len(latencies_ms) > 1 else 0.0
 
     return {
-        "output": output_json,
+        "output": [],  # binary file, not JSON (same as eval_harness.cu)
         "performance": {
             "metadata": {
                 "hardware": hardware,

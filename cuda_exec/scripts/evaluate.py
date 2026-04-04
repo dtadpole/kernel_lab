@@ -85,23 +85,12 @@ def _run_generated(
         raise RuntimeError("generated execution produced empty stdout")
     payload = json.loads(stdout)
 
-    # Read binary output files (raw BF16) and inject into payload
+    # Keep binary output files for correctness verification.
+    # Never inline large tensors into JSON — 8192×8192 = 67M floats = 2GB JSON.
     output_bin = Path(output_dir) / "output_0.bin"
     if output_bin.exists():
-        raw = output_bin.read_bytes()
-        # BF16 -> float32: unpack as uint16, then reinterpret
-        n_elems = len(raw) // 2
-        bf16_ints = struct.unpack(f"<{n_elems}H", raw)
-        floats = [_bf16_to_float(v) for v in bf16_ints]
-        payload.setdefault("output", {})["result"] = floats
-        # Clean up
-        output_bin.unlink()
-
-    # Remove temp dir
-    try:
-        Path(output_dir).rmdir()
-    except OSError:
-        pass
+        payload.setdefault("output", {})["binary_path"] = str(output_bin)
+        payload.setdefault("output", {})["result"] = []  # empty, data is in binary file
 
     return {
         "returncode": completed.returncode,
@@ -132,9 +121,17 @@ def _verify_correctness(
 ) -> dict[str, Any]:
     model_cls, get_inputs, get_init_inputs = normalize_reference_contract(module)
 
-    gen_output = generated_payload.get("output", {}).get("result", [])
-    gen_shape = infer_shape(gen_output)
-    gen_values = flatten_numeric(gen_output) if gen_output else []
+    # Load generated output from binary file if available, otherwise from JSON
+    gen_output_section = generated_payload.get("output", {})
+    binary_path = gen_output_section.get("binary_path")
+    if binary_path and Path(binary_path).exists():
+        raw = Path(binary_path).read_bytes()
+        n_elems = len(raw) // 2
+        bf16_ints = struct.unpack(f"<{n_elems}H", raw)
+        gen_values = [_bf16_to_float(v) for v in bf16_ints]
+    else:
+        gen_output = gen_output_section.get("result", [])
+        gen_values = flatten_numeric(gen_output) if gen_output else []
 
     torch.manual_seed(seed)
     trial_seeds = [
@@ -329,7 +326,7 @@ def main() -> int:
             "status": "ok",
             "reference": {
                 "output": {
-                    "result": reference_result["output"],
+                    "result": [],  # binary file, never inline large tensors
                     "metadata": reference_config,
                 },
                 "correctness": {
@@ -371,7 +368,7 @@ def main() -> int:
         if cudnn_result is not None:
             result["cudnn"] = {
                 "output": {
-                    "result": cudnn_result["output"],
+                    "result": [],  # binary file, never inline large tensors
                     "metadata": reference_config,
                 },
                 "performance": {

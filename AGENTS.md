@@ -123,7 +123,7 @@ Top-level public responses use `all_ok` for aggregate success. Per-config output
 - this `AGENTS.md` stays at repo-level only
 - `cuda_exec/models.py` documents the public request/response contract
 - `cuda_exec/runner.py` documents runtime-layout semantics
-- `cuda_exec/main.py` stays thin and keeps only lightweight endpoint/helper docstrings
+- `cuda_exec/tasks.py` contains orchestration logic and public endpoint functions
 
 ### 6. `cuda_exec/tests` is integration-only
 

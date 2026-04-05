@@ -26,7 +26,7 @@ from cuda_exec.models import (
     TrialRequest,
     Metadata,
 )
-from cuda_exec.main import compile_endpoint, trial_endpoint
+from cuda_exec.tasks import compile_endpoint, trial_endpoint
 
 logger = logging.getLogger(__name__)
 

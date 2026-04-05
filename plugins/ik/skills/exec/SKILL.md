@@ -25,7 +25,7 @@ cd /home/zhenc/kernel_lab
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.main import compile_endpoint
+from cuda_exec.tasks import compile_endpoint
 from cuda_exec.models import CompileRequest
 import json
 
@@ -45,7 +45,7 @@ Returns: `all_ok`, `artifacts` (ptx, sass, resource_usage), `tool_outputs` (nvcc
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.main import trial_endpoint
+from cuda_exec.tasks import trial_endpoint
 from cuda_exec.models import TrialRequest
 import json
 
@@ -64,7 +64,7 @@ Returns: `all_ok`, `configs` with per-config `status`, `correctness`, `performan
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.main import profile_endpoint
+from cuda_exec.tasks import profile_endpoint
 from cuda_exec.models import ProfileRequest
 import json
 

@@ -36,9 +36,6 @@ def formal_benchmark(
     arch: str,
     *,
     impls: str | List[str] = "all",
-    run_tag: str = "bench",
-    version: str = "v1",
-    direction_id: int = 0,
     timeout_seconds: int = 300,
 ) -> dict:
     """Atomic compile + trial ALL configs for specified implementations.
@@ -47,14 +44,13 @@ def formal_benchmark(
         kernel: Kernel name (e.g., "fa4", "matmul", "vecadd")
         arch: GPU architecture (e.g., "sm90")
         impls: "all" or list of impl slugs (e.g., ["ref-cublas", "gen-cuda"])
-        run_tag: Namespace tag for workspace isolation
-        version: Version tag
-        direction_id: Direction ID for workspace isolation
         timeout_seconds: Timeout per config
 
     Returns:
         Dict with per-implementation compile + trial results
     """
+    # Auto-generate run_tag for workspace isolation
+    run_tag = f"bench-{kernel}-{int(time.time())}"
     configs = load_configs(kernel)
     resolved = resolve_impls(kernel, arch, impls)
 
@@ -72,8 +68,8 @@ def formal_benchmark(
 
         metadata = Metadata(
             run_tag=run_tag,
-            version=version,
-            direction_id=direction_id,
+            version="v1",
+            direction_id=0,
             direction_slug=f"{kernel}-{gen['slug']}",
             turn=unique_turn,
         )
@@ -166,9 +162,6 @@ def cli_main() -> None:
         "--impls", nargs="*", default=None,
         help="Implementation slugs (default: all). E.g., ref-cublas gen-cuda",
     )
-    parser.add_argument("--run-tag", default="bench", help="Workspace namespace (default: bench)")
-    parser.add_argument("--version", default="v1", help="Version tag (default: v1)")
-    parser.add_argument("--direction-id", type=int, default=0, help="Direction ID (default: 0)")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout per config in seconds (default: 300)")
 
     args = parser.parse_args()
@@ -179,15 +172,10 @@ def cli_main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    impl_arg = args.impls if args.impls else "all"
-
     result = formal_benchmark(
         kernel=args.kernel,
         arch=args.arch,
-        impls=impl_arg,
-        run_tag=args.run_tag,
-        version=args.version,
-        direction_id=args.direction_id,
+        impls=args.impls if args.impls else "all",
         timeout_seconds=args.timeout,
     )
 

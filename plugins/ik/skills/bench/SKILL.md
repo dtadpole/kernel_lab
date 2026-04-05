@@ -2,7 +2,7 @@
 name: bench
 description: Formal benchmark — atomic compile + trial ALL configs for comprehensive kernel assessment
 user-invocable: true
-argument-hint: <kernel> [--arch smXX]
+argument-hint: <kernel> [--arch smXX] [--impls impl1 impl2 ...]
 ---
 
 # Formal Benchmark
@@ -13,11 +13,11 @@ development — use `/ik:exec` for that.
 
 ## What it does
 
-1. Loads ALL source files (reference, generated, optional cuDNN) from fixtures
-2. Loads ALL configs from `data/fixtures/{arch}/{kernel}/configs.json`
-3. Compiles the kernel (bundled, not a separate step)
-4. Trials every config (correctness + latency comparison)
-5. Returns a single comprehensive verdict
+1. Discovers all implementations via `cuda_exec.impls` (dynamic slug resolution)
+2. Loads ALL configs from `data/configs/{kernel}.json`
+3. For each `.cu` gen impl: compiles + trials every config against the primary reference
+4. `.py` gen impls are measured on the reference side during `.cu` trials
+5. Returns per-implementation results with correctness + latency
 
 ## Usage
 
@@ -25,14 +25,13 @@ development — use `/ik:exec` for that.
 cd /home/zhenc/kernel_lab
 ```
 
-### Auto-detect GPU arch
+### Run benchmark (auto-detects GPU arch)
 
 ```bash
 CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
 from cuda_exec.formal import formal_benchmark
 import json, subprocess
 
-# Auto-detect arch from GPU
 cc = subprocess.check_output(
     ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
     text=True
@@ -44,44 +43,50 @@ print(json.dumps(result, indent=2, default=str))
 "
 ```
 
-### Explicit arch
-
-```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.formal import formal_benchmark
-import json
-
-result = formal_benchmark(kernel='fa4', arch='sm90')
-print(json.dumps(result, indent=2, default=str))
-"
-```
-
 ### CLI mode
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal fa4 sm90
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal matmul sm90 --run-tag bench_v2
+CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal matmul sm90
+CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal fa4 sm90 --impls ref-cublas gen-cuda
 ```
 
 ## Response Format
 
+The response is produced by `cuda_exec.formal.formal_benchmark()`:
+
 ```json
 {
-  "compile_ok": true,
-  "trial_ok": true,
-  "kernel": "fa4",
+  "kernel": "matmul",
   "arch": "sm90",
-  "num_configs": 8,
-  "compile_result": { ... },
-  "trial_result": {
-    "all_ok": true,
-    "configs": {
-      "config-slug-1": {
-        "status": "ok",
-        "correctness": { "passed": true, ... },
-        "performance": { "latency_ms": { ... }, ... }
-      },
-      ...
+  "num_configs": 6,
+  "impls_requested": ["ref-cublas", "gen-cuda", "gen-cutedsl"],
+  "refs": ["ref-cublas"],
+  "gens": ["gen-cuda", "gen-cutedsl"],
+  "results": {
+    "gen-cuda": {
+      "impl": "gen-cuda",
+      "compile_ok": true,
+      "trial_ok": true,
+      "compile_result": { ... },
+      "trial_result": {
+        "all_ok": true,
+        "configs": {
+          "mat-256x256": {
+            "status": "ok",
+            "correctness": { "passed": false, ... },
+            "performance": { "latency_ms": { "median": 0.0108, ... } },
+            "reference": { "performance": { "latency_ms": { "median": 0.033 } } },
+            "generated": { "performance": { "latency_ms": { "median": 0.011 } } },
+            "cudnn": { "performance": { "latency_ms": { "median": 0.031 } } }
+          }
+        }
+      }
+    },
+    "gen-cutedsl": {
+      "impl": "gen-cutedsl",
+      "compile_ok": null,
+      "trial_ok": null,
+      "note": "Python impl — measured as reference/cudnn side when .cu impls are trialed"
     }
   }
 }
@@ -92,29 +97,32 @@ CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal matmul sm90 --run-ta
 After the bench completes, **always output a performance comparison table** using
 box-drawing characters. This is mandatory — never skip it.
 
+**Columns are dynamic** — generated from the discovered implementations. Each
+`ref-*` and `gen-*` impl slug becomes a column. The table adapts to whatever
+implementations exist for the kernel+arch combination.
+
+Example for `matmul/sm90` with `ref-cublas`, `gen-cutedsl`, `gen-cuda`:
+
 ```
-┌────────────────────────┬──────────────────┬──────────────────┬──────────────────┬──────────┬──────────┐
-│ NVIDIA H100 (h8_3)     │  ref-cudnn 9.19  │  ref-cutedsl     │  gen-cuda        │ dsl ref  │ Gen CUDA │
-│ GPU4, torch 2.11+cu128 │  TFLOPS   (ms)   │  TFLOPS   (ms)   │  TFLOPS   (ms)   │ vs cuDNN │ vs cuDNN │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-causal-b8-s4096    │  565.5  (0.972)  │  549.2  (1.001)  │  381.7  (1.440)  │  0.97×   │  0.67×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-causal-b4-s8192    │  599.8  (1.833)  │  558.6  (1.968)  │  388.7  (2.829)  │  0.93×   │  0.65×   │
-└────────────────────────┴──────────────────┴──────────────────┴──────────────────┴──────────┴──────────┘
+┌────────────────────────┬──────────────────┬──────────────────┬──────────────────┬──────────┬──────────┬───┐
+│ NVIDIA H100 SXM5       │  ref-cublas      │  gen-cutedsl     │  gen-cuda        │ cutedsl  │ gen-cuda │   │
+│ GPU4, torch 2.11+cu128 │  TFLOPS   (ms)   │  TFLOPS   (ms)   │  TFLOPS   (ms)   │ vs ref   │ vs ref   │   │
+├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┼───┤
+│ mat-256x256            │    1.0  (0.033)  │    0.4  (0.091)  │    3.1  (0.011)  │  0.37×   │  3.07×   │ ✗ │
+├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┼───┤
+│ mat-8192x8192          │  737.7  (1.491)  │  574.5  (1.915)  │  751.1  (1.464)  │  0.78×   │  1.02×   │ ✗ │
+└────────────────────────┴──────────────────┴──────────────────┴──────────────────┴──────────┴──────────┴───┘
 ```
 
-**Column definitions:**
-- **cuDNN / CuTe DSL ref / Generated CUDA**: TFLOPS (effective throughput) and (ms) median latency
-- **DSL ref vs cuDNN**: Speedup ratio (>1.0 = DSL reference is faster than cuDNN)
-- **Gen CUDA vs cuDNN**: Speedup ratio (>1.0 = generated is faster than cuDNN)
-- Header row 1: GPU model, host name
-- Header row 2: GPU index, torch version
-- If cuDNN baseline is not available, omit cuDNN column and show "vs DSL ref" instead
-- TFLOPS calculation: use the kernel's FLOPs formula from the fixture config (2*M*N*K for matmul, etc.)
-
-**Correctness indicator:** Append a checkmark or cross to each config row:
-- `✓` if `correctness.passed == True`
-- `✗` if `correctness.passed == False`
+**How to build the table:**
+- **Discover columns** from `result["impls_requested"]` — each impl slug is a column
+- **First ref-* impl** is the baseline for speedup ratios
+- **TFLOPS + (ms)** for each impl: extract from `reference`, `generated`, `cudnn` fields in trial results
+- **Speedup columns**: each non-baseline impl vs the first ref-* baseline
+- **Correctness**: `✓` or `✗` per config row, from `correctness.passed`
+- **Header row 1**: GPU model, host name
+- **Header row 2**: GPU index, torch version
+- **TFLOPS**: calculated from the kernel's FLOPs formula (2*M*N*K for matmul, etc.)
 
 ---
 
@@ -124,13 +132,15 @@ box-drawing characters. This is mandatory — never skip it.
 |---|---|---|
 | Compile | Separate step, Solver controls | Bundled, automatic |
 | Configs | Solver picks subset | ALL configs, mandatory |
+| Impls | Single impl per session | ALL impls (or specified subset) |
 | Profile | Yes (NCU deep dive) | No |
-| Turn mgmt | Solver manages turns | One-shot |
+| Turn mgmt | Solver manages turns | One-shot, auto-generated |
 | Used by | Solver (development) | Judge (formal assessment) |
 
 ## Rules
 
 - **ALL configs** — every config in the fixture is trialed, no exceptions
+- **At least one ref-* impl** — enforced by `resolve_impls()`
 - **No profiling** — bench is for measurement, not diagnosis
 - **Atomic** — compile failure stops immediately, no partial results
 - **Read-only intent** — bench does not modify source files

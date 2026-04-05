@@ -92,6 +92,25 @@ def _config_from_env() -> dict[str, Any]:
 #  Model — cuDNN Flash Attention via PyTorch SDPA
 # ---------------------------------------------------------------------------
 
+def _cudnn_safe() -> bool:
+    """Check if cuDNN SDPA is safe (won't segfault due to driver mismatch)."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import torch; torch.backends.cudnn.enabled = True; "
+             "q=torch.randn(1,1,8,64,device='cuda',dtype=torch.bfloat16); "
+             "torch.nn.functional.scaled_dot_product_attention(q,q,q)"],
+            capture_output=True, timeout=10, env={**os.environ}
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+_cudnn_is_safe: bool | None = None
+
+
 class Model(nn.Module):
     """cuDNN Flash Attention vendor baseline for H100 (SM90).
 
@@ -132,20 +151,21 @@ class Model(nn.Module):
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
-        # Use cuDNN backend for best performance on H100. Falls back to
-        # FLASH_ATTENTION if cuDNN is unavailable or crashes (e.g. CUDA 13.0
-        # driver has a cudnnCreate segfault).
-        try:
+        global _cudnn_is_safe
+        if _cudnn_is_safe is None:
+            _cudnn_is_safe = _cudnn_safe()
+        if not _cudnn_is_safe:
             with torch.nn.attention.sdpa_kernel([
-                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
-            ]):
-                out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
-        except RuntimeError:
-            with torch.nn.attention.sdpa_kernel([
-                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                 torch.nn.attention.SDPBackend.MATH,
             ]):
+                out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+        else:
+            try:
+                with torch.nn.attention.sdpa_kernel([
+                    torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+                ]):
+                    out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+            except RuntimeError:
                 out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
 
         # Back to (batch, seqlen, num_heads, head_dim)

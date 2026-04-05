@@ -97,7 +97,55 @@ def formal_benchmark(
 
     results: Dict[str, dict] = {}
 
-    # Trial each gen-* implementation
+    # --- Benchmark each ref-* implementation independently ---
+    for ref in refs:
+        logger.info("[%s] measure_py start (%d configs)", ref["slug"], len(configs))
+        ref_start = time.time()
+        try:
+            import torch
+            from cuda_exec.scripts.eval_support import measure_reference, load_reference_module
+            device = torch.device("cuda")
+            import tempfile, sys
+            tmp_dir = Path(tempfile.mkdtemp(prefix=f"bench_{ref['slug']}_"))
+            for fname, content in ref["files"].items():
+                (tmp_dir / fname).write_text(content, encoding="utf-8")
+            entry_py = tmp_dir / f"{ref['name']}.py"
+            old_path = list(sys.path)
+            sys.path.insert(0, str(tmp_dir))
+            try:
+                mod = load_reference_module(entry_py)
+                config_results = {}
+                for config_slug, config in configs.items():
+                    try:
+                        result = measure_reference(mod, config, device, num_trials=10)
+                        config_results[config_slug] = {
+                            "status": "ok",
+                            "performance": result["performance"],
+                        }
+                    except Exception as exc:
+                        config_results[config_slug] = {
+                            "status": "error",
+                            "error": str(exc),
+                        }
+            finally:
+                sys.path[:] = old_path
+            results[ref["slug"]] = {
+                "impl": ref["slug"],
+                "compile_ok": None,
+                "trial_ok": True,
+                "compile_result": None,
+                "trial_result": {"all_ok": True, "configs": config_results},
+            }
+        except Exception as exc:
+            results[ref["slug"]] = {
+                "impl": ref["slug"],
+                "compile_ok": None,
+                "trial_ok": False,
+                "error": str(exc),
+            }
+        logger.info("[%s] measure_py done (%.1fs)", ref["slug"], time.time() - ref_start)
+
+    # --- Trial each gen-* implementation ---
     for gen in gens:
         unique_turn = int(time.time()) % 100000
 
@@ -142,14 +190,56 @@ def formal_benchmark(
                 }
                 continue
         else:
-            results[gen["slug"]] = {
-                "impl": gen["slug"],
-                "compile_ok": None,
-                "trial_ok": None,
-                "compile_result": None,
-                "trial_result": None,
-                "note": "Python impl — measured as reference/cudnn side when .cu impls are trialed",
-            }
+            # .py impl: benchmark independently via measure_reference
+            logger.info("[%s] measure_py start (%d configs)", gen["slug"], len(configs))
+            py_start = time.time()
+            try:
+                import torch
+                from cuda_exec.scripts.eval_support import measure_reference, load_reference_module
+                device = torch.device("cuda")
+                # Write impl files to a temp dir and load the module
+                import tempfile, sys
+                tmp_dir = Path(tempfile.mkdtemp(prefix=f"bench_{gen['slug']}_"))
+                for fname, content in gen["files"].items():
+                    (tmp_dir / fname).write_text(content, encoding="utf-8")
+                entry_py = tmp_dir / f"{gen['name']}.py"
+                # Add to sys.path for sibling imports
+                old_path = list(sys.path)
+                sys.path.insert(0, str(tmp_dir))
+                try:
+                    mod = load_reference_module(entry_py)
+                    config_results = {}
+                    for config_slug, config in configs.items():
+                        try:
+                            result = measure_reference(mod, config, device, num_trials=10)
+                            config_results[config_slug] = {
+                                "status": "ok",
+                                "performance": result["performance"],
+                            }
+                        except Exception as exc:
+                            config_results[config_slug] = {
+                                "status": "error",
+                                "error": str(exc),
+                            }
+                finally:
+                    sys.path[:] = old_path
+                results[gen["slug"]] = {
+                    "impl": gen["slug"],
+                    "compile_ok": None,
+                    "trial_ok": True,
+                    "compile_result": None,
+                    "trial_result": {"all_ok": True, "configs": config_results},
+                }
+            except Exception as exc:
+                results[gen["slug"]] = {
+                    "impl": gen["slug"],
+                    "compile_ok": None,
+                    "trial_ok": False,
+                    "compile_result": None,
+                    "trial_result": None,
+                    "error": str(exc),
+                }
+            logger.info("[%s] measure_py done (%.1fs)", gen["slug"], time.time() - py_start)
             continue
 
         # Trial ALL configs

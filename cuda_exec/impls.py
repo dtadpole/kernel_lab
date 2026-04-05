@@ -45,24 +45,23 @@ def resolve_impl(
 ) -> dict:
     """Resolve an implementation slug to its source files and metadata.
 
-    Args:
-        kernel: Kernel name (e.g., "matmul", "fa4")
-        arch: GPU architecture (e.g., "sm90")
-        impl_slug: Implementation slug (e.g., "ref-cublas", "gen-cuda")
+    Each impl lives in its own subdirectory:
+        ref-cublas  → data/ref/{kernel}/cublas/
+        gen-cuda    → data/gen/{arch}/{kernel}/cuda/
+        gen-cutedsl → data/gen/{arch}/{kernel}/cutedsl/
+
+    Entry point: {name}.py or {name}.cu inside the subdir.
+    Helpers: all other files in the same subdir.
 
     Returns:
         {
             "slug": "ref-cublas",
-            "source": "ref",          # "ref" or "gen"
-            "name": "cublas",          # file stem
-            "entry_point": Path(...),  # resolved entry point file
-            "file_type": "py",         # "py" or "cu"
-            "files": {"cublas.py": "..."},  # all files to pass (entry + helpers)
+            "source": "ref",
+            "name": "cublas",
+            "entry_point": Path(...),
+            "file_type": "py",
+            "files": {"cublas.py": "..."},
         }
-
-    Raises:
-        FileNotFoundError: if the slug cannot be resolved
-        ValueError: if the slug format is invalid
     """
     parts = impl_slug.split("-", 1)
     if len(parts) != 2 or parts[0] not in ("ref", "gen"):
@@ -74,13 +73,19 @@ def resolve_impl(
     source, name = parts
 
     if source == "ref":
-        base_dir = _ref_dir(kernel, data_root)
+        impl_dir = _ref_dir(kernel, data_root) / name
     else:
-        base_dir = _gen_dir(kernel, arch, data_root)
+        impl_dir = _gen_dir(kernel, arch, data_root) / name
 
-    # Resolve entry point: try .py first, then .cu
-    entry_py = base_dir / f"{name}.py"
-    entry_cu = base_dir / f"{name}.cu"
+    if not impl_dir.is_dir():
+        raise FileNotFoundError(
+            f"Cannot resolve impl '{impl_slug}' for kernel '{kernel}' arch '{arch}'. "
+            f"Directory not found: {impl_dir}"
+        )
+
+    # Resolve entry point: try {name}.py first, then {name}.cu
+    entry_py = impl_dir / f"{name}.py"
+    entry_cu = impl_dir / f"{name}.cu"
 
     if entry_py.exists():
         entry_point = entry_py
@@ -90,24 +95,15 @@ def resolve_impl(
         file_type = "cu"
     else:
         raise FileNotFoundError(
-            f"Cannot resolve impl '{impl_slug}' for kernel '{kernel}' arch '{arch}'. "
-            f"Tried: {entry_py}, {entry_cu}"
+            f"No entry point found in {impl_dir}. "
+            f"Expected {name}.py or {name}.cu"
         )
 
-    # Collect files: entry point + helpers from the same directory
+    # Collect all files in the impl subdir
     files: Dict[str, str] = {}
-    files[entry_point.name] = entry_point.read_text(encoding="utf-8")
-
-    if file_type == "py":
-        # Include other .py files as helpers (e.g., cute_gemm_sm90.py)
-        for f in base_dir.iterdir():
-            if f.is_file() and f.suffix == ".py" and f.name != entry_point.name:
-                files[f.name] = f.read_text(encoding="utf-8")
-    else:
-        # .cu: include .h/.cuh headers as helpers
-        for f in base_dir.iterdir():
-            if f.is_file() and f.suffix in (".h", ".cuh"):
-                files[f.name] = f.read_text(encoding="utf-8")
+    for f in impl_dir.iterdir():
+        if f.is_file() and f.suffix in (".py", ".cu", ".h", ".cuh"):
+            files[f.name] = f.read_text(encoding="utf-8")
 
     return {
         "slug": impl_slug,
@@ -122,9 +118,8 @@ def resolve_impl(
 def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List[dict]:
     """List all available implementations for a kernel+arch.
 
-    Scans ref/{kernel}/ and gen/{arch}/{kernel}/ for entry point files.
-    Entry points: .py or .cu files (excludes helper-only files that are
-    imported by other .py files but don't define Model themselves).
+    Scans subdirectories of ref/{kernel}/ and gen/{arch}/{kernel}/.
+    Each subdirectory is one impl. Entry point: {subdir_name}.py or .cu.
 
     Returns list of:
         {"slug": "ref-cublas", "source": "ref", "name": "cublas",
@@ -132,45 +127,35 @@ def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List
     """
     impls = []
 
-    # Scan ref/
-    ref_dir = _ref_dir(kernel, data_root)
-    if ref_dir.exists():
-        for f in sorted(ref_dir.iterdir()):
-            if f.is_file() and f.suffix in (".py", ".cu"):
+    def _scan_dir(base_dir: Path, source: str) -> None:
+        if not base_dir.exists():
+            return
+        for d in sorted(base_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith(".") or d.name == "__pycache__":
+                continue
+            name = d.name
+            # Check for entry point: {name}.py or {name}.cu
+            entry_py = d / f"{name}.py"
+            entry_cu = d / f"{name}.cu"
+            if entry_py.exists():
                 impls.append({
-                    "slug": f"ref-{f.stem}",
-                    "source": "ref",
-                    "name": f.stem,
-                    "file_type": f.suffix[1:],
-                    "path": f,
+                    "slug": f"{source}-{name}",
+                    "source": source,
+                    "name": name,
+                    "file_type": "py",
+                    "path": entry_py,
+                })
+            elif entry_cu.exists():
+                impls.append({
+                    "slug": f"{source}-{name}",
+                    "source": source,
+                    "name": name,
+                    "file_type": "cu",
+                    "path": entry_cu,
                 })
 
-    # Scan gen/
-    gen_dir = _gen_dir(kernel, arch, data_root)
-    if gen_dir.exists():
-        # Only include files that are entry points (have Model class or kernel_run)
-        for f in sorted(gen_dir.iterdir()):
-            if not f.is_file():
-                continue
-            if f.suffix == ".cu":
-                impls.append({
-                    "slug": f"gen-{f.stem}",
-                    "source": "gen",
-                    "name": f.stem,
-                    "file_type": "cu",
-                    "path": f,
-                })
-            elif f.suffix == ".py":
-                # Check if it's an entry point (has Model class)
-                content = f.read_text(encoding="utf-8", errors="ignore")
-                if "class Model" in content:
-                    impls.append({
-                        "slug": f"gen-{f.stem}",
-                        "source": "gen",
-                        "name": f.stem,
-                        "file_type": "py",
-                        "path": f,
-                    })
+    _scan_dir(_ref_dir(kernel, data_root), "ref")
+    _scan_dir(_gen_dir(kernel, arch, data_root), "gen")
 
     return impls
 

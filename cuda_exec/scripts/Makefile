@@ -134,10 +134,10 @@ COMPILE_ARCH  ?= $(subst sm,sm_,$(ARCH))a
 REF_DIR       := $(REPO_ROOT)/data/ref/$(KERNEL)
 GEN_DIR       := $(REPO_ROOT)/data/gen/$(ARCH)/$(KERNEL)
 
-# Default: first .py in ref/ as reference, first .cu in gen/ as generated
-REFERENCE_PY  ?= $(firstword $(wildcard $(REF_DIR)/*.py))
-CUDNN_PY      ?= $(wildcard $(REF_DIR)/cublas.py $(REF_DIR)/cudnn.py)
-GENERATED_CU  ?= $(wildcard $(GEN_DIR)/cuda.cu)
+# Per-impl subdirectories (new layout: each impl is a subdir)
+REFERENCE_PY  ?= $(firstword $(wildcard $(GEN_DIR)/cutedsl/cutedsl.py $(REF_DIR)/*/cublas.py $(REF_DIR)/*/cutedsl.py))
+CUDNN_PY      ?= $(firstword $(wildcard $(REF_DIR)/cublas/cublas.py $(REF_DIR)/cudnn/cudnn.py))
+GENERATED_CU  ?= $(wildcard $(GEN_DIR)/cuda/cuda.cu)
 
 # Backward compat aliases
 FIXTURE_DIR   ?= $(REF_DIR)
@@ -269,24 +269,36 @@ compile: ensure-venv ## Stage reference + generated files and run the 5-step com
 	@set -euo pipefail
 	# Create turn-root directories
 	mkdir -p "$(WORKSPACE)/inputs/reference" "$(WORKSPACE)/inputs/generated" "$(WORKSPACE)/inputs/cudnn" "$(ARTIFACTS)" "$(LOGS)" "$(STATE)"
-	# Stage ref/ implementations:
-	#   cutedsl.py → inputs/reference/ (CuTe DSL library reference)
-	#   cublas.py, cudnn.py → inputs/cudnn/ (vendor baseline)
-	for f in $(REF_DIR)/*.py; do \
-		[ ! -f "$$f" ] && continue; \
-		case "$$(basename $$f)" in \
-			cutedsl.py) cp "$$f" "$(WORKSPACE)/inputs/reference/" ;; \
-			*)          cp "$$f" "$(WORKSPACE)/inputs/cudnn/" ;; \
-		esac; \
+	# Stage per-impl subdirectories from ref/ and gen/
+	# Each impl subdir → inputs/{slug}/
+	for d in $(REF_DIR)/*/; do \
+		[ -d "$$d" ] || continue; \
+		slug="ref-$$(basename $$d)"; \
+		mkdir -p "$(WORKSPACE)/inputs/$$slug"; \
+		cp "$$d"* "$(WORKSPACE)/inputs/$$slug/" 2>/dev/null || true; \
 	done
-	# Stage gen/ Python implementations (cutedsl.py + helpers) → inputs/reference/
-	# If ref/ already provided cutedsl.py, gen/ cutedsl.py overwrites it
-	for f in $(GEN_DIR)/*.py; do \
-		[ -f "$$f" ] && cp "$$f" "$(WORKSPACE)/inputs/reference/" 2>/dev/null || true; \
+	for d in $(GEN_DIR)/*/; do \
+		[ -d "$$d" ] || continue; \
+		slug="gen-$$(basename $$d)"; \
+		mkdir -p "$(WORKSPACE)/inputs/$$slug"; \
+		cp "$$d"* "$(WORKSPACE)/inputs/$$slug/" 2>/dev/null || true; \
 	done
-	# Stage gen/ CUDA implementation → inputs/generated/
-	if [ -f "$(GEN_DIR)/cuda.cu" ]; then \
-		cp "$(GEN_DIR)/cuda.cu" "$(WORKSPACE)/inputs/generated/generated.cu"; \
+	# Backward compat: trial.py expects inputs/reference/ and inputs/cudnn/ and inputs/generated/
+	# Map: first gen .py impl → reference/, first ref .py → cudnn/, .cu → generated/
+	for d in $(GEN_DIR)/*/; do \
+		if [ -f "$$d"/*.py 2>/dev/null ]; then \
+			cp "$$d"*.py "$(WORKSPACE)/inputs/reference/" 2>/dev/null || true; \
+			break; \
+		fi; \
+	done
+	for d in $(REF_DIR)/*/; do \
+		if ls "$$d"*.py >/dev/null 2>&1; then \
+			cp "$$d"*.py "$(WORKSPACE)/inputs/cudnn/" 2>/dev/null || true; \
+			break; \
+		fi; \
+	done
+	if [ -f "$(GEN_DIR)/cuda/cuda.cu" ]; then \
+		cp "$(GEN_DIR)/cuda/cuda.cu" "$(WORKSPACE)/inputs/generated/generated.cu"; \
 	fi
 	# Run the 5-step compile pipeline
 	echo "--- compile [$(KERNEL)]: staging done, running compile.sh ---"

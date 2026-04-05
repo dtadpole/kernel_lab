@@ -94,7 +94,7 @@ box-drawing characters. This is mandatory — never skip it.
 
 ```
 ┌────────────────────────┬──────────────────┬──────────────────┬──────────────────┬──────────┬──────────┐
-│ NVIDIA H100 (h8_3)     │   cuDNN 9.19.0   │   CuTe DSL ref   │  Generated CUDA  │ DSL ref  │ Gen CUDA │
+│ NVIDIA H100 (h8_3)     │  ref-cudnn 9.19  │  ref-cutedsl     │  gen-cuda        │ dsl ref  │ Gen CUDA │
 │ GPU4, torch 2.11+cu128 │  TFLOPS   (ms)   │  TFLOPS   (ms)   │  TFLOPS   (ms)   │ vs cuDNN │ vs cuDNN │
 ├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
 │ mha-causal-b8-s4096    │  565.5  (0.972)  │  549.2  (1.001)  │  381.7  (1.440)  │  0.97×   │  0.67×   │

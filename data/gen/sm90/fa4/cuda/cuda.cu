@@ -574,8 +574,8 @@ void flash_attention_2wg(
                 rv[p4*2+0] = S_acc[(p4<<2)|(half<<1)|0];
                 rv[p4*2+1] = S_acc[(p4<<2)|(half<<1)|1];
             }
-            #pragma unroll
-            for (int c = 0; c < 32; c++) rv[c] *= softmax_scale_log2;
+            /* rv[] is in UNSCALED space — scale is fused into exp2 via FMA.
+             * This eliminates 32 FMULs per half per iteration. */
 
             if (is_causal) {
                 const int row = mywarp * 16 + half * 8 + (lane_id / 4);
@@ -592,8 +592,7 @@ void flash_attention_2wg(
                 }
             }
 
-            /* Tree max reduction — breaks 31-deep dependency chain into
-             * 5-level tree. Uses separate temp array to preserve rv[]. */
+            /* Tree max reduction (unscaled rv) */
             float tmax[16];
             #pragma unroll
             for (int i = 0; i < 16; i++) tmax[i] = fmaxf(rv[i], rv[i + 16]);
@@ -608,12 +607,13 @@ void flash_attention_2wg(
 
             rowmax[half] = lmax;
 
-            /* Exp2 + tree sum — compute exp2 then reduce with temp array.
-             * rv[] is preserved for the write-back to S_acc. */
+            /* Exp2 via FMA: exp2(rv * scale - max * scale) = exp2(fma(rv, scale, -max*scale))
+             * Fuses scale multiply into the exp2 argument, saving 32 FMULs. */
+            float neg_max_scaled = -lmax * softmax_scale_log2;
             float tsum[16];
             #pragma unroll
             for (int c = 0; c < 32; c++) {
-                rv[c] = fast_exp2f(rv[c] - lmax);
+                rv[c] = fast_exp2f(fmaf(rv[c], softmax_scale_log2, neg_max_scaled));
             }
             #pragma unroll
             for (int i = 0; i < 16; i++) tsum[i] = rv[i] + rv[i + 16];
@@ -730,8 +730,7 @@ void flash_attention_2wg(
                 rv[p4*2+0] = S_acc[(p4<<2)|(half<<1)|0];
                 rv[p4*2+1] = S_acc[(p4<<2)|(half<<1)|1];
             }
-            #pragma unroll
-            for (int c = 0; c < 32; c++) rv[c] *= softmax_scale_log2;
+            /* rv[] is UNSCALED — scale fused into exp2 via FMA */
 
             if (is_causal) {
                 const int row = mywarp * 16 + half * 8 + (lane_id / 4);
@@ -748,8 +747,7 @@ void flash_attention_2wg(
                 }
             }
 
-            /* Tree max reduction — breaks 31-deep dependency chain into
-             * 5-level tree. Uses separate temp array to preserve rv[]. */
+            /* Tree max reduction (unscaled rv) */
             float tmax[16];
             #pragma unroll
             for (int i = 0; i < 16; i++) tmax[i] = fmaxf(rv[i], rv[i + 16]);
@@ -763,15 +761,17 @@ void flash_attention_2wg(
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
 
             float new_max = fmaxf(lmax, rowmax[half]);
-            float rescale = fast_exp2f(rowmax[half] - new_max);
+            /* Rescale uses unscaled max difference, scaled via FMA */
+            float rescale = fast_exp2f((rowmax[half] - new_max) * softmax_scale_log2);
             rowmax[half] = new_max;
             o_rescale[half] = rescale;
 
-            /* Exp2 + tree sum — same pattern as prologue */
+            /* Exp2 via FMA: exp2(fma(rv, scale, -max*scale)) */
+            float neg_max_scaled = -new_max * softmax_scale_log2;
             float tsum[16];
             #pragma unroll
             for (int c = 0; c < 32; c++) {
-                rv[c] = fast_exp2f(rv[c] - new_max);
+                rv[c] = fast_exp2f(fmaf(rv[c], softmax_scale_log2, neg_max_scaled));
             }
             #pragma unroll
             for (int i = 0; i < 16; i++) tsum[i] = rv[i] + rv[i + 16];

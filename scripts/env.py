@@ -101,10 +101,26 @@ def _get_env(host_cfg: dict) -> dict:
 
 def _get_network(host_cfg: dict) -> dict:
     n = host_cfg.get("network") or {}
-    return {
+    net = {
         "internet": n.get("internet", True),
         "proxy_bypass_method": n.get("proxy_bypass_method"),
     }
+    # Auto-detect: if host config unavailable, test if pip can reach pypi.nvidia.com
+    # (torch depends on nvidia packages — pypi.org may work but nvidia.com may be blocked)
+    if not n and not net.get("proxy_bypass_method"):
+        try:
+            r = subprocess.run(
+                ["python3", "-c",
+                 "import urllib.request; urllib.request.urlopen('https://pypi.nvidia.com', timeout=3)"],
+                capture_output=True, timeout=8,
+            )
+            if r.returncode != 0:
+                net["internet"] = False
+                net["proxy_bypass_method"] = "ssh_localhost"
+        except Exception:
+            net["internet"] = False
+            net["proxy_bypass_method"] = "ssh_localhost"
+    return net
 
 
 def _get_hardware(host_cfg: dict) -> dict:
@@ -296,8 +312,29 @@ def cmd_install_venv(host_cfg: dict, python_version: str = "3.12", force: bool =
 
     torch_cuda = env.get("torch_cuda")
     if not torch_cuda:
-        print("ERROR: env.torch_cuda not set in host config", file=sys.stderr)
-        return 1
+        # Auto-detect from nvidia-smi driver version
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5,
+            )
+            driver_ver = r.stdout.strip().split("\n")[0]
+            # Map driver to CUDA version: 580.x → 13.0, 570.x → 12.8, 550.x → 12.4
+            major = int(driver_ver.split(".")[0])
+            if major >= 580:
+                torch_cuda = "cu130"
+            elif major >= 570:
+                torch_cuda = "cu128"
+            elif major >= 560:
+                torch_cuda = "cu126"
+            elif major >= 550:
+                torch_cuda = "cu124"
+            else:
+                torch_cuda = "cu121"
+            print(f"  Auto-detected torch_cuda={torch_cuda} from driver {driver_ver}")
+        except Exception:
+            print("ERROR: Cannot determine CUDA version. Set env.torch_cuda in host config.", file=sys.stderr)
+            return 1
 
     print(f"=== Installing kit=venv ===")
     print(f"    Python:    {python_version}")

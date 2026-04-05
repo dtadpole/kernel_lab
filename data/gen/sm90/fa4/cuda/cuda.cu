@@ -552,8 +552,9 @@ void flash_attention_2wg(
                 rv[c] = fast_exp2f(rv[c] - lmax);
                 lsum += rv[c];
             }
-            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 1);
-            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 2);
+            /* Defer quad sum reduction to finalize (CuTe DSL pattern).
+             * Each thread keeps its partial sum; warp shuffle happens once
+             * at the end, saving 4 shuffles per mainloop iteration. */
             rowsumexp[half] = lsum;
 
             #pragma unroll
@@ -692,7 +693,7 @@ void flash_attention_2wg(
             float new_max = fmaxf(lmax, rowmax[half]);
             float rescale = fast_exp2f(rowmax[half] - new_max);
             rowmax[half] = new_max;
-            o_rescale[half] = rescale;  /* save for deferred O rescaling */
+            o_rescale[half] = rescale;
 
             float lsum = 0.0f;
             #pragma unroll
@@ -700,8 +701,7 @@ void flash_attention_2wg(
                 rv[c] = fast_exp2f(rv[c] - new_max);
                 lsum += rv[c];
             }
-            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 1);
-            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 2);
+            /* Deferred: no quad sum shuffle here (CuTe DSL pattern) */
             rowsumexp[half] = rowsumexp[half] * rescale + lsum;
 
             #pragma unroll
@@ -790,6 +790,15 @@ void flash_attention_2wg(
 
     /* ---- Epilogue: finalize and store O via TMA S2G ---- */
     wgmma_fence();
+
+    /* Deferred quad sum reduction (CuTe DSL finalize pattern).
+     * rowsumexp was accumulated per-thread without warp shuffles in the mainloop.
+     * Now do the quad shuffle once, saving 4 shuffles × max_kv_iter iterations. */
+    #pragma unroll
+    for (int half = 0; half < 2; half++) {
+        rowsumexp[half] += __shfl_xor_sync(0xFFFFFFFF, rowsumexp[half], 1);
+        rowsumexp[half] += __shfl_xor_sync(0xFFFFFFFF, rowsumexp[half], 2);
+    }
 
     /* Normalize by softmax sum */
     #pragma unroll

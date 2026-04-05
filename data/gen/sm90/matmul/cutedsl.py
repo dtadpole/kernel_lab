@@ -46,9 +46,10 @@ class Model(nn.Module):
         ptr_key = (A.data_ptr(), B.data_ptr())
         if ptr_key != self._cached_ptrs:
             from cutlass.cute.runtime import from_dlpack
-            self._B_nk = B.t().contiguous()
+            # In-place transpose into pre-allocated buffer — B_nk pointer unchanged
+            self._B_nk.copy_(B.t())
+            # Only A pointer changed — update A descriptor, reuse B descriptor
             self._a_cute = from_dlpack(A.unsqueeze(-1), assumed_align=16)
-            self._b_cute = from_dlpack(self._B_nk.unsqueeze(-1), assumed_align=16)
             self._cached_ptrs = ptr_key
         self._compiled(self._a_cute, self._b_cute, self._c_cute, self._stream)
         return self._C

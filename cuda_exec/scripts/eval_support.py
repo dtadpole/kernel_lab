@@ -141,18 +141,18 @@ def watchdog_handler(signum: int, frame: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def load_reference_entry(reference_root: Path) -> Path:
-    """Find the gen/ Python entry point (cutedsl.py) under workspace reference dir."""
-    candidates = sorted(reference_root.rglob("cutedsl.py"))
-    if len(candidates) == 1:
-        return candidates[0]
-    # Fallback: any .py file with a Model class
+    """Find the reference Python entry point under workspace reference dir.
+
+    Dynamically discovers the entry point — any .py file with a Model class.
+    No hardcoded filenames.
+    """
     all_py = sorted(reference_root.rglob("*.py"))
     for p in all_py:
-        if "Model" in p.read_text(errors="ignore"):
+        if "class Model" in p.read_text(errors="ignore"):
             return p
     raise RuntimeError(
         f"No reference entry point found under {reference_root}; "
-        f"looked for cutedsl.py or any .py with Model class"
+        f"looked for any .py with 'class Model'"
     )
 
 

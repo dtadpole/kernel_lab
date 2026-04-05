@@ -72,24 +72,14 @@ def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Pa
     generated_cu = [path for path in generated if path.suffix == ".cu"]
 
     if len(generated_cu) == 1:
-        if generated_cu[0].name != "generated.cu":
-            raise ValueError((
-                    "the .cu entry file in generated_files must be named generated.cu. "
-                    "Rename your CUDA source to generated.cu and resubmit. "
-                    "Additional header or helper files may use any name."
-                ),
-            )
         return generated_cu[0]
     if len(generated_cu) > 1:
-        raise ValueError((
-                "generated_files must contain exactly one .cu file. We recommend a generator. "
-                "Include a single generated .cu file for the optimized kernel, plus any number of headers or inline helper files if needed."
-            ),
+        raise ValueError(
+            "generated_files must contain exactly one .cu file. "
+            f"Found {len(generated_cu)}: {[p.name for p in generated_cu]}"
         )
-    raise ValueError((
-            "generated_files must contain exactly one .cu file. We recommend a generator. "
-            "Include one generated .cu file for compile; reference_files may include supporting sources, headers, or non-.cu inputs."
-        ),
+    raise ValueError(
+        "generated_files must contain at least one .cu file."
     )
 
 
@@ -506,12 +496,10 @@ def run_compile_task(
             if not cudnn_py_files:
                 raise ValueError("cudnn_files must include at least one .py entry point.")
 
-        if not any(path.name == "cutedsl.py" for path in copied_reference):
-            raise ValueError((
-                    "reference_files must include a file named cutedsl.py as the entry point. "
-                    "Rename your CuTe DSL reference module to cutedsl.py and resubmit. "
-                    "Additional helper files may use any name."
-                ),
+        ref_py_files = [p for p in copied_reference if p.suffix == ".py"]
+        if not ref_py_files:
+            raise ValueError(
+                "reference_files must include at least one .py entry point."
             )
 
         source = _pick_single_cuda_source(copied_generated, copied_reference)
@@ -864,17 +852,22 @@ def run_profile_task(
                 "--set", "detailed",
             ]
         elif side == "reference":
-            reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "cutedsl.py"
-            if not reference_py.exists():
-                raise ValueError(f"cutedsl.py not found at {reference_py} — compile first to stage inputs",
-                )
+            ref_dir = Path(workspace["workspace_path"]) / "inputs" / "reference"
+            # Dynamically find reference entry point
+            ref_py_files = sorted(ref_dir.glob("*.py")) if ref_dir.exists() else []
+            reference_py = None
+            for p in ref_py_files:
+                if "class Model" in p.read_text(errors="ignore"):
+                    reference_py = p
+                    break
+            if reference_py is None:
+                raise ValueError(f"No reference .py entry point found in {ref_dir} — compile first to stage inputs")
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
                 "--target", sys.executable, str(reference_py),
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
-                "--kernel-name", 'regex:"cutlass|vector_add|flash_fwd"',
             ]
         else:  # side == "cudnn"
             cudnn_dir = Path(workspace["workspace_path"]) / "inputs" / "cudnn"

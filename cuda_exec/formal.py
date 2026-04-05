@@ -34,11 +34,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 def _load_all_configs(kernel: str, arch: str) -> Dict[str, Dict[str, Any]]:
     """Load ALL configs from the fixture. No selection, no filtering."""
-    configs_path = _PROJECT_ROOT / "data" / "fixtures" / arch / kernel / "configs.json"
+    configs_path = _PROJECT_ROOT / "data" / "configs" / f"{kernel}.json"
     if not configs_path.exists():
         raise FileNotFoundError(
             f"Configs not found: {configs_path}. "
-            f"Available fixtures: {list((_PROJECT_ROOT / 'data' / 'fixtures' / arch).glob('*/configs.json'))}"
+            f"Available configs: {list((_PROJECT_ROOT / 'data' / 'configs').glob('*.json'))}"
         )
     with open(configs_path, encoding="utf-8") as f:
         configs = json.load(f)
@@ -49,36 +49,35 @@ def _load_all_configs(kernel: str, arch: str) -> Dict[str, Dict[str, Any]]:
 
 def _load_source_files(kernel: str, arch: str) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str] | None]:
     """Load reference, generated, and optional cuDNN source files from fixture/generated paths."""
-    fixture_dir = _PROJECT_ROOT / "data" / "fixtures" / arch / kernel
-    generated_dir = _PROJECT_ROOT / "data" / "generated" / arch / kernel
+    ref_dir = _PROJECT_ROOT / "data" / "ref" / kernel
+    gen_dir = _PROJECT_ROOT / "data" / "gen" / arch / kernel
 
-    # Reference files
+    # Reference files (arch-agnostic library implementations)
     reference_files: Dict[str, str] = {}
-    if fixture_dir.exists():
-        for f in fixture_dir.iterdir():
-            if f.is_file() and f.suffix in (".py", ".cu", ".h", ".cuh"):
-                if f.name == "configs.json":
-                    continue
+    if gen_dir.exists():
+        for f in gen_dir.iterdir():
+            if f.is_file() and f.suffix in (".py", ".h", ".cuh"):
                 reference_files[f.name] = f.read_text(encoding="utf-8")
-    if "cutedsl.py" not in reference_files:
-        raise FileNotFoundError(f"cutedsl.py not found in {fixture_dir}")
 
-    # Generated files
+    # Generated files (.cu from gen/)
     generated_files: Dict[str, str] = {}
-    generated_cu = generated_dir / "generated.cu"
+    generated_cu = gen_dir / "cuda.cu"
     if not generated_cu.exists():
-        raise FileNotFoundError(f"generated.cu not found at {generated_cu}")
+        raise FileNotFoundError(f"cuda.cu not found at {generated_cu}")
     generated_files["generated.cu"] = generated_cu.read_text(encoding="utf-8")
-    # Include any headers in the generated dir
-    for f in generated_dir.iterdir():
-        if f.is_file() and f.suffix in (".h", ".cuh") and f.name != "generated.cu":
+    for f in gen_dir.iterdir():
+        if f.is_file() and f.suffix in (".h", ".cuh"):
             generated_files[f.name] = f.read_text(encoding="utf-8")
 
     # Optional cuDNN files
+    # cuDNN/cuBLAS baseline from ref/ (arch-agnostic)
     cudnn_files: Dict[str, str] | None = None
-    cudnn_py = fixture_dir / "cudnn.py"
-    if cudnn_py.exists():
-        cudnn_files = {"cudnn.py": cudnn_py.read_text(encoding="utf-8")}
+    if ref_dir.exists():
+        for name in ("cublas.py", "cudnn.py"):
+            p = ref_dir / name
+            if p.exists():
+                cudnn_files = {name: p.read_text(encoding="utf-8")}
+                break
 
     return reference_files, generated_files, cudnn_files
 

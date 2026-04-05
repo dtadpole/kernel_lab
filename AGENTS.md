@@ -422,34 +422,53 @@ Results are stored under `results/<arch>/<device>/matmul/` (or other kernel fami
 
 ```text
 data/
-├── fixtures/           # Reference implementations and configs, by arch
-│   ├── sm80/
+├── configs/            # Benchmark configs — arch-agnostic, one per kernel
+│   ├── matmul.json     # 6 size configs (256–8192)
+│   ├── fa4.json        # 6 causal/noncausal configs
+│   ├── vecadd.json
+│   └── matmul_rtx5090.json  # device-specific config variants
+│
+├── ref/                # Reference implementations — arch-agnostic library code
+│   ├── matmul/
+│   │   └── cublas.py   # torch.mm() → cuBLAS baseline
+│   ├── fa4/
+│   │   ├── cudnn.py    # torch SDPA → cuDNN/flash baseline
+│   │   └── cutedsl.py  # flash_attn.cute library (FA4 CuTe DSL)
+│   └── vecadd/
+│       └── cublas.py
+│
+├── gen/                # Generated implementations — arch-specific
 │   ├── sm90/
-│   │   ├── matmul/               # cute_gemm_sm90.py, cudnn.py, configs.json
-│   │   └── fa4/                  # cutedsl.py, cudnn.py, configs.json
-│   ├── sm100/
+│   │   ├── matmul/
+│   │   │   ├── cutedsl.py       # CuTe DSL WGMMA kernel (SM90-specific)
+│   │   │   ├── cute_gemm_sm90.py  # helper module
+│   │   │   └── cuda.cu          # hand-written CUDA+PTX WGMMA
+│   │   └── fa4/
+│   │       └── cuda.cu
 │   └── sm120/
-│       ├── devices.json          # SM120 device registry (RTX 5090 vs RTX PRO 6000)
-│       ├── vecadd/               # cutedsl.py, cudnn.py, configs.json
-│       ├── matmul/               # cutedsl.py, cute_gemm.py, cudnn.py, configs*.json
-│       └── fa4/                  # cutedsl.py, cudnn.py, configs*.json
-├── generated/          # Generated CUDA kernels, by arch
-│   ├── sm90/
-│   │   ├── matmul/generated.cu
-│   │   └── fa4/generated.cu
-│   └── sm120/
-│       ├── vecadd/generated.cu
-│       ├── matmul/generated.cu
-│       └── fa4/generated.cu
+│       ├── matmul/
+│       │   ├── cutedsl.py       # CuTe DSL mma.sync kernel (SM120-specific)
+│       │   └── cuda.cu
+│       ├── fa4/
+│       │   ├── cutedsl.py
+│       │   └── cuda.cu
+│       └── vecadd/
+│           ├── cutedsl.py
+│           └── cuda.cu
+│
+├── fixtures/           # [DEPRECATED] old layout — will be removed
+├── generated/          # [DEPRECATED] old layout — will be removed
 └── nvidia-docs/        # Cached NVIDIA documentation
 
 .worktrees/             # Git worktrees for isolated development (git-ignored)
 ```
 
-- `data/` is tracked in git — project data (fixtures, generated code, docs)
-- `.worktrees/` is git-ignored — ephemeral working copies for parallel development
-- Fixture entry point files are named `cutedsl.py` (CuTe DSL reference implementations)
-- Device-specific configs use `configs_<device>.json` naming (e.g. `configs_rtx5090.json`)
+**Layout rules:**
+- `ref/` = arch-agnostic library implementations. Same code runs on any GPU.
+- `gen/` = arch-specific code we wrote. Contains arch instructions (WGMMA, mma.sync).
+- `configs/` = benchmark configs. Shape/size data, no arch dependency.
+- Harness auto-detects by extension: `.py` → Python harness, `.cu` → C harness.
+- `data/fixtures/` and `data/generated/` are deprecated — use `ref/`/`gen/`/`configs/`.
 
 ### 12. Benchmarking rules
 
@@ -469,9 +488,10 @@ Both harnesses enforce:
 - **Standardized timing**: CUDA events, 5 warmup + 10 trials (configurable)
 - **Fair comparison**: identical methodology across all three implementations
 
-**Fixture files (`cutedsl.py`, `cudnn.py`) must NOT contain their own timing code.**
-They define only `Model`, `get_inputs()`, and `get_init_inputs()` — the harness
-provides all measurement infrastructure. Any `main()`, timing loop, or CUDA event
+**Implementation files (`cutedsl.py`, `cublas.py`, `cudnn.py`) must NOT contain
+their own timing or input generation code.** They define only `Model(nn.Module)`
+and `get_init_inputs()`. Input generation is the harness's responsibility via
+`generate_inputs()` in `eval_support.py`. Any `main()`, `get_inputs()`, timing loop, or CUDA event
 code in fixture files is a bug and must be removed.
 
 Running directly (e.g., `torch.mm()` in a Python loop) inflates numbers by up to 15% at large

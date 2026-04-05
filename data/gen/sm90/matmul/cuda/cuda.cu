@@ -360,9 +360,16 @@ extern "C" int kernel_run(
     __nv_bfloat16* C = outputs[0];
     int M = dim, N = dim, K = dim;
 
-    /* Pre-transpose B: K×N → Bt: N×K */
-    __nv_bfloat16* Bt;
-    cudaMalloc(&Bt, (size_t)K * N * sizeof(__nv_bfloat16));
+    /* Pre-transpose B: K×N → Bt: N×K (cached buffer) */
+    static __nv_bfloat16* s_Bt = nullptr;
+    static size_t s_Bt_size = 0;
+    size_t bt_bytes = (size_t)K * N * sizeof(__nv_bfloat16);
+    if (s_Bt_size < bt_bytes) {
+        if (s_Bt) cudaFree(s_Bt);
+        cudaMalloc(&s_Bt, bt_bytes);
+        s_Bt_size = bt_bytes;
+    }
+    __nv_bfloat16* Bt = s_Bt;
     {
         dim3 tb(32, 32);
         dim3 tg((N + 31) / 32, (K + 31) / 32);
@@ -402,6 +409,6 @@ extern "C" int kernel_run(
     matmul_wgmma_tma<<<grid, block, SMEM_TOTAL, stream>>>(
         C, M, N, K, tma_A, tma_B);
 
-    cudaFree(Bt);
+    /* Bt buffer is cached — not freed per call */
     return 0;
 }

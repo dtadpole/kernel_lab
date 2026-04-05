@@ -9,6 +9,7 @@ Key differences from ik:exec:
 - ALL implementations are trialed (or a specified subset)
 - No profiling (that's ik:exec's job during iteration)
 - Simplified metadata (no turn management)
+- Snapshot-first: sources are snapshotted to kernel_lab_kb BEFORE compile/trial
 """
 
 from __future__ import annotations
@@ -40,19 +41,37 @@ def formal_benchmark(
 ) -> dict:
     """Atomic compile + trial ALL configs for specified implementations.
 
-    Args:
-        kernel: Kernel name (e.g., "fa4", "matmul", "vecadd")
-        arch: GPU architecture (e.g., "sm90")
-        impls: "all" or list of impl slugs (e.g., ["ref-cublas", "gen-cuda"])
-        timeout_seconds: Timeout per config
-
-    Returns:
-        Dict with per-implementation compile + trial results
+    Snapshot-first flow:
+    1. Snapshot sources + configs to kernel_lab_kb (prepare_run)
+    2. Resolve impls from the snapshot (never the original files)
+    3. Compile + trial using snapshot file contents
+    4. Write results + check gems (finalize_run)
     """
+    # --- Phase 1: Snapshot ---
+    run_dir = None
+    snapshot_data = None
+    try:
+        from cuda_exec.trajectory import prepare_run
+        run_dir = prepare_run(kernel, arch, impls, timeout_seconds)
+        snapshot_data = run_dir / "data"
+        logger.info("Snapshot written to %s", run_dir)
+    except Exception as exc:
+        logger.warning("Failed to prepare snapshot: %s — falling back to original data/", exc)
+
+    # --- Phase 2: Resolve from snapshot (or original if snapshot failed) ---
+    configs = load_configs(kernel, data_root=snapshot_data)
+    resolved = resolve_impls(kernel, arch, impls, data_root=snapshot_data)
+
+    # --- Isolate runtime: bench uses ~/.cuda_exec_bench/, not ~/.cuda_exec/ ---
+    import os
+    ts_str = run_dir.name if run_dir else f"{int(time.time())}"
+    bench_runtime = Path.home() / ".cuda_exec_bench" / kernel / arch / ts_str
+    bench_runtime.mkdir(parents=True, exist_ok=True)
+    old_exec_root = os.environ.get("CUDA_EXEC_ROOT")
+    os.environ["CUDA_EXEC_ROOT"] = str(bench_runtime)
+
     # Auto-generate run_tag for workspace isolation
     run_tag = f"bench-{kernel}-{int(time.time())}"
-    configs = load_configs(kernel)
-    resolved = resolve_impls(kernel, arch, impls)
 
     refs = [r for r in resolved if r["source"] == "ref"]
     gens = [r for r in resolved if r["source"] == "gen"]
@@ -76,7 +95,6 @@ def formal_benchmark(
 
         if gen["file_type"] == "cu":
             # .cu needs compile
-            # reference = primary_ref .py files + any .py gen impl files (for measurement)
             ref_files = dict(primary_ref["files"])
             # Include .py gen impls as additional reference files
             py_gens = [g for g in gens if g["file_type"] == "py"]
@@ -105,22 +123,17 @@ def formal_benchmark(
                 }
                 continue
         else:
-            # .py gen implementations: compile with primary_ref as reference,
-            # but pass gen's .py files as the reference (it becomes the "reference"
-            # in the trial), and use a no-op .cu stub.
-            # For now, skip .py gens in the compile→trial flow — they'll be
-            # measured as part of the reference/cudnn side when another .cu is trialed.
             results[gen["slug"]] = {
                 "impl": gen["slug"],
-                "compile_ok": None,  # N/A — .py impl, no compile needed
-                "trial_ok": None,    # measured as reference side in .cu trials
+                "compile_ok": None,
+                "trial_ok": None,
                 "compile_result": None,
                 "trial_result": None,
                 "note": "Python impl — measured as reference/cudnn side when .cu impls are trialed",
             }
             continue
 
-        # Trial ALL configs (only for .cu impls that were compiled)
+        # Trial ALL configs
         trial_req = TrialRequest(
             metadata=metadata,
             timeout_seconds=timeout_seconds,
@@ -147,14 +160,19 @@ def formal_benchmark(
         "results": results,
     }
 
-    # Write run + gem to kernel_lab_kb
-    try:
-        from cuda_exec.trajectory import write_trajectory
-        traj_path = write_trajectory(bench_result)
-        if traj_path:
-            logger.info("Trajectory written to %s", traj_path)
-    except Exception as exc:
-        logger.warning("Failed to write trajectory: %s", exc)
+    # --- Phase 4: Restore runtime env + finalize ---
+    if old_exec_root is not None:
+        os.environ["CUDA_EXEC_ROOT"] = old_exec_root
+    else:
+        os.environ.pop("CUDA_EXEC_ROOT", None)
+
+    if run_dir is not None:
+        try:
+            from cuda_exec.trajectory import finalize_run
+            finalize_run(run_dir, bench_result)
+            logger.info("Results finalized in %s", run_dir)
+        except Exception as exc:
+            logger.warning("Failed to finalize run: %s", exc)
 
     return bench_result
 

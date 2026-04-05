@@ -25,20 +25,23 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_DATA_ROOT = _PROJECT_ROOT / "data"
 
 
-def _ref_dir(kernel: str) -> Path:
-    return _PROJECT_ROOT / "data" / "ref" / kernel
+def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
+    return (data_root or _DEFAULT_DATA_ROOT) / "ref" / kernel
 
 
-def _gen_dir(kernel: str, arch: str) -> Path:
-    return _PROJECT_ROOT / "data" / "gen" / arch / kernel
+def _gen_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
+    return (data_root or _DEFAULT_DATA_ROOT) / "gen" / arch / kernel
 
 
 def resolve_impl(
     kernel: str,
     arch: str,
     impl_slug: str,
+    *,
+    data_root: Path | None = None,
 ) -> dict:
     """Resolve an implementation slug to its source files and metadata.
 
@@ -71,9 +74,9 @@ def resolve_impl(
     source, name = parts
 
     if source == "ref":
-        base_dir = _ref_dir(kernel)
+        base_dir = _ref_dir(kernel, data_root)
     else:
-        base_dir = _gen_dir(kernel, arch)
+        base_dir = _gen_dir(kernel, arch, data_root)
 
     # Resolve entry point: try .py first, then .cu
     entry_py = base_dir / f"{name}.py"
@@ -116,7 +119,7 @@ def resolve_impl(
     }
 
 
-def list_impls(kernel: str, arch: str) -> List[dict]:
+def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List[dict]:
     """List all available implementations for a kernel+arch.
 
     Scans ref/{kernel}/ and gen/{arch}/{kernel}/ for entry point files.
@@ -130,7 +133,7 @@ def list_impls(kernel: str, arch: str) -> List[dict]:
     impls = []
 
     # Scan ref/
-    ref_dir = _ref_dir(kernel)
+    ref_dir = _ref_dir(kernel, data_root)
     if ref_dir.exists():
         for f in sorted(ref_dir.iterdir()):
             if f.is_file() and f.suffix in (".py", ".cu"):
@@ -143,7 +146,7 @@ def list_impls(kernel: str, arch: str) -> List[dict]:
                 })
 
     # Scan gen/
-    gen_dir = _gen_dir(kernel, arch)
+    gen_dir = _gen_dir(kernel, arch, data_root)
     if gen_dir.exists():
         # Only include files that are entry points (have Model class or kernel_run)
         for f in sorted(gen_dir.iterdir()):
@@ -176,6 +179,8 @@ def resolve_impls(
     kernel: str,
     arch: str,
     impl_slugs: str | List[str],
+    *,
+    data_root: Path | None = None,
 ) -> List[dict]:
     """Resolve one or more implementation slugs.
 
@@ -189,7 +194,7 @@ def resolve_impls(
         ValueError: if no reference implementation is found
     """
     if impl_slugs == "all":
-        available = list_impls(kernel, arch)
+        available = list_impls(kernel, arch, data_root=data_root)
         slugs = [impl["slug"] for impl in available]
     elif isinstance(impl_slugs, str):
         slugs = [impl_slugs]
@@ -201,7 +206,7 @@ def resolve_impls(
             f"No implementations found for kernel '{kernel}' arch '{arch}'"
         )
 
-    resolved = [resolve_impl(kernel, arch, s) for s in slugs]
+    resolved = [resolve_impl(kernel, arch, s, data_root=data_root) for s in slugs]
 
     # Classify by slug prefix: ref- = reference, gen- = generated
     refs = [r for r in resolved if r["source"] == "ref"]
@@ -216,13 +221,14 @@ def resolve_impls(
     return resolved
 
 
-def load_configs(kernel: str) -> Dict[str, Dict[str, Any]]:
+def load_configs(kernel: str, *, data_root: Path | None = None) -> Dict[str, Dict[str, Any]]:
     """Load ALL configs for a kernel."""
-    configs_path = _PROJECT_ROOT / "data" / "configs" / f"{kernel}.json"
+    root = data_root or _DEFAULT_DATA_ROOT
+    configs_path = root / "configs" / f"{kernel}.json"
     if not configs_path.exists():
         raise FileNotFoundError(
             f"Configs not found: {configs_path}. "
-            f"Available: {[p.stem for p in (_PROJECT_ROOT / 'data' / 'configs').glob('*.json')]}"
+            f"Available: {_available_configs_hint(data_root)}"
         )
     import json
     with open(configs_path, encoding="utf-8") as f:
@@ -230,3 +236,11 @@ def load_configs(kernel: str) -> Dict[str, Dict[str, Any]]:
     if not configs:
         raise ValueError(f"Empty configs file: {configs_path}")
     return configs
+
+
+def _available_configs_hint(data_root: Path | None = None) -> list[str]:
+    root = data_root or _DEFAULT_DATA_ROOT
+    configs_dir = root / "configs"
+    if configs_dir.exists():
+        return [p.stem for p in configs_dir.glob("*.json")]
+    return []

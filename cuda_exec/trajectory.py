@@ -1,8 +1,10 @@
 """Write benchmark runs and gems to kernel_lab_kb.
 
-Called by formal.py after each benchmark run to persist:
-- runs/: every benchmark result (sources, compile info, results.json, report.md)
-- gems/: only runs where at least one config beats the previous best
+Two-phase flow:
+1. prepare_run() — called BEFORE bench: snapshot sources + configs, write command.json
+2. finalize_run() — called AFTER bench: write per-impl results, check gems
+
+All compile/trial must use the snapshot in run_dir/data/, never the original files.
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GEM_ABS_THRESHOLD_MS = 0.002   # minimum absolute improvement in milliseconds
 GEM_REL_THRESHOLD = 0.002      # minimum relative improvement (0.002 = 0.2%)
 
+
+# ---------------------------------------------------------------------------
+# Git / device helpers
+# ---------------------------------------------------------------------------
 
 def _git_commit_hash() -> str:
     try:
@@ -49,6 +55,31 @@ def _git_branch() -> str:
     except Exception:
         return "unknown"
 
+
+def _device_name() -> str:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _gpu_index() -> int:
+    import os
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cvd:
+        try:
+            return int(cvd.split(",")[0])
+        except ValueError:
+            pass
+    return -1
+
+
+# ---------------------------------------------------------------------------
+# Compile info parsing
+# ---------------------------------------------------------------------------
 
 def _parse_ptxas(stderr: str) -> dict:
     info: dict[str, Any] = {}
@@ -84,27 +115,6 @@ def _parse_resource_usage(stdout: str) -> dict:
     return info
 
 
-def _device_name() -> str:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return torch.cuda.get_device_name(0)
-    except Exception:
-        pass
-    return "unknown"
-
-
-def _gpu_index() -> int:
-    import os
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if cvd:
-        try:
-            return int(cvd.split(",")[0])
-        except ValueError:
-            pass
-    return -1
-
-
 def _extract_compile_info(compile_result: dict) -> dict:
     info: dict[str, Any] = {"ok": compile_result.get("all_ok", False)}
     tool_outputs = compile_result.get("tool_outputs", {})
@@ -129,6 +139,25 @@ def _extract_compile_info(compile_result: dict) -> dict:
 
     return info
 
+
+def _copy_compile_text(compile_result: dict, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    tool_outputs = compile_result.get("tool_outputs", {})
+    for key in ("ptxas", "resource_usage"):
+        entry = tool_outputs.get(key, {})
+        if not isinstance(entry, dict):
+            continue
+        for stream in ("stdout", "stderr"):
+            obj = entry.get(stream, {})
+            if isinstance(obj, dict):
+                content = obj.get("content", "") or ""
+                if content.strip():
+                    (dest / f"{key}.{stream}.txt").write_text(content)
+
+
+# ---------------------------------------------------------------------------
+# Config results extraction
+# ---------------------------------------------------------------------------
 
 def _extract_config_results(trial_result: dict) -> dict:
     configs_out: dict[str, dict] = {}
@@ -158,25 +187,11 @@ def _extract_config_results(trial_result: dict) -> dict:
     return configs_out
 
 
-def _load_latest_results(base_dir: Path) -> dict | None:
-    """Load results.json from the most recent timestamped subdirectory."""
-    if not base_dir.exists():
-        return None
-    timestamps = sorted(
-        [d.name for d in base_dir.iterdir() if d.is_dir()],
-        reverse=True,
-    )
-    for ts in timestamps:
-        results_file = base_dir / ts / "results.json"
-        if results_file.exists():
-            try:
-                return json.loads(results_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-    return None
+# ---------------------------------------------------------------------------
+# Report generation
+# ---------------------------------------------------------------------------
 
-
-def _generate_report(results: dict, previous: dict | None = None, gem_info: dict | None = None) -> str:
+def _generate_report(results: dict, gem_info: dict | None = None) -> str:
     kernel = results["kernel"]
     arch = results["arch"]
     impl = results["impl"]
@@ -210,18 +225,8 @@ def _generate_report(results: dict, previous: dict | None = None, gem_info: dict
         lines.append(f"**Gem:** {len(improved)} config(s) improved — {', '.join(improved)}")
 
     lines.append("")
-
-    prev_configs = previous.get("configs", {}) if previous else {}
-    has_previous = bool(prev_configs)
-
-    header = "| Config | Correct | Ref (ms) | Gen (ms) | Speedup |"
-    sep = "|--------|---------|----------|----------|---------|"
-    if has_previous:
-        header += " Prev (ms) | Delta |"
-        sep += "-----------|-------|"
-
-    lines.append(header)
-    lines.append(sep)
+    lines.append("| Config | Correct | Ref (ms) | Gen (ms) | Speedup |")
+    lines.append("|--------|---------|----------|----------|---------|")
 
     configs = results.get("configs", {})
     for slug, cfg in configs.items():
@@ -234,61 +239,17 @@ def _generate_report(results: dict, previous: dict | None = None, gem_info: dict
         gen_str = f"{gen_ms:.4f}" if gen_ms is not None else "N/A"
         spd_str = f"{speedup:.2f}\u00d7" if speedup is not None else "N/A"
 
-        row = f"| {slug} | {correct} | {ref_str} | {gen_str} | {spd_str} |"
-
-        if has_previous:
-            prev = prev_configs.get(slug, {})
-            prev_ms = prev.get("gen_median_ms")
-            if prev_ms is not None and gen_ms is not None and prev_ms > 0:
-                delta_pct = (prev_ms - gen_ms) / prev_ms * 100
-                sign = "+" if delta_pct >= 0 else ""
-                row += f" {prev_ms:.4f} | {sign}{delta_pct:.1f}% |"
-            else:
-                row += " N/A | N/A |"
-
-        lines.append(row)
+        lines.append(f"| {slug} | {correct} | {ref_str} | {gen_str} | {spd_str} |")
 
     lines.append("")
     return "\n".join(lines)
 
 
-def _copy_sources(kernel: str, arch: str, impl_slug: str, dest: Path) -> None:
-    ref_dir = PROJECT_ROOT / "data" / "ref" / kernel
-    gen_dir = PROJECT_ROOT / "data" / "gen" / arch / kernel
-
-    ref_dest = dest / "reference"
-    if ref_dir.exists():
-        ref_dest.mkdir(parents=True, exist_ok=True)
-        for f in ref_dir.iterdir():
-            if f.is_file():
-                shutil.copy2(f, ref_dest / f.name)
-
-    gen_dest = dest / "generated"
-    if gen_dir.exists():
-        gen_dest.mkdir(parents=True, exist_ok=True)
-        for f in gen_dir.iterdir():
-            if f.is_file():
-                shutil.copy2(f, gen_dest / f.name)
-
-
-def _copy_compile_text(compile_result: dict, dest: Path) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
-    tool_outputs = compile_result.get("tool_outputs", {})
-
-    for key in ("ptxas", "resource_usage"):
-        entry = tool_outputs.get(key, {})
-        if not isinstance(entry, dict):
-            continue
-        for stream in ("stdout", "stderr"):
-            obj = entry.get(stream, {})
-            if isinstance(obj, dict):
-                content = obj.get("content", "") or ""
-                if content.strip():
-                    (dest / f"{key}.{stream}.txt").write_text(content)
-
+# ---------------------------------------------------------------------------
+# Gem logic
+# ---------------------------------------------------------------------------
 
 def _next_gem_version(gem_base: Path) -> int:
-    """Return the next gem version number (1-indexed) by scanning existing directories."""
     if not gem_base.exists():
         return 1
     max_ver = 0
@@ -302,15 +263,28 @@ def _next_gem_version(gem_base: Path) -> int:
     return max_ver + 1
 
 
+def _load_latest_gem_results(gem_base: Path) -> dict | None:
+    """Load results.json from the most recent gem."""
+    if not gem_base.exists():
+        return None
+    versions = sorted(
+        [d.name for d in gem_base.iterdir() if d.is_dir() and d.name.startswith("v")],
+        reverse=True,
+    )
+    for ver_dir in versions:
+        results_file = gem_base / ver_dir / "results.json"
+        if results_file.exists():
+            try:
+                return json.loads(results_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+    return None
+
+
 def _check_gem(current_configs: dict, gem_base: Path) -> dict | None:
-    """Check if any config in this run beats the latest gem.
+    """Check if any config beats the latest gem. Returns gem_info or None."""
+    previous = _load_latest_gem_results(gem_base)
 
-    Returns gem_info dict if this is a new gem, None otherwise.
-    First run for a kernel/arch/impl is always a gem.
-    """
-    previous = _load_latest_results(gem_base)
-
-    # First run is always a gem
     if previous is None:
         return {
             "previous_run": None,
@@ -350,103 +324,148 @@ def _check_gem(current_configs: dict, gem_base: Path) -> dict | None:
     }
 
 
-def _write_single_run(
-    kernel: str, arch: str, impl_slug: str, impl_data: dict,
-    ts: datetime, ts_str: str, base_dir: Path,
-    gem_info: dict | None = None,
-    dir_name: str | None = None,
-) -> tuple[Path, dict]:
-    """Write one run or gem directory. Returns (path, results_dict)."""
-    run_dir = base_dir / kernel / arch / impl_slug / (dir_name or ts_str)
+# ---------------------------------------------------------------------------
+# Phase 1: prepare_run() — BEFORE benchmark
+# ---------------------------------------------------------------------------
+
+def prepare_run(
+    kernel: str,
+    arch: str,
+    impls: str | list[str],
+    timeout_seconds: int,
+) -> Path:
+    """Create run dir, snapshot sources + configs. Returns run_dir path.
+
+    Call this BEFORE compile/trial. The snapshot in run_dir/data/ is the
+    canonical source for all subsequent resolve_impls/load_configs calls.
+    """
+    if not KB_REPO.exists():
+        raise FileNotFoundError(f"kernel_lab_kb not found at {KB_REPO}")
+
+    ts = datetime.now()
+    ts_str = ts.strftime("%Y%m%d_%H%M%S")
+    run_dir = RUNS_DIR / kernel / arch / ts_str
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Copy source files
-    _copy_sources(kernel, arch, impl_slug, run_dir / "sources")
-
-    # 2. Copy compile text files
-    compile_result = impl_data.get("compile_result")
-    if compile_result:
-        _copy_compile_text(compile_result, run_dir / "compile")
-
-    # 3. Build results.json
-    compile_info = _extract_compile_info(compile_result) if compile_result else {"ok": False}
-    trial_result = impl_data.get("trial_result", {})
-    config_results = _extract_config_results(trial_result) if trial_result else {}
-
-    results = {
+    # 1. Write command.json
+    command = {
         "kernel": kernel,
         "arch": arch,
-        "impl": impl_slug,
+        "impls": impls,
+        "timeout_seconds": timeout_seconds,
         "timestamp": ts.isoformat(timespec="seconds"),
         "git_commit": _git_commit_hash(),
         "git_branch": _git_branch(),
         "device": _device_name(),
         "gpu_index": _gpu_index(),
-        "compile": compile_info,
-        "configs": config_results,
     }
-    if gem_info:
-        results["gem"] = gem_info
+    (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n")
 
-    (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    # 2. Snapshot data/ref/<kernel>/
+    ref_src = PROJECT_ROOT / "data" / "ref" / kernel
+    ref_dst = run_dir / "data" / "ref" / kernel
+    if ref_src.exists():
+        shutil.copytree(ref_src, ref_dst)
 
-    # 4. Generate report.md
-    run_base = RUNS_DIR / kernel / arch / impl_slug
-    previous = _load_latest_results(run_base)
-    report = _generate_report(results, previous, gem_info)
-    (run_dir / "report.md").write_text(report)
+    # 3. Snapshot data/gen/<arch>/<kernel>/
+    gen_src = PROJECT_ROOT / "data" / "gen" / arch / kernel
+    gen_dst = run_dir / "data" / "gen" / arch / kernel
+    if gen_src.exists():
+        shutil.copytree(gen_src, gen_dst)
 
-    return run_dir, results
+    # 4. Snapshot data/configs/<kernel>.json
+    cfg_src = PROJECT_ROOT / "data" / "configs" / f"{kernel}.json"
+    cfg_dst = run_dir / "data" / "configs" / f"{kernel}.json"
+    cfg_dst.parent.mkdir(parents=True, exist_ok=True)
+    if cfg_src.exists():
+        shutil.copy2(cfg_src, cfg_dst)
+
+    return run_dir
 
 
-def write_trajectory(
-    bench_result: dict,
-    *,
-    timestamp: datetime | None = None,
-) -> Path | None:
-    """Write benchmark run + gem (if applicable) to kernel_lab_kb.
+# ---------------------------------------------------------------------------
+# Phase 2: finalize_run() — AFTER benchmark
+# ---------------------------------------------------------------------------
 
-    Returns:
-        Path to the run directory, or None if KB repo not found.
-    """
-    if not KB_REPO.exists():
-        return None
-
-    ts = timestamp or datetime.now()
-    ts_str = ts.strftime("%Y%m%d_%H%M%S")
+def finalize_run(run_dir: Path, bench_result: dict) -> None:
+    """Write per-impl results + check gems after bench completes."""
     kernel = bench_result["kernel"]
     arch = bench_result["arch"]
+    ts_str = run_dir.name
 
-    written_paths: list[Path] = []
+    # Load command.json for metadata
+    cmd = json.loads((run_dir / "command.json").read_text())
 
     for impl_slug, impl_data in bench_result.get("results", {}).items():
         if impl_data.get("compile_ok") is None:
             continue
 
-        # Write run (always)
-        run_path, results = _write_single_run(
-            kernel, arch, impl_slug, impl_data, ts, ts_str, RUNS_DIR,
-        )
-        written_paths.append(run_path)
+        impl_dir = run_dir / "impls" / impl_slug
+        impl_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if this is a gem
+        # Write compile info
+        compile_result = impl_data.get("compile_result")
+        if compile_result:
+            _copy_compile_text(compile_result, impl_dir / "compile")
+
+        # Build results.json
+        compile_info = _extract_compile_info(compile_result) if compile_result else {"ok": False}
+        trial_result = impl_data.get("trial_result", {})
+        config_results = _extract_config_results(trial_result) if trial_result else {}
+
+        results = {
+            "kernel": kernel,
+            "arch": arch,
+            "impl": impl_slug,
+            "timestamp": cmd["timestamp"],
+            "git_commit": cmd["git_commit"],
+            "git_branch": cmd["git_branch"],
+            "device": cmd["device"],
+            "gpu_index": cmd["gpu_index"],
+            "compile": compile_info,
+            "configs": config_results,
+        }
+        (impl_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+
+        # Generate report.md
+        report = _generate_report(results)
+        (impl_dir / "report.md").write_text(report)
+
+        # Check gem
         gem_base = GEMS_DIR / kernel / arch / impl_slug
-        gem_info = _check_gem(results.get("configs", {}), gem_base)
-
+        gem_info = _check_gem(config_results, gem_base)
         if gem_info:
             ver = _next_gem_version(gem_base)
             gem_dir_name = f"v{ver:03d}_{ts_str}"
             gem_info["version"] = ver
-            _write_single_run(
-                kernel, arch, impl_slug, impl_data, ts, ts_str, GEMS_DIR,
-                gem_info=gem_info, dir_name=gem_dir_name,
-            )
+            gem_dir = gem_base / gem_dir_name
+            gem_dir.mkdir(parents=True, exist_ok=True)
 
-    # Auto-commit
-    if written_paths:
-        _auto_commit(kernel, arch, ts_str)
+            # Copy snapshot sources to gem
+            snapshot_data = run_dir / "data"
+            for subdir in ("ref", "gen", "configs"):
+                src = snapshot_data / subdir
+                dst = gem_dir / "data" / subdir
+                if src.exists():
+                    if src.is_dir():
+                        shutil.copytree(src, dst)
+                    else:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
 
-    return written_paths[0] if written_paths else None
+            # Copy compile info to gem
+            if compile_result:
+                _copy_compile_text(compile_result, gem_dir / "compile")
+
+            # Write gem results.json with gem metadata
+            gem_results = {**results, "gem": gem_info}
+            (gem_dir / "results.json").write_text(json.dumps(gem_results, indent=2) + "\n")
+
+            # Write gem report.md
+            gem_report = _generate_report(gem_results, gem_info)
+            (gem_dir / "report.md").write_text(gem_report)
+
+    _auto_commit(kernel, arch, ts_str)
 
 
 def _auto_commit(kernel: str, arch: str, ts_str: str) -> None:

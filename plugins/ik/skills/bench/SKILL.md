@@ -25,29 +25,23 @@ development — use `/ik:exec` for that.
 cd /home/zhenc/kernel_lab
 ```
 
-### Run benchmark (auto-detects GPU arch)
+### Run benchmark
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -c "
-from cuda_exec.formal import formal_benchmark
-import json, subprocess
-
-cc = subprocess.check_output(
-    ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
-    text=True
-).strip().split('\n')[0]
-arch = 'sm' + cc.replace('.', '')
-
-result = formal_benchmark(kernel='$KERNEL', arch=arch)
-print(json.dumps(result, indent=2, default=str))
-"
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90
 ```
 
-### CLI mode
+### Specific implementations
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal matmul sm90
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal fa4 sm90 --impls ref-cublas gen-cuda
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 'bench.impls=[ref-cublas,gen-cuda]'
+```
+
+### Custom timeout
+
+```bash
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.timeout=600
 ```
 
 ## Response Format

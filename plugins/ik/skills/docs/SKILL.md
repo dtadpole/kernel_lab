@@ -20,8 +20,8 @@ cd /home/zhenc/kernel_lab
 ### Find — search for documentation
 
 ```bash
-.venv/bin/python -m doc_retrieval find "shared memory bank conflicts"
-.venv/bin/python -m doc_retrieval find "TMA descriptor" --top-k 10
+.venv/bin/python -m doc_retrieval find query="shared memory bank conflicts"
+.venv/bin/python -m doc_retrieval find query="TMA descriptor" top_k=10
 ```
 
 Each result includes `doc_id` and `section_id` for follow-up with `read` or `browse`.
@@ -29,8 +29,8 @@ Each result includes `doc_id` and `section_id` for follow-up with `read` or `bro
 ### Read — read a full section
 
 ```bash
-.venv/bin/python -m doc_retrieval read cuda-c-programming-guide shared-memory
-.venv/bin/python -m doc_retrieval read parallel-thread-execution data-movement-and-conversion-instructions-ld
+.venv/bin/python -m doc_retrieval read doc_id=cuda-c-programming-guide section_id=shared-memory
+.venv/bin/python -m doc_retrieval read doc_id=parallel-thread-execution section_id=data-movement-and-conversion-instructions-ld
 ```
 
 Returns full section content with navigation context (`nav.parent`, `nav.prev_sibling`, `nav.next_sibling`).
@@ -38,9 +38,9 @@ Returns full section content with navigation context (`nav.parent`, `nav.prev_si
 ### Browse — explore document structure
 
 ```bash
-.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide                  # full TOC index
-.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide --depth 1        # top-level chapters only
-.venv/bin/python -m doc_retrieval browse cuda-c-programming-guide --section-id performance-guidelines --depth 3
+.venv/bin/python -m doc_retrieval browse doc_id=cuda-c-programming-guide
+.venv/bin/python -m doc_retrieval browse doc_id=cuda-c-programming-guide depth=1
+.venv/bin/python -m doc_retrieval browse doc_id=cuda-c-programming-guide section_id=performance-guidelines depth=3
 ```
 
 ## Workflow

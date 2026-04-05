@@ -1,108 +1,138 @@
-"""CLI subcommands for doc_retrieval: download, parse, index, find, browse, read."""
+"""CLI for doc_retrieval: download, parse, index, find, browse, read.
+
+Uses Hydra compose API for configuration. Subcommand is the first positional arg.
+
+Usage:
+    python -m doc_retrieval download
+    python -m doc_retrieval parse
+    python -m doc_retrieval index
+    python -m doc_retrieval find query="shared memory bank conflicts" top_k=10
+    python -m doc_retrieval browse doc_id=cuda-c-programming-guide depth=1
+    python -m doc_retrieval read doc_id=cuda-c-programming-guide section_id=shared-memory
+"""
 
 from __future__ import annotations
 
-import argparse
+import json
+import logging
 import sys
+from pathlib import Path
+
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
+
+_CONF_DIR = str(Path(__file__).resolve().parents[1] / "conf")
 
 
-def cmd_download(args: argparse.Namespace) -> None:
+def _load_cfg(overrides: list[str]):
+    with initialize_config_dir(config_dir=_CONF_DIR, version_base="1.3"):
+        cfg = compose(config_name="config", overrides=overrides)
+    OmegaConf.resolve(cfg)
+    return cfg
+
+
+def cmd_download(cfg) -> None:
     from doc_retrieval.downloader import download_docs
-
     download_docs()
 
 
-def cmd_parse(args: argparse.Namespace) -> None:
+def cmd_parse(cfg) -> None:
     from doc_retrieval.parser import parse_docs
-
     parse_docs()
 
 
-def cmd_index(args: argparse.Namespace) -> None:
+def cmd_index(cfg) -> None:
     from doc_retrieval.indexer import build_index
-
     build_index()
 
 
-def cmd_find(args: argparse.Namespace) -> None:
+def cmd_find(cfg, overrides: dict) -> None:
     from doc_retrieval.searcher import cli_find
 
-    cli_find(
-        query=args.query,
-        top_k=args.top_k,
-    )
+    query = overrides.get("query", "")
+    top_k = int(overrides.get("top_k", cfg.doc_retrieval.search.default_top_k))
+
+    if not query:
+        print("Error: query is required. Usage: find query=\"your search query\"", file=sys.stderr)
+        sys.exit(1)
+
+    cli_find(query=query, top_k=top_k)
 
 
-def cmd_browse(args: argparse.Namespace) -> None:
+def cmd_browse(cfg, overrides: dict) -> None:
     from doc_retrieval.searcher import DocSearcher
-    import json
+
+    doc_id = overrides.get("doc_id", "")
+    section_id = overrides.get("section_id")
+    depth = int(overrides.get("depth", 2))
+
+    if not doc_id:
+        print("Error: doc_id is required. Usage: browse doc_id=cuda-c-programming-guide", file=sys.stderr)
+        sys.exit(1)
 
     searcher = DocSearcher()
-    result = searcher.browse_toc(
-        doc_id=args.doc_id,
-        section_id=args.section_id,
-        depth=args.depth,
-    )
+    result = searcher.browse_toc(doc_id=doc_id, section_id=section_id, depth=depth)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def cmd_read(args: argparse.Namespace) -> None:
+def cmd_read(cfg, overrides: dict) -> None:
     from doc_retrieval.searcher import DocSearcher
-    import json
+
+    doc_id = overrides.get("doc_id", "")
+    section_id = overrides.get("section_id", "")
+
+    if not doc_id or not section_id:
+        print("Error: doc_id and section_id required. Usage: read doc_id=... section_id=...", file=sys.stderr)
+        sys.exit(1)
 
     searcher = DocSearcher()
-    result = searcher.read_section(
-        doc_id=args.doc_id,
-        section_id=args.section_id,
-    )
+    result = searcher.read_section(doc_id=doc_id, section_id=section_id)
     if result is None:
-        print(f"Section '{args.section_id}' not found in '{args.doc_id}'")
+        print(f"Section '{section_id}' not found in '{doc_id}'")
         return
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+COMMANDS = {
+    "download": cmd_download,
+    "parse": cmd_parse,
+    "index": cmd_index,
+    "find": cmd_find,
+    "browse": cmd_browse,
+    "read": cmd_read,
+}
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="doc_retrieval",
-        description="NVIDIA CUDA Toolkit document retrieval system",
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
 
-    # --- download ---
-    dl = sub.add_parser("download", help="Download NVIDIA CUDA HTML documentation")
-    dl.set_defaults(func=cmd_download)
+    args = sys.argv[1:]
+    if not args or args[0].startswith("-"):
+        print(f"Usage: python -m doc_retrieval <command> [key=value ...]", file=sys.stderr)
+        print(f"Commands: {', '.join(COMMANDS)}", file=sys.stderr)
+        sys.exit(1)
 
-    # --- parse ---
-    pa = sub.add_parser("parse", help="Parse downloaded HTML docs into chunks")
-    pa.set_defaults(func=cmd_parse)
+    command = args[0]
+    if command not in COMMANDS:
+        print(f"Unknown command: {command}. Available: {', '.join(COMMANDS)}", file=sys.stderr)
+        sys.exit(1)
 
-    # --- index ---
-    ix = sub.add_parser("index", help="Build BM25 search index from parsed chunks")
-    ix.set_defaults(func=cmd_index)
+    # Separate Hydra overrides (key=value) from command-specific args
+    hydra_overrides = [a for a in args[1:] if "=" in a and not a.startswith("-")]
+    # Parse key=value pairs for command-specific use
+    cmd_overrides = {}
+    for ov in hydra_overrides:
+        key, _, value = ov.partition("=")
+        cmd_overrides[key] = value
 
-    # --- find ---
-    sr = sub.add_parser("find", help="Search CUDA documentation")
-    sr.add_argument("query", help="Search query")
-    sr.add_argument(
-        "--top-k",
-        type=int,
-        default=5,
-        help="Number of results (default: 5)",
-    )
-    sr.set_defaults(func=cmd_find)
+    cfg = _load_cfg([])  # Load base config (no Hydra overrides needed for most commands)
 
-    # --- browse ---
-    br = sub.add_parser("browse", help="Browse document table of contents")
-    br.add_argument("doc_id", help="Document ID (slug)")
-    br.add_argument("--section-id", default=None, help="Section to expand")
-    br.add_argument("--depth", type=int, default=2, help="Expansion depth (default: 2)")
-    br.set_defaults(func=cmd_browse)
-
-    # --- read ---
-    rd = sub.add_parser("read", help="Read a document section")
-    rd.add_argument("doc_id", help="Document ID (slug)")
-    rd.add_argument("section_id", help="Section ID (anchor)")
-    rd.set_defaults(func=cmd_read)
-
-    args = parser.parse_args()
-    args.func(args)
+    handler = COMMANDS[command]
+    if command in ("download", "parse", "index"):
+        handler(cfg)
+    else:
+        handler(cfg, cmd_overrides)

@@ -149,22 +149,19 @@ def formal_benchmark(
 
 
 def cli_main() -> None:
-    """CLI entry point for ik:bench."""
-    import argparse
+    """CLI entry point for ik:bench (Hydra-based)."""
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+    import sys
 
-    parser = argparse.ArgumentParser(
-        prog="formal_benchmark",
-        description="Formal benchmark: atomic compile + trial ALL configs",
-    )
-    parser.add_argument("kernel", help="Kernel name (e.g., fa4, matmul, vecadd)")
-    parser.add_argument("arch", help="GPU architecture (e.g., sm90)")
-    parser.add_argument(
-        "--impls", nargs="*", default=None,
-        help="Implementation slugs (default: all). E.g., ref-cublas gen-cuda",
-    )
-    parser.add_argument("--timeout", type=int, default=300, help="Timeout per config in seconds (default: 300)")
+    _CONF_DIR = str(Path(__file__).resolve().parents[1] / "conf")
 
-    args = parser.parse_args()
+    # Hydra compose API: pass overrides from sys.argv
+    overrides = [arg for arg in sys.argv[1:] if "=" in arg]
+
+    with initialize_config_dir(config_dir=_CONF_DIR, version_base="1.3"):
+        cfg = compose(config_name="config", overrides=overrides)
+    OmegaConf.resolve(cfg)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -172,11 +169,18 @@ def cli_main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    bench_cfg = cfg.bench
+    impls = bench_cfg.impls
+    if isinstance(impls, str) and impls != "all":
+        impls = [impls]
+    elif hasattr(impls, "__iter__") and not isinstance(impls, str):
+        impls = list(impls)
+
     result = formal_benchmark(
-        kernel=args.kernel,
-        arch=args.arch,
-        impls=args.impls if args.impls else "all",
-        timeout_seconds=args.timeout,
+        kernel=bench_cfg.kernel,
+        arch=bench_cfg.arch,
+        impls=impls,
+        timeout_seconds=bench_cfg.timeout,
     )
 
     print(json.dumps(result, indent=2, default=str))

@@ -24,7 +24,7 @@ code is modified during optimization.
 |----------|------|----------|---------|-------------|
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
 | `gen` | gen name | no | `cuda` | Optimization target (exactly one). Maps to `gen-{name}` slug |
-| `ref` | ref name(s) | no | first `ref-*` | Reference baseline(s) for comparison. Default: first ref found in `data/ref/{kernel}/`. Comma-separated for multiple: `ref=cublas,cudnn` |
+| `ref` | ref name(s) | no | all `ref-*` | Reference baseline(s) for comparison. Default: all refs found in `data/ref/{kernel}/`. Comma-separated for multiple: `ref=cublas,cudnn` |
 | `arch` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 

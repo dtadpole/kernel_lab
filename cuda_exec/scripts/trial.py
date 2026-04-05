@@ -19,6 +19,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -295,9 +297,14 @@ def main() -> int:
     old_handler = signal.signal(signal.SIGALRM, watchdog_handler)
     signal.alarm(args.timeout)
 
+    def _ts() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
     try:
         lock_fd = acquire_device_lock(device)
 
+        t0 = time.perf_counter()
+        print(f"[{_ts()}] setup start", file=sys.stderr)
         workspace = resolve_workspace_bundle(**metadata.model_dump())
         workspace_path = workspace["workspace_path"]
         target_path, _ = _primary_artifact_from_manifest(workspace)
@@ -308,7 +315,10 @@ def main() -> int:
 
         reference_module = load_reference_module(reference_path)
         reference_config = extract_config_payload(env["CUDA_EXEC_CONFIG_JSON"])
+        print(f"[{_ts()}] setup done ({time.perf_counter() - t0:.1f}s)", file=sys.stderr)
 
+        t1 = time.perf_counter()
+        print(f"[{_ts()}] reference start", file=sys.stderr)
         reference_result = measure_reference(
             reference_module,
             reference_config,
@@ -317,12 +327,15 @@ def main() -> int:
             num_warmups=args.num_warmups,
             num_trials=args.num_perf_trials,
         )
+        print(f"[{_ts()}] reference done ({time.perf_counter() - t1:.1f}s)", file=sys.stderr)
 
         # --- cuDNN vendor baseline (optional) ---
         cudnn_root = Path(workspace_path) / "inputs" / "cudnn"
         cudnn_path = load_cudnn_entry(cudnn_root)
         cudnn_result = None
         if cudnn_path is not None:
+            t2 = time.perf_counter()
+            print(f"[{_ts()}] cudnn start", file=sys.stderr)
             cudnn_module = load_reference_module(cudnn_path)
             cudnn_result = measure_reference(
                 cudnn_module,
@@ -332,10 +345,16 @@ def main() -> int:
                 num_warmups=args.num_warmups,
                 num_trials=args.num_perf_trials,
             )
+            print(f"[{_ts()}] cudnn done ({time.perf_counter() - t2:.1f}s)", file=sys.stderr)
 
+        t3 = time.perf_counter()
+        print(f"[{_ts()}] generated start", file=sys.stderr)
         generated_run = _run_generated(target_path, env, workspace_path, args.timeout)
         generated_payload = generated_run["payload"]
+        print(f"[{_ts()}] generated done ({time.perf_counter() - t3:.1f}s)", file=sys.stderr)
 
+        t4 = time.perf_counter()
+        print(f"[{_ts()}] correctness start", file=sys.stderr)
         correctness = _verify_correctness(
             reference_module,
             reference_config,
@@ -344,6 +363,7 @@ def main() -> int:
             num_trials=args.num_correctness_trials,
             seed=args.seed,
         )
+        print(f"[{_ts()}] correctness done ({time.perf_counter() - t4:.1f}s)", file=sys.stderr)
 
         comparison = _comparison_payload(
             correctness,

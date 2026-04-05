@@ -21,6 +21,7 @@ Detailed design rationale belongs in DESIGN.md.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import os
 import re
 import subprocess
@@ -236,6 +237,12 @@ def _run_command(
         raise TimeoutError(f"{kind} timed out after {timeout_seconds}s") from exc
 
     extra_files = list(return_files or [])
+    duration = time.perf_counter() - started
+    end_ts = datetime.now(timezone.utc)
+    start_ts_str = (end_ts.timestamp() - duration)
+    start_dt = datetime.fromtimestamp(start_ts_str, tz=timezone.utc)
+    ts_fmt = "%Y-%m-%d %H:%M:%S UTC"
+
     if log_file:
         log_path = resolve_turn_artifact_path(log_file, resolved_workspace)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +250,9 @@ def _run_command(
         stderr_path = log_path.with_suffix(".stderr")
 
         log_text = (
+            f"started: {start_dt.strftime(ts_fmt)}\n"
+            f"finished: {end_ts.strftime(ts_fmt)}\n"
+            f"duration: {duration:.2f}s\n"
             f"command: {' '.join(command)}\n"
             f"returncode: {completed.returncode}\n"
             f"stdout_file: {stdout_path.name}\n"
@@ -262,7 +272,6 @@ def _run_command(
             ]
         )
 
-    duration = time.perf_counter() - started
     files = _collect_files(extra_files, resolved_workspace)
     return {
         "ok": completed.returncode == 0,

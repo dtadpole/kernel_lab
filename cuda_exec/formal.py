@@ -111,6 +111,8 @@ def formal_benchmark(
             # cudnn = second ref (vendor baseline) if available
             cudnn = refs[1]["files"] if len(refs) > 1 else {}
 
+            logger.info("[%s] compile start", gen["slug"])
+            compile_start = time.time()
             compile_req = CompileRequest(
                 metadata=metadata,
                 timeout_seconds=timeout_seconds,
@@ -120,6 +122,7 @@ def formal_benchmark(
             )
             compile_resp = compile_endpoint(compile_req)
             compile_result = compile_resp.model_dump(mode="json")
+            logger.info("[%s] compile done (%.1fs)", gen["slug"], time.time() - compile_start)
 
             if not compile_resp.all_ok:
                 results[gen["slug"]] = {
@@ -142,6 +145,8 @@ def formal_benchmark(
             continue
 
         # Trial ALL configs
+        logger.info("[%s] trial start (%d configs)", gen["slug"], len(configs))
+        trial_start = time.time()
         trial_req = TrialRequest(
             metadata=metadata,
             timeout_seconds=timeout_seconds,
@@ -149,6 +154,7 @@ def formal_benchmark(
         )
         trial_resp = trial_endpoint(trial_req)
         trial_result = trial_resp.model_dump(mode="json")
+        logger.info("[%s] trial done (%.1fs)", gen["slug"], time.time() - trial_start)
 
         results[gen["slug"]] = {
             "impl": gen["slug"],

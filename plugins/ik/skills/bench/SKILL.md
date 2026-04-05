@@ -28,7 +28,7 @@ cd /home/zhenc/kernel_lab
 ### Run benchmark (auto-detects GPU arch)
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -c "
 from cuda_exec.formal import formal_benchmark
 import json, subprocess
 
@@ -46,8 +46,8 @@ print(json.dumps(result, indent=2, default=str))
 ### CLI mode
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal matmul sm90
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -m cuda_exec.formal fa4 sm90 --impls ref-cublas gen-cuda
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal matmul sm90
+CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal fa4 sm90 --impls ref-cublas gen-cuda
 ```
 
 ## Response Format

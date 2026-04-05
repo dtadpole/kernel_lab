@@ -189,7 +189,7 @@ box-drawing characters. This is mandatory — never skip it.
 Each `ref-*` and `gen-*` slug becomes a column. The table adapts to whatever
 implementations exist for the kernel+arch combination.
 
-Example (slugs discovered: `ref-cublas`, `gen-cutedsl`, `gen-cuda`):
+Example 1 — matmul (slugs: `ref-cublas`, `gen-cutedsl`, `gen-cuda`):
 
 ```
 ┌────────────────────────┬──────────────────┬────────────────────┬────────────────────┐
@@ -202,17 +202,38 @@ Example (slugs discovered: `ref-cublas`, `gen-cutedsl`, `gen-cuda`):
 ├────────────────────────┼──────────────────┼────────────────────┼────────────────────┤
 │ % of peak              │   92.2%          │   71.8%            │   93.9%            │
 └────────────────────────┴──────────────────┴────────────────────┴────────────────────┘
+```
+
+Example 2 — fa4 (slugs: `ref-cudnn`, `ref-cutedsl`, `gen-cuda`):
+
+```
+┌────────────────────────────┬──────────────────┬────────────────────┬────────────────────┐
+│ NVIDIA H100 SXM (h8_4)     │  ref-cudnn       │  ref-cutedsl       │  gen-cuda          │
+│ GPU7, CUDA 13.0            │  TFLOPS   (ms)   │  TFLOPS   (ms)     │  TFLOPS   (ms)     │
+├────────────────────────────┼──────────────────┼────────────────────┼────────────────────┤
+│ mha-causal-b2-s16384       │  327.4  (6.717)  │  644.5  (3.412) ✓  │  480.8  (4.573) ✓  │
+├────────────────────────────┼──────────────────┼────────────────────┼────────────────────┤
+│ % of peak                  │   40.9%          │   80.6%            │   60.1%            │
+└────────────────────────────┴──────────────────┴────────────────────┴────────────────────┘
+```
+
+Note: `ref-cudnn` is the first ref (golden) — no ✓/✗. `ref-cutedsl` is the
+second ref — shows ✓/✗ vs `ref-cudnn`. `gen-cuda` also shows ✓/✗ vs `ref-cudnn`.
+
+```
 Harness: unified eval (cold-L2, fresh pointers, 5 warmup + 10 trials)
-Peak: 800 TFLOPS | ✓/✗ = correctness vs ref-cublas
+Peak: 800 TFLOPS | ✓/✗ = correctness vs <first-ref-slug>
 ```
 
 **How to build the table:**
 - **Discover columns** from `result["impls_requested"]` — each impl slug is a column
-- **First ref-* slug** is the baseline (no ✓/✗ — it IS the golden reference)
+- **First ref-* slug** is the golden baseline (no ✓/✗ — it IS the golden reference)
 - **TFLOPS + (ms)** for each impl: extract from per-impl trial results
-- **gen-* columns include ✓/✗** inline after the `(ms)` value — correctness vs
-  the first ref-* impl. Extract from `correctness.passed` in per-config results.
-  `ref-*` columns never show ✓/✗ (they are baselines, not compared).
+- **All non-golden columns include ✓/✗** inline after the `(ms)` value —
+  correctness vs the first ref-* (golden) impl. This includes:
+  - All `gen-*` impls (generated code)
+  - Second and subsequent `ref-*` impls (e.g. `ref-cudnn` vs `ref-cublas`)
+  - Only the **first ref-*** column has no ✓/✗ (it is the golden reference itself)
 - **% of peak** row: best TFLOPS across configs / GPU peak TFLOPS
 - **Header row 1**: GPU model, host name
 - **Header row 2**: GPU index, torch version

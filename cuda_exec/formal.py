@@ -178,19 +178,23 @@ def formal_benchmark(
         }
     logger.info("[%s] measure_py done (%.1fs)", primary_ref["slug"], time.time() - ref_start)
 
-    # --- Benchmark remaining ref-* impls ---
+    # --- Benchmark remaining ref-* impls (correctness vs primary ref) ---
     for ref in refs[1:]:
         logger.info("[%s] measure_py start (%d configs)", ref["slug"], len(configs))
         r_start = time.time()
         r = _run_py_impl(ref)
         if r["ok"]:
+            config_results_clean = {}
             for cs, cr in r["configs"].items():
-                cr.pop("output_tensor", None)
+                ref_tensor = cr.pop("output_tensor", None)
+                golden = golden_outputs.get(cs)
+                cr["correctness"] = _check_correctness(golden, ref_tensor)
+                config_results_clean[cs] = cr
             results[ref["slug"]] = {
                 "impl": ref["slug"],
                 "compile_ok": None, "trial_ok": True,
                 "compile_result": None,
-                "trial_result": {"all_ok": True, "configs": r["configs"]},
+                "trial_result": {"all_ok": True, "configs": config_results_clean},
             }
         else:
             results[ref["slug"]] = {

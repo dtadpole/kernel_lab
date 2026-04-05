@@ -18,10 +18,17 @@
  * QK GEMM: m64n128k16 SS mode per consumer WG (64×128 output).
  * PV GEMM: m64n64k16 RS mode, 8 k-steps per half (V_lo → O_lo, V_hi → O_hi).
  *
+ * Intra-WG overlap (matches CuTe DSL FA4 pattern):
+ *   Prologue: QK[0] → softmax → pack P
+ *   Mainloop: issue QK[n] + PV[n-1] concurrently (2 WGMMA groups in flight)
+ *             wait_group<1> (QK done) → softmax overlaps PV execution
+ *             wait_group<0> (PV done) → rescale O → pack P
+ *   Epilogue: PV[last] → finalize → store O
+ *
  * Scheduler barriers: bar 2 (WG1), bar 3 (WG2), 256 threads each.
  * Register redistribution: producer 24, consumer 240.
  *
- * Target: NVIDIA H100 (SM90a). Compile with -arch=sm_90a.
+ * Target: NVIDIA H100 (SM90a). Compile with -gencode arch=compute_90a,code=sm_90a.
  */
 
 #include <cuda_bf16.h>
@@ -426,24 +433,33 @@ void flash_attention_2wg(
     float rowmax[2] = {-FLT_MAX, -FLT_MAX};
     float rowsumexp[2] = {0.0f, 0.0f};
 
-    /* Pipeline state */
+    /* Pre-packed P values (bf16x2) for RS WGMMA PV GEMM.
+     * Stored separately from S_acc so QK[n+1] can overwrite S_acc
+     * while PV[n] reads from P_packed concurrently. */
+    uint32_t P_packed[32];
+
+    /* Pipeline state — K and V tracked independently for overlap */
     int k_stage = 0, v_stage = 0;
     int k_full_phase = 0, v_full_phase = 0;
 
-    /* Both consumer WGs run in parallel — no scheduler barriers.
-     * Both read the same K/V SMEM (read-only), different Q slices,
-     * independent O accumulators. H100 tensor cores handle concurrent WGMMA. */
+    /* mma_init: WG1 (cwg=0) primes its scheduler barrier so it can proceed first */
+    if (cwg == 0) {
+        named_barrier_arrive(2, 256);  /* arrive on bar 2 (WG1's barrier) */
+    }
 
-    /* ---- Main KV loop ---- */
-    for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
-        /* Wait for K[kv_id] */
-        mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
+    /* ---- Prologue: wait for first K tile ---- */
+    mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
 
-        /* Current K smem */
+    /* ================================================================
+     *  PROLOGUE: QK[0] only — no PV to pair with
+     *
+     *  CuTe DSL first_half_block_overlap: NO scheduler barriers.
+     *  Both consumer WGs do QK[0] independently.
+     * ================================================================ */
+    {
         const uint32_t cur_K_lo = (k_stage == 0) ? K0_lo : K1_lo;
         const uint32_t cur_K_hi = (k_stage == 0) ? K0_hi : K1_hi;
 
-        /* == QK GEMM == */
         float S_acc[64];
         #pragma unroll
         for (int i = 0; i < 64; i++) S_acc[i] = 0.0f;
@@ -464,14 +480,14 @@ void flash_attention_2wg(
         wgmma_wait_group<0>();
         wgmma_fence();
 
-        /* Release K buffer */
+        /* Release K[0] */
         if (lane_id == 0 && mywarp == 0) {
             mbarrier_arrive(&K_empty[k_stage]);
         }
         k_stage ^= 1;
         if (k_stage == 0) k_full_phase ^= 1;
 
-        /* == Softmax == */
+        /* Softmax (first block — no prior O to rescale) */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
             float rv[32];
@@ -484,7 +500,151 @@ void flash_attention_2wg(
             for (int c = 0; c < 32; c++) rv[c] *= softmax_scale_log2;
 
             if (is_causal) {
-                /* Row index: this WG's mywarp maps to rows within m=64 */
+                const int row = mywarp * 16 + half * 8 + (lane_id / 4);
+                const int q_pos = q_block_id * BLOCK_Q + cwg * 64 + row;
+                #pragma unroll
+                for (int p4 = 0; p4 < 16; p4++) {
+                    #pragma unroll
+                    for (int s2 = 0; s2 < 2; s2++) {
+                        const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
+                        const int kv_pos = 0 * BLOCK_KV + col;
+                        if (kv_pos > q_pos)
+                            rv[p4*2+s2] = -FLT_MAX;
+                    }
+                }
+            }
+
+            float lmax = rv[0];
+            #pragma unroll
+            for (int c = 1; c < 32; c++) lmax = fmaxf(lmax, rv[c]);
+            lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 1));
+            lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
+
+            rowmax[half] = lmax;
+
+            float lsum = 0.0f;
+            #pragma unroll
+            for (int c = 0; c < 32; c++) {
+                rv[c] = fast_exp2f(rv[c] - lmax);
+                lsum += rv[c];
+            }
+            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 1);
+            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 2);
+            rowsumexp[half] = lsum;
+
+            #pragma unroll
+            for (int p4 = 0; p4 < 16; p4++) {
+                S_acc[(p4<<2)|(half<<1)|0] = rv[p4*2+0];
+                S_acc[(p4<<2)|(half<<1)|1] = rv[p4*2+1];
+            }
+        }
+
+        /* Pre-pack P to bf16x2 for PV RS WGMMA */
+        #pragma unroll
+        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+            P_packed[ks*4+0] = pack_bf16(S_acc[ks*8+0], S_acc[ks*8+1]);
+            P_packed[ks*4+1] = pack_bf16(S_acc[ks*8+2], S_acc[ks*8+3]);
+            P_packed[ks*4+2] = pack_bf16(S_acc[ks*8+4], S_acc[ks*8+5]);
+            P_packed[ks*4+3] = pack_bf16(S_acc[ks*8+6], S_acc[ks*8+7]);
+        }
+    }
+
+    /* ================================================================
+     *  MAINLOOP: QK[n] + PV[n-1] overlap (n = 1..max_kv_iter-1)
+     *
+     *  CuTe DSL mma_one_n_block_intrawg_overlap pattern:
+     *  Issue QK[n] (wg_wait=-1) → Issue PV[n-1] (wg_wait=-1)
+     *  → wait_group<1> (QK done) → softmax (overlaps PV execution!)
+     *  → wait_group<0> (PV done) → rescale O → pack P
+     *
+     *  Key: softmax scalar work runs while PV tensor cores execute.
+     * ================================================================ */
+    if (max_kv_iter > 1) {
+        /* Prefetch K[1] for first mainloop iteration */
+        mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
+    }
+
+    for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
+        /* K[kv_id] already waited (from above or previous iteration) */
+
+        named_barrier_sync(my_bar, 256);
+
+        /* == Issue QK[kv_id] — commit but don't wait == */
+        float S_acc[64];
+        #pragma unroll
+        for (int i = 0; i < 64; i++) S_acc[i] = 0.0f;
+
+        const uint32_t cur_K_lo = (k_stage == 0) ? K0_lo : K1_lo;
+        const uint32_t cur_K_hi = (k_stage == 0) ? K0_hi : K1_hi;
+        const uint64_t dk_lo = make_wgmma_desc(cur_K_lo, STRIDE);
+        const uint64_t dk_hi = make_wgmma_desc(cur_K_hi, STRIDE);
+
+        wgmma_fence();
+        #pragma unroll
+        for (int ks = 0; ks < DIM / 16; ks++) {
+            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks * 2)
+                                   : gmma_desc_advance(desc_q_hi, (ks - 4) * 2);
+            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo, ks * 2)
+                                   : gmma_desc_advance(dk_hi, (ks - 4) * 2);
+            wgmma_m64n128k16_f32_bf16(S_acc, dq, dk, (ks == 0) ? 0 : 1);
+        }
+        wgmma_commit_group();
+        /* QK is now in flight — don't wait yet */
+
+        /* == Issue PV[kv_id-1] — overlaps with QK on tensor cores == */
+        /* Wait for V[kv_id-1] while QK tensor cores are executing */
+        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
+
+        const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
+        const uint32_t cur_V_hi = (v_stage == 0) ? V0_hi : V1_hi;
+        const uint64_t dv_lo = make_wgmma_desc(cur_V_lo, STRIDE);
+        const uint64_t dv_hi = make_wgmma_desc(cur_V_hi, STRIDE);
+
+        wgmma_fence();
+        #pragma unroll
+        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+            uint64_t dvl = gmma_desc_advance(dv_lo, ks * V_KS_ADVANCE);
+            wgmma_m64n64k16_f32_bf16_RS(O_lo_acc,
+                P_packed[ks*4+0], P_packed[ks*4+1],
+                P_packed[ks*4+2], P_packed[ks*4+3], dvl, 1);
+            uint64_t dvh = gmma_desc_advance(dv_hi, ks * V_KS_ADVANCE);
+            wgmma_m64n64k16_f32_bf16_RS(O_hi_acc,
+                P_packed[ks*4+0], P_packed[ks*4+1],
+                P_packed[ks*4+2], P_packed[ks*4+3], dvh, 1);
+        }
+        wgmma_commit_group();
+        /* PV is now in flight — 2 WGMMA groups pending (QK + PV) */
+
+        /* Signal other WG AFTER PV issue (CuTe DSL pattern) */
+        named_barrier_arrive(other_bar, 256);
+
+        /* == Wait for QK to complete (PV still running) == */
+        wgmma_wait_group<1>();
+        wgmma_fence();
+
+        /* Release K[kv_id] */
+        if (lane_id == 0 && mywarp == 0) {
+            mbarrier_arrive(&K_empty[k_stage]);
+        }
+        k_stage ^= 1;
+        if (k_stage == 0) k_full_phase ^= 1;
+
+        /* == Softmax — runs while PV tensor cores are still executing! ==
+         * O rescaling is deferred until after PV completes (CuTe DSL pattern
+         * for hdim≤128: rescale_O_before_gemm=False). */
+        float o_rescale[2];
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            float rv[32];
+            #pragma unroll
+            for (int p4 = 0; p4 < 16; p4++) {
+                rv[p4*2+0] = S_acc[(p4<<2)|(half<<1)|0];
+                rv[p4*2+1] = S_acc[(p4<<2)|(half<<1)|1];
+            }
+            #pragma unroll
+            for (int c = 0; c < 32; c++) rv[c] *= softmax_scale_log2;
+
+            if (is_causal) {
                 const int row = mywarp * 16 + half * 8 + (lane_id / 4);
                 const int q_pos = q_block_id * BLOCK_Q + cwg * 64 + row;
                 #pragma unroll
@@ -508,14 +668,7 @@ void flash_attention_2wg(
             float new_max = fmaxf(lmax, rowmax[half]);
             float rescale = fast_exp2f(rowmax[half] - new_max);
             rowmax[half] = new_max;
-
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                O_lo_acc[(p4<<2)|(half<<1)|0] *= rescale;
-                O_lo_acc[(p4<<2)|(half<<1)|1] *= rescale;
-                O_hi_acc[(p4<<2)|(half<<1)|0] *= rescale;
-                O_hi_acc[(p4<<2)|(half<<1)|1] *= rescale;
-            }
+            o_rescale[half] = rescale;  /* save for deferred O rescaling */
 
             float lsum = 0.0f;
             #pragma unroll
@@ -534,7 +687,53 @@ void flash_attention_2wg(
             }
         }
 
-        /* == Wait for V, PV GEMM == */
+        /* == Wait for PV[n-1] to complete == */
+        wgmma_wait_group<0>();
+
+        /* Release V[kv_id-1] */
+        if (lane_id == 0 && mywarp == 0) {
+            mbarrier_arrive(&V_empty[v_stage]);
+        }
+        v_stage ^= 1;
+        if (v_stage == 0) v_full_phase ^= 1;
+
+        /* Deferred O rescaling (CuTe DSL: rescale AFTER PV for hdim≤128).
+         * Mathematically correct: PV[n-1] added P[n-1]@V[n-1] using P values
+         * computed with the same running max. Rescaling the entire O (including
+         * the just-added PV contribution) adjusts all terms to the new max. */
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) {
+                O_lo_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];
+                O_lo_acc[(p4<<2)|(half<<1)|1] *= o_rescale[half];
+                O_hi_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];
+                O_hi_acc[(p4<<2)|(half<<1)|1] *= o_rescale[half];
+            }
+        }
+
+        /* Pack P for next PV iteration */
+        #pragma unroll
+        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+            P_packed[ks*4+0] = pack_bf16(S_acc[ks*8+0], S_acc[ks*8+1]);
+            P_packed[ks*4+1] = pack_bf16(S_acc[ks*8+2], S_acc[ks*8+3]);
+            P_packed[ks*4+2] = pack_bf16(S_acc[ks*8+4], S_acc[ks*8+5]);
+            P_packed[ks*4+3] = pack_bf16(S_acc[ks*8+6], S_acc[ks*8+7]);
+        }
+
+        /* Prefetch next K */
+        if (kv_id + 1 < max_kv_iter) {
+            mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
+        }
+    } /* end mainloop */
+
+    /* ================================================================
+     *  EPILOGUE: PV[last] — no QK to pair with
+     *
+     *  CuTe DSL last_half_block_overlap pattern.
+     * ================================================================ */
+    {
+        /* Wait for V[max_kv_iter-1] */
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
 
         const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
@@ -545,26 +744,25 @@ void flash_attention_2wg(
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint32_t a0 = pack_bf16(S_acc[ks*8+0], S_acc[ks*8+1]);
-            uint32_t a1 = pack_bf16(S_acc[ks*8+2], S_acc[ks*8+3]);
-            uint32_t a2 = pack_bf16(S_acc[ks*8+4], S_acc[ks*8+5]);
-            uint32_t a3 = pack_bf16(S_acc[ks*8+6], S_acc[ks*8+7]);
             uint64_t dvl = gmma_desc_advance(dv_lo, ks * V_KS_ADVANCE);
-            wgmma_m64n64k16_f32_bf16_RS(O_lo_acc, a0, a1, a2, a3, dvl, 1);
+            wgmma_m64n64k16_f32_bf16_RS(O_lo_acc,
+                P_packed[ks*4+0], P_packed[ks*4+1],
+                P_packed[ks*4+2], P_packed[ks*4+3], dvl, 1);
             uint64_t dvh = gmma_desc_advance(dv_hi, ks * V_KS_ADVANCE);
-            wgmma_m64n64k16_f32_bf16_RS(O_hi_acc, a0, a1, a2, a3, dvh, 1);
+            wgmma_m64n64k16_f32_bf16_RS(O_hi_acc,
+                P_packed[ks*4+0], P_packed[ks*4+1],
+                P_packed[ks*4+2], P_packed[ks*4+3], dvh, 1);
         }
         wgmma_commit_group();
         wgmma_wait_group<0>();
 
-        /* Release V buffer */
+        /* Release V[last] */
         if (lane_id == 0 && mywarp == 0) {
             mbarrier_arrive(&V_empty[v_stage]);
         }
         v_stage ^= 1;
         if (v_stage == 0) v_full_phase ^= 1;
-
-    } /* end KV loop */
+    }
 
     /* ---- Epilogue: finalize and store O ---- */
     wgmma_fence();
@@ -581,22 +779,23 @@ void flash_attention_2wg(
         }
     }
 
-    /* Store O to gmem. mywarp is 0-3 within this consumer WG. */
+    /* Store O to gmem with packed BF16x2 stores.
+     * s2=0,1 are adjacent columns → pack into 32-bit store. */
     #pragma unroll
     for (int half = 0; half < 2; half++) {
         const int row = mywarp * 16 + half * 8 + (lane_id / 4);
         if (row < 64 && (cwg * 64 + row) < len_q - q_block_id * BLOCK_Q) {
+            const int row_offset = row * seq_stride;
             #pragma unroll
             for (int p4 = 0; p4 < 8; p4++) {
-                #pragma unroll
-                for (int s2 = 0; s2 < 2; s2++) {
-                    const int col_in_half = p4 * 8 + s2 + (lane_id % 4) * 2;
-                    const int idx = (p4 << 2) | (half << 1) | s2;
-                    my_O_base[row * seq_stride + col_in_half] =
-                        __float2bfloat16(O_lo_acc[idx]);
-                    my_O_base[row * seq_stride + 64 + col_in_half] =
-                        __float2bfloat16(O_hi_acc[idx]);
-                }
+                const int col_base = p4 * 8 + (lane_id % 4) * 2;
+                const int idx0 = (p4 << 2) | (half << 1) | 0;
+                const int idx1 = (p4 << 2) | (half << 1) | 1;
+                /* Pack two adjacent BF16 values (s2=0, s2=1) into one 32-bit store */
+                uint32_t lo_packed = pack_bf16(O_lo_acc[idx0], O_lo_acc[idx1]);
+                uint32_t hi_packed = pack_bf16(O_hi_acc[idx0], O_hi_acc[idx1]);
+                *(uint32_t*)&my_O_base[row_offset + col_base] = lo_packed;
+                *(uint32_t*)&my_O_base[row_offset + 64 + col_base] = hi_packed;
             }
         }
     }

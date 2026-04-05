@@ -124,9 +124,11 @@ def load_generated():
     if not gen_so.exists() or gen_so.stat().st_mtime < gen_cu.stat().st_mtime:
         print("Compiling generated.cu ...", flush=True)
         subprocess.run([
-            "/usr/local/cuda-12.8/bin/nvcc", "-arch=sm_90a", "-O2", "-Xcompiler", "-fPIC",
+            "/usr/local/cuda-12.9/bin/nvcc",
+            "-gencode", "arch=compute_90a,code=sm_90a",
+            "-O2", "-Xcompiler", "-fPIC",
             "--shared", "-o", str(gen_so), str(gen_cu),
-            "-I/usr/local/cuda-12.8/include",
+            "-I/usr/local/cuda-12.9/include", "-lcuda",
         ], check=True)
         print("Compiled.", flush=True)
 

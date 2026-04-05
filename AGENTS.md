@@ -518,6 +518,181 @@ fix it first. Do not push performance-only improvements that have correctness re
 The cuDNN reference (`cudnn.py`) uses `torch.mm()` which dispatches to cuBLAS `cublasGemmEx`.
 This is the vendor-optimized baseline. Do **not** use CUTLASS for the cuDNN baseline.
 
+### 13. CONTRACT.md — directory-scoped write contracts
+
+#### Concept
+
+`CONTRACT.md` files define **binding agreements** for a directory and its descendants. A contract applies whenever code **interacts** with that directory's content — reading, writing, importing, calling, referencing, or generating code that targets it. The contract travels with the content, not the file being edited.
+
+- **CLAUDE.md** = "who you are, what this project is" (soft guidance, CWD-based)
+- **CONTRACT.md** = "the rules for anyone who touches this context" (hard enforcement, content-based)
+
+#### Scope: the contract follows the content, not the edit path
+
+A contract binds **any code that has a relationship with the contracted directory**, even if the edit happens elsewhere.
+
+Example: `data/gen/sm90/matmul/CONTRACT.md` says "must use WGMMA, must target sm_90a."
+
+| Action | Location of edit | Bound by sm90/matmul contract? |
+|--------|-----------------|-------------------------------|
+| Write a new SM90 matmul kernel | `data/gen/sm90/matmul/` | **Yes** — writing into contracted directory |
+| Modify `cuda_exec/runner.py` to change how it compiles SM90 kernels | `cuda_exec/` | **Yes** — runner reads/compiles sm90 matmul code |
+| Update eval harness to add a new SM90 matmul config | `data/configs/` | **Yes** — config drives execution of sm90 matmul |
+| Refactor `cuda_exec/` logging unrelated to kernels | `cuda_exec/` | No — no interaction with sm90 matmul content |
+
+**Rule: if your change could break the contract's invariants, you are bound by the contract.**
+
+#### Placement
+
+Place `CONTRACT.md` in any directory that has write constraints. Not every directory needs one — directories without a `CONTRACT.md` have no enforced contract.
+
+```text
+kernel_lab/
+├── CONTRACT.md                    ← project-wide write contract
+├── data/
+│   └── gen/
+│       ├── sm90/
+│       │   └── matmul/
+│       │       └── CONTRACT.md    ← SM90 matmul kernel contract
+│       └── sm120/
+│           └── matmul/
+│               └── CONTRACT.md    ← SM120 matmul kernel contract
+├── cuda_exec/
+│   └── CONTRACT.md                ← cuda_exec module contract
+└── scripts/
+    └── (no CONTRACT.md → no enforced constraints)
+```
+
+#### Inheritance
+
+Contracts are **additive and hierarchical**. When writing a file, the hook collects all `CONTRACT.md` files from the project root down to the target file's directory, then merges them root-first (general → specific). A child contract adds to or narrows the parent — it does not override it.
+
+#### Two enforcement layers
+
+**Layer 1: Agent-level awareness (all interactions)**
+
+The agent must, before modifying any code, identify which directories its change interacts with, check for `CONTRACT.md` in those directories, and comply. This is an agent instruction — it relies on the agent's judgment to recognize cross-directory dependencies.
+
+This covers the broad case: editing `cuda_exec/runner.py` in a way that affects SM90 matmul compilation requires reading `data/gen/sm90/matmul/CONTRACT.md` first, even though the edit is in `cuda_exec/`.
+
+**Layer 2: Hook enforcement (direct writes)**
+
+The PreToolUse hook (`enforce-contracts.sh`) is the hard backstop for direct writes. It runs on every Write/Edit:
+
+1. Walk from the target file's directory up to the project root
+2. Collect all `CONTRACT.md` files found along the path
+3. If none found → `{}` (pass through, zero overhead)
+4. If found → check session-scoped cache (keyed by `session_id` + content hash)
+   - Cache hit → `{}` (already injected this session, pass through)
+   - Cache miss → **deny** + inject merged contracts as `systemMessage`
+5. On deny, the agent reads the contracts, re-generates compliant output, and retries
+6. On retry, cache hits → pass through, write succeeds
+
+Layer 1 catches cross-directory interactions that the hook cannot detect. Layer 2 catches direct writes that the agent might forget to check.
+
+**Cost**: one extra LLM round per unique contract scope per session. Subsequent writes to the same directory scope are zero-overhead.
+
+#### Hook script
+
+`.claude/hooks/enforce-contracts.sh`:
+
+```bash
+#!/bin/bash
+input=$(cat)
+tool_name=$(echo "$input" | jq -r '.tool_name')
+
+if [[ "$tool_name" != "Write" && "$tool_name" != "Edit" ]]; then
+    echo '{}'
+    exit 0
+fi
+
+session_id=$(echo "$input" | jq -r '.session_id')
+file_path=$(echo "$input" | jq -r '.tool_input.file_path')
+dir=$(dirname "$file_path")
+project_root="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Collect CONTRACT.md files from root to leaf
+conv_files=()
+search_dir="$dir"
+while [[ "$search_dir" == "$project_root"* ]]; do
+    [[ -f "$search_dir/CONTRACT.md" ]] && \
+        conv_files=("$search_dir/CONTRACT.md" "${conv_files[@]}")
+    parent=$(dirname "$search_dir")
+    [[ "$parent" == "$search_dir" ]] && break
+    search_dir="$parent"
+done
+
+[[ ${#conv_files[@]} -eq 0 ]] && { echo '{}'; exit 0; }
+
+# Session-scoped dedup
+cache_dir="/tmp/claude-contracts/${session_id}"
+mkdir -p "$cache_dir"
+cache_key=$(cat "${conv_files[@]}" | md5sum | cut -d' ' -f1)
+marker="$cache_dir/$cache_key"
+
+if [[ -f "$marker" ]]; then
+    echo '{}'
+    exit 0
+fi
+touch "$marker"
+
+# Merge and deny
+merged=""
+for f in "${conv_files[@]}"; do
+    relative="${f#$project_root/}"
+    merged+="## [$relative]
+$(cat "$f")
+
+"
+done
+
+jq -n --arg msg "Writing to $file_path. Comply with these contracts:
+
+$merged" \
+'{
+    "systemMessage": $msg,
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "First write in this directory scope — read contracts and regenerate"
+    }
+}'
+```
+
+#### Hook registration
+
+In `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "command": "bash .claude/hooks/enforce-contracts.sh"
+      }
+    ]
+  }
+}
+```
+
+#### Writing a CONTRACT.md
+
+Keep contracts short, specific, and testable. Each rule should be something an agent can verify before writing.
+
+Example (`data/gen/sm90/matmul/CONTRACT.md`):
+
+```markdown
+# SM90 Matmul Kernel Contract
+
+- All kernels must target `sm_90a` (Hopper accelerated)
+- Use WGMMA (warpgroup MMA) — do not use per-warp `mma.sync` on SM90
+- Tile sizes must be multiples of 64 in M/N dimensions
+- Include CUTLASS 3.x headers from `/home/zhenc/workspace1/third-party/cutlass/4.3.5/`
+- Generated code must compile with: `nvcc -arch=sm_90a -std=c++17 -O3`
+- Do not copy SM120 kernels into this directory
+```
+
 ## License
 
 MIT — see `LICENSE`.

@@ -32,20 +32,20 @@ the machine from `conf/hosts/default.yaml` and applies host-specific settings.
 
 ```bash
 # Check environment
-python plugins/ik/scripts/env.py status
-python plugins/ik/scripts/env.py test
+python plugins/ik/scripts/ik_env.py status
+python plugins/ik/scripts/ik_env.py test
 
 # Python dev environment (most common)
-python plugins/ik/scripts/env.py install kit=venv
-python plugins/ik/scripts/env.py nuke kit=venv
-python plugins/ik/scripts/env.py reinstall kit=venv
+python plugins/ik/scripts/ik_env.py install kit=venv
+python plugins/ik/scripts/ik_env.py nuke kit=venv
+python plugins/ik/scripts/ik_env.py reinstall kit=venv
 
 # CUDA toolkit
-python plugins/ik/scripts/env.py install kit=cuda-toolkit
-python plugins/ik/scripts/env.py install kit=cuda-toolkit version=13.0
+python plugins/ik/scripts/ik_env.py install kit=cuda-toolkit
+python plugins/ik/scripts/ik_env.py install kit=cuda-toolkit version=13.0
 
 # CUDA driver (needs root)
-python plugins/ik/scripts/env.py install kit=cuda-driver
+python plugins/ik/scripts/ik_env.py install kit=cuda-driver
 ```
 
 ## What `install kit=venv` does

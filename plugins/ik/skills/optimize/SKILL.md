@@ -12,12 +12,18 @@ Autonomous optimization loop for CUDA kernels. Profiles current performance,
 identifies gaps, brainstorms data-driven ideas, implements the most promising
 one, verifies improvement, and commits if successful.
 
+**Optimization target vs benchmarking scope**: `impl` specifies which single
+implementation to optimize (default: `gen-cuda`). But when calling `/ik:bench`
+or `/ik:exec action=trial`, ALL implementations are included — the target impl
+is compared against all `ref-*` baselines and other `gen-*` impls for context.
+Only the target impl's source code is modified during optimization.
+
 ## Arguments
 
 | Position | Name | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
-| `impl` | impl slug | no | first `gen-*` | Which impl to optimize, e.g. `gen-cuda`, `ref-cublas`. Uses dynamic slug format `{source}-{name}` |
+| `impl` | impl slug | no | `gen-cuda` | Which impl to optimize, e.g. `gen-cuda`, `ref-cublas`. Uses dynamic slug format `{source}-{name}` |
 | `arch` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -108,12 +109,15 @@ def formal_benchmark(
     configs = _load_all_configs(kernel, arch)
     reference_files, generated_files, cudnn_files = _load_source_files(kernel, arch)
 
+    # Each bench run gets a unique turn to avoid workspace conflicts
+    unique_turn = int(time.time()) % 100000
+
     metadata = Metadata(
         run_tag=run_tag,
         version=version,
         direction_id=direction_id,
         direction_slug=kernel,
-        turn=0,  # bench uses turn=0 (single-shot, no iteration)
+        turn=unique_turn,
     )
 
     # Step 1: Compile

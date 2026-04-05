@@ -19,7 +19,7 @@
 #define TILE_N    128
 #define TILE_K    64
 #define THREADS   128
-#define STAGES    2
+#define STAGES    3
 
 #define A_BYTES   (TILE_M * TILE_K * 2)   /* 16384 */
 #define B_BYTES   (TILE_N * TILE_K * 2)   /* 16384 */
@@ -210,13 +210,31 @@ matmul_wgmma_tma(
         }
     }
 
+    /* Software-pipelined K-loop with wgmma.wait_group 1.
+     *
+     * With 3 stages and wait_group 1, we allow 1 outstanding WGMMA group.
+     * At iteration kt, we:
+     *   1. Wait for TMA load of stage cur to complete
+     *   2. Issue WGMMA on stage cur (commit as group)
+     *   3. Wait for group from kt-2 to complete (wait_group 1)
+     *      → This means stage from kt-2 is now free for TMA reuse
+     *   4. Issue TMA load for future K tile into the now-free stage
+     *
+     * Timeline (3 stages, s0/s1/s2):
+     *   kt=0: TMA wait s0, WGMMA s0 (g0), commit
+     *   kt=1: TMA wait s1, WGMMA s1 (g1), commit, wait_group 1 (nothing), TMA→s2
+     *   kt=2: TMA wait s2, WGMMA s2 (g0), commit, wait_group 1 (g0 done→s0 free), TMA→s0
+     *   kt=3: TMA wait s0, WGMMA s0 (g1), commit, wait_group 1 (g1 done→s1 free), TMA→s1
+     *   ...
+     * Epilogue: wait_group 0 (drain all)
+     */
     for (int kt = 0; kt < numK; kt++) {
         int cur = kt % STAGES;
 
-        /* Wait for TMA load to complete */
+        /* 1. Wait for TMA load to complete */
         mbarrier_wait_parity(&mbar[cur], (kt / STAGES) & 1);
 
-        /* WGMMA compute */
+        /* 2. Issue WGMMA compute on this stage */
         uint64_t da0 = make_desc(sA[cur], TILE_K);
         uint64_t da1 = make_desc(sA[cur] + 64 * TILE_K * 2, TILE_K);
         uint64_t db = make_desc(sB[cur], TILE_K);
@@ -231,16 +249,37 @@ matmul_wgmma_tma(
             wgmma_m64n128k16(acc1, dak1, dbk, (ks == 0) ? sd : 1);
         }
         wgmma_commit();
-        wgmma_wait0();
 
-        /* Issue next TMA load (reuse this stage's buffer) */
-        __syncthreads();
-        int futK = kt + STAGES;
-        if (futK < numK && tid == 0) {
-            mbarrier_arrive_expect_tx(&mbar[cur], A_BYTES + B_BYTES);
-            tma_load_2d(sA[cur], &tma_A, futK * TILE_K, ctaRow, &mbar[cur]);
-            tma_load_2d(sB[cur], &tma_B, futK * TILE_K, ctaCol, &mbar[cur]);
+        /* 3. Wait for the WGMMA group from 2 iterations ago.
+         * This ensures the stage that will be reused for TMA is no longer
+         * being read by WGMMA. With 3 stages, the stage freed is (kt-2)%3.
+         * wait_group 1 = wait until at most 1 group is outstanding. */
+        if (kt >= 1) {
+            asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory");
         }
+
+        /* 4. Issue TMA load for a future K tile.
+         * After wait_group 1, WGMMA from kt-1 has completed — stage is safe.
+         * No __syncthreads needed: 1 warpgroup = wgmma.wait syncs all threads. */
+        if (kt >= 1) {
+            int free_stage = (kt - 1) % STAGES;
+            int futK = (kt - 1) + STAGES;
+            if (futK < numK && tid == 0) {
+                mbarrier_arrive_expect_tx(&mbar[free_stage], A_BYTES + B_BYTES);
+                tma_load_2d(sA[free_stage], &tma_A, futK * TILE_K, ctaRow, &mbar[free_stage]);
+                tma_load_2d(sB[free_stage], &tma_B, futK * TILE_K, ctaCol, &mbar[free_stage]);
+            }
+        }
+    }
+
+    /* Drain: wait for ALL outstanding WGMMA groups to complete.
+     * Also issue the last pending TMA if needed. */
+    wgmma_wait0();
+    /* The last iteration's freed stage gets a TMA load here if needed */
+    if (numK >= 1) {
+        int free_stage = (numK - 1) % STAGES;
+        int futK = (numK - 1) + STAGES;
+        /* futK >= numK always, so no more loads needed. Just drain. */
     }
 
     /* Epilogue */

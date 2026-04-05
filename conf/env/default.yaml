@@ -1,0 +1,5 @@
+# ik:env configuration
+kit: null               # venv | cuda-toolkit | cuda-driver (required for destructive actions)
+version: auto           # auto-detect from driver, or explicit e.g. "13.0"
+python_version: "3.12"  # Python minor version for uv install
+force: false            # force reinstall even if already installed

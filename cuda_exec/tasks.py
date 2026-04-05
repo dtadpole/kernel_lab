@@ -717,6 +717,15 @@ def run_trial_task(
     for config_slug, config in configs.items():
         config_rel = _write_config_record(workspace, "trial", attempt, config_slug, config)
         comparison_rel = _config_artifact_rel("trial", attempt, config_slug, "comparison.json")
+        # Discover impl slugs from staged inputs/{slug}/ directories
+        inputs_dir = workspace_path / "inputs"
+        impl_slugs = sorted(
+            d.name for d in inputs_dir.iterdir()
+            if d.is_dir() and "-" in d.name
+        )
+        if not impl_slugs:
+            raise RuntimeError(f"No impl directories found in {inputs_dir}")
+
         command = [
             sys.executable,
             str(TRIAL_SCRIPT),
@@ -734,6 +743,8 @@ def run_trial_task(
             config_slug,
             "--config-json",
             json.dumps(config),
+            "--impls",
+            ",".join(impl_slugs),
             "--timeout",
             str(timeout_seconds),
         ]
@@ -770,10 +781,9 @@ def run_trial_task(
             correctness=_trial_correctness_summary(run_result, config=config),
             performance=_trial_performance_summary(run_result, config=config),
         )
-        payload["comparison"] = payload_json.get("comparison", {}) if isinstance(payload_json, dict) else {}
-        payload["reference"] = payload_json.get("reference", {}) if isinstance(payload_json, dict) else {}
-        payload["generated"] = payload_json.get("generated", {}) if isinstance(payload_json, dict) else {}
-        payload["cudnn"] = payload_json.get("cudnn", {}) if isinstance(payload_json, dict) else {}
+        if isinstance(payload_json, dict):
+            payload["impls"] = payload_json.get("impls", {})
+            payload["golden_slug"] = payload_json.get("golden_slug", "")
         payload["files"].append(capture_turn_file(comparison_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
@@ -1274,18 +1284,11 @@ def trial_endpoint(request: TrialRequest) -> TrialResponse:
             status=item["status"],
             golden_slug=item.get("golden_slug", ""),
             impls={
-                # Map old trial.py output to impl-keyed format
-                # trial.py still outputs reference/generated/cudnn — adapt here
-                **({slug: ImplTrialResult(
-                    performance=item.get("reference", {}).get("performance", {}),
-                ) for slug in ["reference"] if item.get("reference", {}).get("performance")}),
-                **({slug: ImplTrialResult(
-                    performance=item.get("generated", {}).get("performance", {}),
-                    correctness=item.get("correctness", {}),
-                ) for slug in ["generated"] if item.get("generated", {}).get("performance")}),
-                **({slug: ImplTrialResult(
-                    performance=item.get("cudnn", {}).get("performance", {}),
-                ) for slug in ["cudnn"] if item.get("cudnn", {}).get("performance")}),
+                slug: ImplTrialResult(
+                    performance=impl_data.get("performance", {}),
+                    correctness=impl_data.get("correctness"),
+                )
+                for slug, impl_data in item.get("impls", {}).items()
             },
             artifacts=_capture_public_files(
                 result["workspace_path"],

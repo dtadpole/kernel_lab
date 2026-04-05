@@ -75,13 +75,12 @@ else
 endif
 
 # ---------------------------------------------------------------------------
-# Config selector — pick a config slug from conf/fixtures/$(KERNEL)/configs.json
-# Generated code is at data/generated/$(ARCH)/$(KERNEL)/generated.cu
+# Config selector — pick a config slug from data/configs/$(KERNEL).json
 #   make evaluate KERNEL=matmul CONFIG=mat-1024x1024
 #   make evaluate KERNEL=fa4 CONFIG=mha-causal-b2-s16384
 # If CONFIG is not set, uses the per-kernel default from _KERNEL_CONFIG_SLUG.
 # ---------------------------------------------------------------------------
-_CONFIG_FILE = $(REPO_ROOT)/data/fixtures/$(ARCH)/$(KERNEL)/configs.json
+_CONFIG_FILE = $(REPO_ROOT)/data/configs/$(KERNEL).json
 
 # ---------------------------------------------------------------------------
 # Metadata — derived from KERNEL, overridable on command line
@@ -120,9 +119,28 @@ export LD_PRELOAD
 _HOST_ARCH    := $(shell $(VENV_PYTHON) -c "$(_HOST_SCRIPT)" torch_cuda_arch 2>/dev/null)
 ARCH          ?= sm$(subst .,,$(or $(_HOST_ARCH),$(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)))
 COMPILE_ARCH  ?= $(subst sm,sm_,$(ARCH))a
-FIXTURE_DIR   ?= $(REPO_ROOT)/data/fixtures/$(ARCH)/$(KERNEL)
-REFERENCE_PY  ?= $(FIXTURE_DIR)/cutedsl.py
-GENERATED_CU  ?= $(REPO_ROOT)/data/generated/$(ARCH)/$(KERNEL)/generated.cu
+
+# --- New data layout: data/{ref,gen,configs} ---
+# ref/  = arch-agnostic library implementations (cublas.py, cudnn.py, cutedsl.py)
+# gen/  = arch-specific generated code (cutedsl.py, cuda.cu)
+# configs/ = arch-agnostic benchmark configs (matmul.json, fa4.json)
+#
+# IMPL selects which implementation to evaluate:
+#   IMPL=ref/cublas       → data/ref/$(KERNEL)/cublas.py
+#   IMPL=gen/cutedsl      → data/gen/$(ARCH)/$(KERNEL)/cutedsl.py
+#   IMPL=gen/cuda         → data/gen/$(ARCH)/$(KERNEL)/cuda.cu
+#
+# Harness auto-detects by extension: .py → Python harness, .cu → C harness
+REF_DIR       := $(REPO_ROOT)/data/ref/$(KERNEL)
+GEN_DIR       := $(REPO_ROOT)/data/gen/$(ARCH)/$(KERNEL)
+
+# Default: first .py in ref/ as reference, first .cu in gen/ as generated
+REFERENCE_PY  ?= $(firstword $(wildcard $(REF_DIR)/*.py))
+CUDNN_PY      ?= $(wildcard $(REF_DIR)/cublas.py $(REF_DIR)/cudnn.py)
+GENERATED_CU  ?= $(wildcard $(GEN_DIR)/cuda.cu)
+
+# Backward compat aliases
+FIXTURE_DIR   ?= $(REF_DIR)
 
 # Pass COMPILE_ARCH to compile.sh
 export PTXAS_ARCH ?= $(COMPILE_ARCH)
@@ -170,10 +188,7 @@ _META_ARGS = \
 # Guards
 # ---------------------------------------------------------------------------
 define _require_input_files
-	$(if $(REFERENCE_PY),,$(error REFERENCE_PY is required — path to reference.py))
-	$(if $(GENERATED_CU),,$(error GENERATED_CU is required — path to generated.cu))
-	$(if $(wildcard $(REFERENCE_PY)),,$(error REFERENCE_PY not found: $(REFERENCE_PY)))
-	$(if $(wildcard $(GENERATED_CU)),,$(error GENERATED_CU not found: $(GENERATED_CU)))
+	$(if $(wildcard $(GEN_DIR)/*),,$(error No gen/ files found at $(GEN_DIR)))
 endef
 
 # ---------------------------------------------------------------------------
@@ -227,6 +242,8 @@ show: ## Print resolved turn-root path and key variables
 	@echo "TURN_ROOT      : $(TURN_ROOT)"
 	@echo "CONFIG_SLUG    : $(CONFIG_SLUG)"
 	@echo "CONFIG_JSON    : $(CONFIG_JSON)"
+	@echo "REF_DIR        : $(REF_DIR)"
+	@echo "GEN_DIR        : $(GEN_DIR)"
 	@echo "REFERENCE_PY   : $(REFERENCE_PY)"
 	@echo "GENERATED_CU   : $(GENERATED_CU)"
 	@echo ""
@@ -252,15 +269,25 @@ compile: ensure-venv ## Stage reference + generated files and run the 5-step com
 	@set -euo pipefail
 	# Create turn-root directories
 	mkdir -p "$(WORKSPACE)/inputs/reference" "$(WORKSPACE)/inputs/generated" "$(WORKSPACE)/inputs/cudnn" "$(ARTIFACTS)" "$(LOGS)" "$(STATE)"
-	# Stage input files (reference.py + any sibling .py helpers it imports)
-	cp "$(REFERENCE_PY)" "$(WORKSPACE)/inputs/reference/reference.py"
-	for f in $$(dirname "$(REFERENCE_PY)")/*.py; do \
-		[ "$$(basename $$f)" != "reference.py" ] && cp "$$f" "$(WORKSPACE)/inputs/reference/" 2>/dev/null || true; \
+	# Stage ref/ implementations:
+	#   cutedsl.py → inputs/reference/ (CuTe DSL library reference)
+	#   cublas.py, cudnn.py → inputs/cudnn/ (vendor baseline)
+	for f in $(REF_DIR)/*.py; do \
+		[ ! -f "$$f" ] && continue; \
+		case "$$(basename $$f)" in \
+			cutedsl.py) cp "$$f" "$(WORKSPACE)/inputs/reference/" ;; \
+			*)          cp "$$f" "$(WORKSPACE)/inputs/cudnn/" ;; \
+		esac; \
 	done
-	# Stage cuDNN/cuBLAS vendor baseline if present
-	CUDNN_PY="$$(dirname "$(REFERENCE_PY)")/cudnn.py"; \
-	if [ -f "$$CUDNN_PY" ]; then cp "$$CUDNN_PY" "$(WORKSPACE)/inputs/cudnn/cudnn.py"; fi
-	cp "$(GENERATED_CU)" "$(WORKSPACE)/inputs/generated/generated.cu"
+	# Stage gen/ Python implementations (cutedsl.py + helpers) → inputs/reference/
+	# If ref/ already provided cutedsl.py, gen/ cutedsl.py overwrites it
+	for f in $(GEN_DIR)/*.py; do \
+		[ -f "$$f" ] && cp "$$f" "$(WORKSPACE)/inputs/reference/" 2>/dev/null || true; \
+	done
+	# Stage gen/ CUDA implementation → inputs/generated/
+	if [ -f "$(GEN_DIR)/cuda.cu" ]; then \
+		cp "$(GEN_DIR)/cuda.cu" "$(WORKSPACE)/inputs/generated/generated.cu"; \
+	fi
 	# Run the 5-step compile pipeline
 	echo "--- compile [$(KERNEL)]: staging done, running compile.sh ---"
 	HARNESS_FLAG="" && \

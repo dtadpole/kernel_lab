@@ -141,19 +141,32 @@ def watchdog_handler(signum: int, frame: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def load_reference_entry(reference_root: Path) -> Path:
+    """Find the gen/ Python entry point (cutedsl.py) under workspace reference dir."""
     candidates = sorted(reference_root.rglob("cutedsl.py"))
-    if len(candidates) != 1:
-        raise RuntimeError(
-            f"reference execution requires exactly one cutedsl.py under {reference_root}; found {len(candidates)}"
-        )
-    return candidates[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    # Fallback: any .py file with a Model class
+    all_py = sorted(reference_root.rglob("*.py"))
+    for p in all_py:
+        if "Model" in p.read_text(errors="ignore"):
+            return p
+    raise RuntimeError(
+        f"No reference entry point found under {reference_root}; "
+        f"looked for cutedsl.py or any .py with Model class"
+    )
 
 
 def load_cudnn_entry(cudnn_root: Path) -> Path | None:
-    """Return the cudnn.py entry point if it exists, else None."""
-    candidates = sorted(cudnn_root.rglob("cudnn.py"))
-    if len(candidates) == 1:
-        return candidates[0]
+    """Find the ref/ baseline entry point (cublas.py, cudnn.py, etc.)."""
+    # Try known names in priority order
+    for name in ("cublas.py", "cudnn.py"):
+        candidates = sorted(cudnn_root.rglob(name))
+        if candidates:
+            return candidates[0]
+    # Fallback: any .py with a Model class
+    for p in sorted(cudnn_root.rglob("*.py")):
+        if "Model" in p.read_text(errors="ignore"):
+            return p
     return None
 
 

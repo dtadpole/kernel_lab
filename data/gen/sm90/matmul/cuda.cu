@@ -1,16 +1,10 @@
 /*
- * BF16 matrix multiplication for SM90 (H100) — Tensor Core via mma.sync.
+ * BF16 matmul for SM90 — WMMA tensor cores, 128×128 tiles, double buffering.
  *
- * Uses mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
- * Each warp computes a 16×8 output tile per mma instruction.
- * Tile: 64×64 per CTA, K-loop with 16-element steps.
+ * CTA tile: 128×128, 8 warps (4×2 layout), WMMA 16×16×16.
+ * Each warp: 2×4 WMMA tiles = 32×64 output.
+ * Double-buffered shared memory for K-loop pipelining.
  * FP32 accumulation → BF16 output.
- *
- * kernel_run contract:
- *   inputs[0] = A (M*K elements, row-major BF16)
- *   inputs[1] = B (K*N elements, row-major BF16)
- *   outputs[0] = C (M*N elements, row-major BF16)
- *   n = M*K (square: M=K=N=sqrt(n))
  */
 #include <cuda_bf16.h>
 #include <cstdio>
@@ -23,101 +17,117 @@ using namespace nvcuda;
 #define WMMA_N 16
 #define WMMA_K 16
 #define WARP_SIZE 32
-#define TILE_M 64
-#define TILE_N 64
+#define TILE_M 128
+#define TILE_N 128
 #define TILE_K 16
-#define WARPS_PER_BLOCK 4  /* 2×2 warp layout */
+#define WARPS 8         /* 4×2 warp layout */
+#define THREADS (WARPS * WARP_SIZE)  /* 256 */
+#define WARP_ROWS 4
+#define WARP_COLS 2
+/* Each warp: 2 WMMA tiles in M (32 rows), 4 WMMA tiles in N (64 cols) */
+#define WARP_WMMA_M 2
+#define WARP_WMMA_N 4
 
-__global__ void matmul_wmma(
+__global__ void matmul_wmma128(
     const __nv_bfloat16* __restrict__ A,
     const __nv_bfloat16* __restrict__ B,
     __nv_bfloat16* __restrict__ C,
     int M, int N, int K)
 {
-    /* Shared memory for A and B tiles */
-    __shared__ __nv_bfloat16 sA[TILE_M][TILE_K];
-    __shared__ __nv_bfloat16 sB[TILE_K][TILE_N];
+    /* Double-buffered shared memory */
+    __shared__ __nv_bfloat16 sA[2][TILE_M][TILE_K];
+    __shared__ __nv_bfloat16 sB[2][TILE_K][TILE_N];
 
     int warpId = threadIdx.x / WARP_SIZE;
-    int laneId = threadIdx.x % WARP_SIZE;
+    int warpRow = warpId / WARP_COLS;  /* 0..3 */
+    int warpCol = warpId % WARP_COLS;  /* 0..1 */
 
-    /* 2×2 warp layout within the 64×64 CTA tile */
-    int warpRow = warpId / 2;  /* 0 or 1 */
-    int warpCol = warpId % 2;  /* 0 or 1 */
-
-    /* Each warp handles 32×32 of the 64×64 tile (2×2 WMMA tiles) */
     int ctaRow = blockIdx.y * TILE_M;
     int ctaCol = blockIdx.x * TILE_N;
+    int tid = threadIdx.x;
 
-    /* Declare WMMA fragments — 2×2 per warp */
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[2][2];
-    for (int i = 0; i < 2; i++)
-        for (int j = 0; j < 2; j++)
+    /* Accumulators: each warp has 2×4 WMMA tiles */
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[WARP_WMMA_M][WARP_WMMA_N];
+    for (int i = 0; i < WARP_WMMA_M; i++)
+        for (int j = 0; j < WARP_WMMA_N; j++)
             wmma::fill_fragment(acc[i][j], 0.0f);
 
-    /* K-loop */
-    for (int k = 0; k < K; k += TILE_K) {
-        /* Cooperative load A tile (64×16) and B tile (16×64) */
-        /* 128 threads, each loads multiple elements */
-        int tid = threadIdx.x;
-        /* Load A: 64 rows × 16 cols = 1024 elements, 128 threads → 8 each */
-        for (int i = tid; i < TILE_M * TILE_K; i += blockDim.x) {
-            int r = i / TILE_K;
-            int c = i % TILE_K;
-            int gRow = ctaRow + r;
-            int gCol = k + c;
-            sA[r][c] = (gRow < M && gCol < K) ? A[gRow * K + gCol] : __float2bfloat16(0.0f);
-        }
-        /* Load B: 16 rows × 64 cols = 1024 elements */
-        for (int i = tid; i < TILE_K * TILE_N; i += blockDim.x) {
-            int r = i / TILE_N;
-            int c = i % TILE_N;
-            int gRow = k + r;
-            int gCol = ctaCol + c;
-            sB[r][c] = (gRow < K && gCol < N) ? B[gRow * N + gCol] : __float2bfloat16(0.0f);
-        }
-        __syncthreads();
+    /* Load first tile into buffer 0 */
+    for (int i = tid; i < TILE_M * TILE_K; i += THREADS) {
+        int r = i / TILE_K, c = i % TILE_K;
+        int gR = ctaRow + r, gC = c;
+        sA[0][r][c] = (gR < M && gC < K) ? A[gR * K + gC] : __float2bfloat16(0.0f);
+    }
+    for (int i = tid; i < TILE_K * TILE_N; i += THREADS) {
+        int r = i / TILE_N, c = i % TILE_N;
+        int gR = r, gC = ctaCol + c;
+        sB[0][r][c] = (gR < K && gC < N) ? B[gR * N + gC] : __float2bfloat16(0.0f);
+    }
+    __syncthreads();
 
-        /* Each warp does 2×2 WMMA on its 32×32 sub-tile */
-        for (int wi = 0; wi < 2; wi++) {
-            for (int wj = 0; wj < 2; wj++) {
+    int numK = (K + TILE_K - 1) / TILE_K;
+
+    for (int kt = 0; kt < numK; kt++) {
+        int cur = kt & 1;
+        int nxt = 1 - cur;
+
+        /* Prefetch next tile into other buffer */
+        if (kt + 1 < numK) {
+            int nextK = (kt + 1) * TILE_K;
+            for (int i = tid; i < TILE_M * TILE_K; i += THREADS) {
+                int r = i / TILE_K, c = i % TILE_K;
+                int gR = ctaRow + r, gC = nextK + c;
+                sA[nxt][r][c] = (gR < M && gC < K) ? A[gR * K + gC] : __float2bfloat16(0.0f);
+            }
+            for (int i = tid; i < TILE_K * TILE_N; i += THREADS) {
+                int r = i / TILE_N, c = i % TILE_N;
+                int gR = nextK + r, gC = ctaCol + c;
+                sB[nxt][r][c] = (gR < K && gC < N) ? B[gR * N + gC] : __float2bfloat16(0.0f);
+            }
+        }
+
+        /* Compute: each warp does WARP_WMMA_M × WARP_WMMA_N WMMA ops */
+        for (int wi = 0; wi < WARP_WMMA_M; wi++) {
+            for (int wj = 0; wj < WARP_WMMA_N; wj++) {
                 wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major> a_frag;
                 wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __nv_bfloat16, wmma::row_major> b_frag;
 
-                int aRow = warpRow * 32 + wi * WMMA_M;
-                int bCol = warpCol * 32 + wj * WMMA_N;
+                int aRow = warpRow * (TILE_M / WARP_ROWS) + wi * WMMA_M;
+                int bCol = warpCol * (TILE_N / WARP_COLS) + wj * WMMA_N;
 
-                wmma::load_matrix_sync(a_frag, &sA[aRow][0], TILE_K);
-                wmma::load_matrix_sync(b_frag, &sB[0][bCol], TILE_N);
+                wmma::load_matrix_sync(a_frag, &sA[cur][aRow][0], TILE_K);
+                wmma::load_matrix_sync(b_frag, &sB[cur][0][bCol], TILE_N);
                 wmma::mma_sync(acc[wi][wj], a_frag, b_frag, acc[wi][wj]);
             }
         }
         __syncthreads();
     }
 
-    /* Store results: FP32 acc → BF16 output via shared memory */
-    __shared__ float sC[TILE_M][TILE_N];
+    /* Store: FP32 acc → BF16 global directly from fragment registers.
+     * Each WMMA 16×16 accumulator has 8 FP32 elements per thread (256 total).
+     * WMMA row-major accumulator layout: thread t holds elements at
+     * specific (row, col) positions. We use store_matrix_sync to shared
+     * with per-warp offset to avoid conflicts. */
+    /* Per-warp temp: 8 warps × 16×16 × 4 bytes = 8KB — fits in SMEM */
+    __shared__ float sOut[WARPS][WMMA_M][WMMA_N];
 
-    for (int wi = 0; wi < 2; wi++) {
-        for (int wj = 0; wj < 2; wj++) {
-            int outRow = warpRow * 32 + wi * WMMA_M;
-            int outCol = warpCol * 32 + wj * WMMA_N;
+    for (int wi = 0; wi < WARP_WMMA_M; wi++) {
+        for (int wj = 0; wj < WARP_WMMA_N; wj++) {
+            int outRow = ctaRow + warpRow * (TILE_M / WARP_ROWS) + wi * WMMA_M;
+            int outCol = ctaCol + warpCol * (TILE_N / WARP_COLS) + wj * WMMA_N;
 
-            /* Store FP32 accumulators to shared memory */
-            wmma::store_matrix_sync(&sC[outRow][outCol], acc[wi][wj], TILE_N, wmma::mem_row_major);
+            wmma::store_matrix_sync(&sOut[warpId][0][0], acc[wi][wj], WMMA_N, wmma::mem_row_major);
+
+            int laneId = threadIdx.x % WARP_SIZE;
+            for (int idx = laneId; idx < WMMA_M * WMMA_N; idx += WARP_SIZE) {
+                int r = idx / WMMA_N;
+                int c = idx % WMMA_N;
+                int gR = outRow + r;
+                int gC = outCol + c;
+                if (gR < M && gC < N)
+                    C[gR * N + gC] = __float2bfloat16(sOut[warpId][r][c]);
+            }
         }
-    }
-    __syncthreads();
-
-    /* Convert FP32 → BF16 and write to global memory */
-    int tid = threadIdx.x;
-    for (int i = tid; i < TILE_M * TILE_N; i += blockDim.x) {
-        int r = i / TILE_N;
-        int c = i % TILE_N;
-        int gRow = ctaRow + r;
-        int gCol = ctaCol + c;
-        if (gRow < M && gCol < N)
-            C[gRow * N + gCol] = __float2bfloat16(sC[r][c]);
     }
 }
 
@@ -127,18 +137,10 @@ extern "C" int kernel_run(
     int n, cudaStream_t stream)
 {
     int dim = (int)sqrtf((float)n);
-    if (dim * dim != n) {
-        fprintf(stderr, "matmul: n=%d is not a perfect square\n", n);
-        return 1;
-    }
+    if (dim * dim != n) return 1;
 
-    const __nv_bfloat16* A = inputs[0];
-    const __nv_bfloat16* B = inputs[1];
-    __nv_bfloat16* C = outputs[0];
-
-    dim3 block(WARPS_PER_BLOCK * WARP_SIZE);  /* 128 threads */
+    dim3 block(THREADS);
     dim3 grid((dim + TILE_N - 1) / TILE_N, (dim + TILE_M - 1) / TILE_M);
-
-    matmul_wmma<<<grid, block, 0, stream>>>(A, B, C, dim, dim, dim);
+    matmul_wmma128<<<grid, block, 0, stream>>>(inputs[0], inputs[1], outputs[0], dim, dim, dim);
     return 0;
 }

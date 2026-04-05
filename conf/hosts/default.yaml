@@ -96,8 +96,14 @@ hosts:
     hardware:
       gpu: "NVIDIA H100"
       gpu_count: 8
+      gpu_variant: "SXM5 80GB"
       driver_version: "570.86.15"
       driver_cuda_version: "12.8"   # max CUDA version this driver supports
+      # H100 SXM5 roofline (dense, no sparsity)
+      peak_tflops_bf16: 989.4       # BF16 Tensor Core
+      peak_tflops_fp16: 989.4       # FP16 Tensor Core
+      peak_tflops_fp32: 66.9        # FP32 CUDA Core
+      peak_bandwidth_gb_s: 3350     # HBM3 bandwidth
     env:
       cuda_home: /usr/local/cuda-12.8
       cuda_available: ["12.8", "12.9", "13.0"]  # toolkits installed (but 13.0 unusable with this driver)
@@ -125,8 +131,13 @@ hosts:
     hardware:
       gpu: "NVIDIA H100"
       gpu_count: 8
+      gpu_variant: "SXM5 80GB"
       driver_version: "580.65.06"
       driver_cuda_version: "13.0"   # max CUDA version this driver supports
+      peak_tflops_bf16: 989.4
+      peak_tflops_fp16: 989.4
+      peak_tflops_fp32: 66.9
+      peak_bandwidth_gb_s: 3350
     env:
       cuda_home: /usr/local/cuda-13.0
       cuda_available: ["12.8", "12.9", "13.0"]

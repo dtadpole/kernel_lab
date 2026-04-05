@@ -33,6 +33,225 @@ from cuda_exec.tasks import compile_endpoint, trial_endpoint
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# FLOPs computation per kernel family
+# ---------------------------------------------------------------------------
+
+def _compute_flops(kernel: str, config: dict) -> int:
+    """Compute total FLOPs for a single kernel invocation."""
+    family = config.get("family", "")
+
+    if "matrix-multiplication" in family or kernel == "matmul":
+        shape = config.get("shape", [])
+        if len(shape) >= 2:
+            M, N = shape[0], shape[1]
+            K = M  # square matmul: A(M×K) @ B(K×N)
+            return 2 * M * N * K
+        return 0
+
+    if "fa4" in family or kernel == "fa4":
+        B = config.get("batch_size", 1)
+        S = config.get("seq_len", 1)
+        H = config.get("num_heads", 1)
+        D = config.get("head_dim", 1)
+        causal = config.get("causal", False)
+        # Q@K^T + Softmax@V: each is 2*B*H*S*S*D
+        flops = 4 * B * H * S * S * D
+        if causal:
+            flops = flops // 2
+        return flops
+
+    if kernel == "vecadd":
+        return config.get("input_size", 0)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Result enrichment: extract metrics, compute TFLOPS / speedup / % peak
+# ---------------------------------------------------------------------------
+
+def _extract_impl_metrics(
+    bench_result: dict,
+    configs: dict,
+) -> Dict[str, Dict[str, dict]]:
+    """Extract per-impl, per-config latency and correctness.
+
+    Returns ``{impl_slug: {config_slug: {median_ms, correct}}}``.
+    """
+    metrics: Dict[str, Dict[str, dict]] = {}
+
+    for slug, impl_result in bench_result.get("results", {}).items():
+        metrics[slug] = {}
+        trial = impl_result.get("trial_result")
+        if not trial:
+            continue
+        trial_configs = trial.get("configs", {})
+        for config_slug in configs:
+            entry = trial_configs.get(config_slug, {})
+            median_ms = None
+            if "impls" in entry:
+                # cu trial: configs[c]["impls"][slug]["performance"]
+                impl_data = entry.get("impls", {}).get(slug, {})
+                median_ms = impl_data.get("performance", {}).get("latency_ms", {}).get("median")
+            elif "performance" in entry:
+                # py impl: configs[c]["performance"]
+                median_ms = entry.get("performance", {}).get("latency_ms", {}).get("median")
+            metrics[slug][config_slug] = {"median_ms": median_ms, "correct": None}
+
+    # Correctness comes from cu trial results (which compare all impls vs golden)
+    for slug, impl_result in bench_result.get("results", {}).items():
+        trial = impl_result.get("trial_result")
+        if not trial:
+            continue
+        for config_slug, entry in trial.get("configs", {}).items():
+            if "impls" not in entry:
+                continue
+            for impl_slug, impl_data in entry.get("impls", {}).items():
+                corr = impl_data.get("correctness")
+                if corr is not None and impl_slug in metrics and config_slug in metrics[impl_slug]:
+                    metrics[impl_slug][config_slug]["correct"] = corr.get("passed")
+
+    return metrics
+
+
+def enrich_result(bench_result: dict, configs: dict) -> dict:
+    """Add a ``summary`` section with TFLOPS, speedup, correctness, % peak.
+
+    Mutates and returns ``bench_result``.
+    """
+    from cuda_exec.host_env import resolve_gpu_peak_tflops, resolve_gpu_name
+
+    kernel = bench_result["kernel"]
+    peak = resolve_gpu_peak_tflops()
+    gpu_name = resolve_gpu_name()
+    golden = bench_result["refs"][0] if bench_result.get("refs") else None
+    impl_order = bench_result.get("impls_requested", [])
+
+    raw = _extract_impl_metrics(bench_result, configs)
+
+    summary_impls: Dict[str, dict] = {}
+    for slug in impl_order:
+        impl_configs: Dict[str, dict] = {}
+        best_pct = 0.0
+        for config_slug, config in configs.items():
+            m = raw.get(slug, {}).get(config_slug, {})
+            median_ms = m.get("median_ms")
+            correct = m.get("correct")
+
+            flops = _compute_flops(kernel, config)
+            tflops = (flops / median_ms / 1e9) if (median_ms and median_ms > 0) else None
+            pct_peak = (tflops / peak * 100) if tflops else None
+
+            golden_ms = raw.get(golden, {}).get(config_slug, {}).get("median_ms") if golden else None
+            speedup = (golden_ms / median_ms) if (golden_ms and median_ms and median_ms > 0) else None
+
+            entry = {
+                "median_ms": round(median_ms, 4) if median_ms else None,
+                "flops": flops,
+                "tflops": round(tflops, 1) if tflops else None,
+                "pct_peak": round(pct_peak, 1) if pct_peak else None,
+                "speedup": round(speedup, 2) if speedup else None,
+                "correct": correct,
+            }
+            impl_configs[config_slug] = entry
+            if pct_peak and pct_peak > best_pct:
+                best_pct = pct_peak
+
+        summary_impls[slug] = {
+            "configs": impl_configs,
+            "best_pct_peak": round(best_pct, 1),
+        }
+
+    bench_result["summary"] = {
+        "gpu": gpu_name,
+        "peak_tflops": peak,
+        "golden": golden,
+        "impls": summary_impls,
+    }
+    return bench_result
+
+
+# ---------------------------------------------------------------------------
+# Markdown table for stderr
+# ---------------------------------------------------------------------------
+
+def format_results_table(bench_result: dict) -> str:
+    """Format the summary as a Markdown comparison table."""
+    summary = bench_result.get("summary", {})
+    if not summary:
+        return ""
+
+    gpu = summary["gpu"]
+    peak = summary["peak_tflops"]
+    golden = summary["golden"]
+    impl_order = bench_result.get("impls_requested", [])
+    config_order = list(next(iter(summary["impls"].values()))["configs"].keys()) if summary["impls"] else []
+
+    # Header
+    lines: List[str] = []
+    hdr1 = f"| {'Config':<24} |"
+    hdr2 = f"| {'':<24} |"
+    sep = f"|{'-' * 26}|"
+    for slug in impl_order:
+        label = slug
+        sub = "ms    TFLOPS"
+        if slug != golden:
+            sub += "   ×"
+        hdr1 += f" {label:<20} |"
+        hdr2 += f" {sub:<20} |"
+        sep += f"{'-' * 22}|"
+    lines.append(f"**{gpu}** — peak {peak} TFLOPS (BF16 TC)")
+    lines.append("")
+    lines.append(hdr1)
+    lines.append(hdr2)
+    lines.append(sep)
+
+    # Data rows
+    for config_slug in config_order:
+        row = f"| {config_slug:<24} |"
+        for slug in impl_order:
+            entry = summary["impls"][slug]["configs"].get(config_slug, {})
+            ms = entry.get("median_ms")
+            tf = entry.get("tflops")
+            spd = entry.get("speedup")
+            ok = entry.get("correct")
+
+            if ms is None:
+                cell = "—"
+            else:
+                ms_s = f"{ms:.3f}" if ms < 1 else f"{ms:.2f}"
+                tf_s = f"{tf:>6.1f}" if tf else "    —"
+                cell = f"{ms_s:>6}  {tf_s}"
+                if slug == golden:
+                    pass  # no marker for golden
+                elif ok is True:
+                    cell += " ✓"
+                elif ok is False:
+                    cell += " ✗"
+                else:
+                    cell += "  "
+                if slug != golden and spd is not None:
+                    cell += f" {spd:.1f}×"
+            row += f" {cell:<20} |"
+        lines.append(row)
+
+    # % of peak row
+    pct_row = f"| {'% of peak':<24} |"
+    for slug in impl_order:
+        pct = summary["impls"][slug]["best_pct_peak"]
+        cell = f"{pct:>5.1f}%"
+        pct_row += f" {cell:<20} |"
+    lines.append(sep)
+    lines.append(pct_row)
+
+    # Footer
+    lines.append("")
+    lines.append(f"Golden: {golden} — ✓/✗ = correctness vs golden, ×  = speedup vs golden")
+
+    return "\n".join(lines)
+
+
 def formal_benchmark(
     kernel: str,
     arch: str,
@@ -314,7 +533,22 @@ def cli_main() -> None:
         data_root=bench_cfg.get("data_root"),
     )
 
+    # Enrich with TFLOPS, speedup, correctness, % peak
+    from cuda_exec.impls import load_configs as _load_configs
+    try:
+        data_root_str = bench_cfg.get("data_root")
+        data_root_path = Path(data_root_str).expanduser() if data_root_str else None
+        all_configs = _load_configs(result["kernel"], data_root=data_root_path)
+        enrich_result(result, all_configs)
+    except Exception as exc:
+        logger.warning("Failed to enrich result: %s", exc)
+
     print(json.dumps(result, indent=2, default=str))
+
+    # Markdown table to stderr
+    table = format_results_table(result)
+    if table:
+        print(table, file=sys.stderr)
 
 
 if __name__ == "__main__":

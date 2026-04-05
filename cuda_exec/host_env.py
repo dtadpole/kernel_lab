@@ -159,6 +159,29 @@ def resolve_compile_arch() -> str:
     return f"sm_{digits}a"
 
 
+@functools.lru_cache(maxsize=1)
+def resolve_gpu_peak_tflops() -> float:
+    """Resolve GPU peak BF16 Tensor Core TFLOPS from host config.
+
+    Returns the ``hardware.peak_tflops_bf16`` value, or a safe default.
+    """
+    _, entry = _match_host_entry()
+    if entry:
+        return float(entry.get("hardware", {}).get("peak_tflops_bf16", 989.4))
+    return 989.4  # H100 SXM5 default
+
+
+def resolve_gpu_name() -> str:
+    """Resolve GPU display name (e.g. 'NVIDIA H100 SXM5 80GB')."""
+    _, entry = _match_host_entry()
+    if entry:
+        hw = entry.get("hardware", {})
+        name = hw.get("gpu", "GPU")
+        variant = hw.get("gpu_variant", "")
+        return f"{name} {variant}".strip() if variant else name
+    return "GPU"
+
+
 def resolve_benchmark_gpus() -> Optional[str]:
     """Resolve the GPU indices for benchmarking (e.g. '4,5').
 

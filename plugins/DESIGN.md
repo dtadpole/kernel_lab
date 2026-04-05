@@ -71,6 +71,25 @@ Invocation: `/devenv:local`
 
 ---
 
+## Plugin Cache & Development
+
+Claude Code caches local marketplace plugins at `~/.claude/plugins/cache/kernel-lab/ik/{version}/`.
+The cache is keyed by the `version` field in `plugins/ik/.claude-plugin/plugin.json`.
+
+**Problem:** `/reload-plugins` reads from the cache, not the live source. Changing skill files
+without bumping the version leaves the cache stale — new skills don't appear, deleted skills linger.
+
+**During development:** Symlink the cache to the live source so changes are instant:
+```bash
+rm -rf ~/.claude/plugins/cache/kernel-lab/ik/0.1.0
+ln -sf /home/zhenc/kernel_lab/plugins/ik ~/.claude/plugins/cache/kernel-lab/ik/0.1.0
+```
+
+**At release milestones:** Bump `version` in `plugin.json`. Claude Code creates a fresh cache
+copy at the new version path. Remove the symlink if present.
+
+---
+
 ## Deprecated
 
 Old plugins (`plugins/deprecated/cuda/`, `plugins/deprecated/kb/`) had MCP servers, remote dispatch, and dense embedding search. Replaced by `ik` for simplicity.

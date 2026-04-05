@@ -134,74 +134,27 @@ def formal_benchmark(
         finally:
             _sys.path[:] = old_path
 
-    # --- Helper: compare two output tensors for correctness ---
-    def _check_correctness(ref_tensor, gen_tensor, atol=1e-2, rtol=1e-2) -> dict:
-        import torch
-        if ref_tensor is None or gen_tensor is None:
-            return {"passed": None, "reason": "missing output"}
-        try:
-            ref_f = ref_tensor.float()
-            gen_f = gen_tensor.float()
-            if ref_f.shape != gen_f.shape:
-                return {"passed": False, "reason": f"shape mismatch: {ref_f.shape} vs {gen_f.shape}"}
-            diff = (ref_f - gen_f).abs()
-            max_diff = diff.max().item()
-            mean_diff = diff.mean().item()
-            passed = bool(torch.allclose(ref_f, gen_f, atol=atol, rtol=rtol))
-            return {"passed": passed, "max_abs_error": max_diff, "mean_abs_error": mean_diff}
-        except Exception as exc:
-            return {"passed": False, "reason": str(exc)}
-
-    # --- Benchmark primary ref first (to get golden outputs) ---
-    golden_outputs: Dict[str, Any] = {}  # config_slug → output tensor
-    logger.info("[%s] measure_py start (%d configs) [primary ref]", primary_ref["slug"], len(configs))
-    ref_start = time.time()
-    primary_result = _run_py_impl(primary_ref)
-    if primary_result["ok"]:
-        config_results_clean = {}
-        for cs, cr in primary_result["configs"].items():
-            golden_outputs[cs] = cr.pop("output_tensor", None)
-            config_results_clean[cs] = cr
-        results[primary_ref["slug"]] = {
-            "impl": primary_ref["slug"],
-            "compile_ok": None,
-            "trial_ok": True,
-            "compile_result": None,
-            "trial_result": {"all_ok": True, "configs": config_results_clean},
-        }
-    else:
-        results[primary_ref["slug"]] = {
-            "impl": primary_ref["slug"],
-            "compile_ok": None,
-            "trial_ok": False,
-            "error": primary_result.get("error", ""),
-        }
-    logger.info("[%s] measure_py done (%.1fs)", primary_ref["slug"], time.time() - ref_start)
-
-    # --- Benchmark remaining ref-* impls (correctness vs primary ref) ---
-    for ref in refs[1:]:
-        logger.info("[%s] measure_py start (%d configs)", ref["slug"], len(configs))
-        r_start = time.time()
-        r = _run_py_impl(ref)
+    # --- Benchmark each ref-* and .py gen-* impl independently ---
+    # Correctness is NOT computed here — trial.py handles it against the golden.
+    for impl in refs + [g for g in gens if g["file_type"] == "py"]:
+        logger.info("[%s] measure_py start (%d configs)", impl["slug"], len(configs))
+        impl_start = time.time()
+        r = _run_py_impl(impl)
         if r["ok"]:
-            config_results_clean = {}
             for cs, cr in r["configs"].items():
-                ref_tensor = cr.pop("output_tensor", None)
-                golden = golden_outputs.get(cs)
-                cr["correctness"] = _check_correctness(golden, ref_tensor)
-                config_results_clean[cs] = cr
-            results[ref["slug"]] = {
-                "impl": ref["slug"],
+                cr.pop("output_tensor", None)
+            results[impl["slug"]] = {
+                "impl": impl["slug"],
                 "compile_ok": None, "trial_ok": True,
                 "compile_result": None,
-                "trial_result": {"all_ok": True, "configs": config_results_clean},
+                "trial_result": {"all_ok": True, "configs": r["configs"]},
             }
         else:
-            results[ref["slug"]] = {
-                "impl": ref["slug"], "compile_ok": None, "trial_ok": False,
+            results[impl["slug"]] = {
+                "impl": impl["slug"], "compile_ok": None, "trial_ok": False,
                 "error": r.get("error", ""),
             }
-        logger.info("[%s] measure_py done (%.1fs)", ref["slug"], time.time() - r_start)
+        logger.info("[%s] measure_py done (%.1fs)", impl["slug"], time.time() - impl_start)
 
     # --- Trial each gen-* implementation ---
     for gen in gens:
@@ -216,23 +169,24 @@ def formal_benchmark(
         )
 
         if gen["file_type"] == "cu":
-            # .cu needs compile
-            ref_files = dict(primary_ref["files"])
-            # Include .py gen impls as additional reference files
-            py_gens = [g for g in gens if g["file_type"] == "py"]
-            for pg in py_gens:
-                ref_files.update(pg["files"])
-            # cudnn = second ref (vendor baseline) if available
-            cudnn = refs[1]["files"] if len(refs) > 1 else {}
+            # .cu needs compile — build impl-keyed request
+            compile_impls = {}
+            # Include all ref impls
+            for ref in refs:
+                compile_impls[ref["slug"]] = dict(ref["files"])
+            # Include all .py gen impls
+            for pg in gens:
+                if pg["file_type"] == "py":
+                    compile_impls[pg["slug"]] = dict(pg["files"])
+            # Include this .cu gen impl
+            compile_impls[gen["slug"]] = dict(gen["files"])
 
             logger.info("[%s] compile start", gen["slug"])
             compile_start = time.time()
             compile_req = CompileRequest(
                 metadata=metadata,
                 timeout_seconds=timeout_seconds,
-                reference_files=ref_files,
-                generated_files=gen["files"],
-                cudnn_files=cudnn,
+                impls=compile_impls,
             )
             compile_resp = compile_endpoint(compile_req)
             compile_result = compile_resp.model_dump(mode="json")
@@ -248,32 +202,7 @@ def formal_benchmark(
                 }
                 continue
         else:
-            # .py gen impl: benchmark independently + correctness vs primary ref
-            logger.info("[%s] measure_py start (%d configs)", gen["slug"], len(configs))
-            py_start = time.time()
-            r = _run_py_impl(gen)
-            if r["ok"]:
-                config_results_clean = {}
-                for cs, cr in r["configs"].items():
-                    gen_tensor = cr.pop("output_tensor", None)
-                    golden = golden_outputs.get(cs)
-                    cr["correctness"] = _check_correctness(golden, gen_tensor)
-                    config_results_clean[cs] = cr
-                results[gen["slug"]] = {
-                    "impl": gen["slug"],
-                    "compile_ok": None,
-                    "trial_ok": True,
-                    "compile_result": None,
-                    "trial_result": {"all_ok": True, "configs": config_results_clean},
-                }
-            else:
-                results[gen["slug"]] = {
-                    "impl": gen["slug"],
-                    "compile_ok": None,
-                    "trial_ok": False,
-                    "error": r.get("error", ""),
-                }
-            logger.info("[%s] measure_py done (%.1fs)", gen["slug"], time.time() - py_start)
+            # .py gen impl: already benchmarked above in the ref+py loop
             continue
 
         # Trial ALL configs

@@ -10,9 +10,8 @@ Important public conventions captured in this file:
 - Trial/profile configs are slug-keyed maps: Dict[config_slug, Dict[str, Any]].
 - Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
-- `reference` means the reference side of a comparison.
-- `generated` means the generated or current side under evaluation.
-- `cudnn` means the vendor-optimized baseline (cuBLAS/cuDNN/PyTorch native).
+- Implementations are keyed by slug: `{source}-{name}` (e.g. `ref-cublas`, `gen-cuda`).
+- The first `ref-*` impl is the golden baseline for correctness comparison.
 - `artifacts` means kept results.
 - `logs` means process output.
 - `state` remains internal-first and is not exposed in default public responses.
@@ -41,37 +40,29 @@ class RequestBase(BaseModel):
 
 
 class CompileRequest(RequestBase):
-    """Compile request using inline file maps.
+    """Compile request using impl-keyed file maps.
 
-    Both `reference_files` and `generated_files` are maps of:
-        relative_path -> file_content
+    `impls` maps implementation slugs to their source files:
+        slug -> {filename: content}
 
-    Compile request contract:
-    - `reference_files` must be non-empty
-    - `reference_files` must include a file keyed as `cutedsl.py` (the entry point)
-    - `generated_files` must be non-empty
-    - `generated_files` must contain exactly one `.cu` file, keyed as `generated.cu`
-    - `generated_files` may include additional headers or inline helper files
-    - `reference_files` may include additional helper files of any type
-    - compile may run only once per turn; use a new turn for a different upload set
+    Example:
+        {
+            "ref-cublas": {"cublas.py": "..."},
+            "gen-cutedsl": {"cutedsl.py": "...", "cute_gemm_sm90.py": "..."},
+            "gen-cuda": {"cuda.cu": "..."}
+        }
 
-    Why request-side files stay this simple:
-    - compile inputs are expected to be normal text source files
-    - the caller already knows the intended relative path
-    - request-side inputs do not need response-only metadata like encoding or truncation
+    Slugs follow the format: {source}-{name}
+    - source: "ref" (reference/baseline) or "gen" (generated/optimized)
+    - name: entry point stem (e.g. "cublas", "cutedsl", "cuda")
+
+    .cu impls are compiled via compile.sh + eval_harness.cu.
+    .py impls are run via measure_reference() in trial.py.
     """
 
-    reference_files: Dict[str, str] = Field(
+    impls: Dict[str, Dict[str, str]] = Field(
         default_factory=dict,
-        description="Non-empty map of relative path to file content; must include cutedsl.py as the entry point",
-    )
-    generated_files: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Non-empty map of generated source inputs; must include generated.cu as the single .cu entry file; headers and inline helper files also allowed",
-    )
-    cudnn_files: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Optional map of vendor-baseline source inputs; must include at least one .py entry point (e.g. cublas.py, cudnn.py). Follows the same Model/get_inputs/get_init_inputs contract as reference.",
+        description="Impl-slug-keyed map: slug → {filename: content}. At least one ref-* impl required.",
     )
 
 
@@ -84,10 +75,10 @@ class TrialRequest(RequestBase):
     The service owns the transport shape of config. The kernel owns the semantic
     shape of config.
 
-    Reference-side contract note:
-    - reference Python code is expected to export `Model(torch.nn.Module)`
-    - reference Python code is expected to export `get_init_inputs()`
-    - reference Python code is expected to export `get_inputs(config)`
+    Implementation contract note:
+    - .py impls export `Model(torch.nn.Module)` and `get_init_inputs()`
+    - Input generation is handled by the harness (`generate_inputs()`)
+    - .cu impls export `extern "C" int kernel_run(...)`
     """
 
     configs: Dict[str, Dict[str, Any]] = Field(
@@ -268,23 +259,42 @@ class FileReadResponse(BaseModel):
     file: FilePayload = Field(..., description="Inline payload for the requested turn-relative file")
 
 
+class ImplTrialResult(BaseModel):
+    """Per-impl result for one config in a trial."""
+
+    performance: PerformanceSummary = Field(default_factory=PerformanceSummary)
+    correctness: CorrectnessSummary | None = Field(
+        default=None,
+        description="Correctness vs golden (first ref-*). None for the golden impl itself.",
+    )
+
+
 class TrialConfigOutput(BaseModel):
     """Public trial output for one config slug.
 
-    `status` is the per-config result, while the top-level response uses
-    `all_ok` as the aggregate stage result.
+    `impls` maps each implementation slug to its trial result (performance +
+    optional correctness). The first ref-* impl is the golden baseline — its
+    correctness field is None. All other impls (ref-* and gen-*) have
+    correctness compared against the golden.
 
-    `reference` / `generated` expose the side-specific structured payloads,
-    while `correctness` and `performance` provide the compact comparison-facing
-    summaries used by the public trial contract.
+    Example:
+        {
+            "status": "ok",
+            "golden_slug": "ref-cublas",
+            "impls": {
+                "ref-cublas": {"performance": {...}, "correctness": null},
+                "gen-cutedsl": {"performance": {...}, "correctness": {"passed": true, ...}},
+                "gen-cuda": {"performance": {...}, "correctness": {"passed": true, ...}}
+            }
+        }
     """
 
     status: Literal["ok", "error", "timeout", "skipped"]
-    reference: Dict[str, Any] = Field(default_factory=dict)
-    generated: Dict[str, Any] = Field(default_factory=dict)
-    cudnn: Dict[str, Any] = Field(default_factory=dict)
-    correctness: CorrectnessSummary = Field(default_factory=CorrectnessSummary)
-    performance: PerformanceSummary = Field(default_factory=PerformanceSummary)
+    golden_slug: str = Field(default="", description="Which impl is the golden baseline (first ref-*)")
+    impls: Dict[str, ImplTrialResult] = Field(
+        default_factory=dict,
+        description="Impl-slug-keyed trial results: performance + correctness vs golden",
+    )
     artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
         description="Relative-path keyed kept trial comparison artifacts for this config",

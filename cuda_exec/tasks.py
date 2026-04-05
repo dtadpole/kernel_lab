@@ -25,6 +25,7 @@ from cuda_exec.models import (
     ProfileRequest,
     ProfileResponse,
     ToolIOPair,
+    ImplTrialResult,
     TrialConfigOutput,
     TrialRequest,
     TrialResponse,
@@ -478,8 +479,10 @@ def run_compile_task(
     *,
     metadata,
     timeout_seconds: int,
-    reference_files: Dict[str, str],
-    generated_files: Dict[str, str],
+    impls: Dict[str, Dict[str, str]],
+    # Legacy compat — ignored if impls is provided
+    reference_files: Dict[str, str] | None = None,
+    generated_files: Dict[str, str] | None = None,
     cudnn_files: Dict[str, str] | None = None,
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
@@ -507,23 +510,65 @@ def run_compile_task(
 
     started = time.perf_counter()
     try:
-        copied_reference = _write_input_files(reference_files, workspace_path / "inputs" / "reference")
-        copied_generated = _write_input_files(generated_files, workspace_path / "inputs" / "generated")
+        # --- Stage impl files to inputs/{slug}/ ---
+        all_copied: Dict[str, list[Path]] = {}
+        for slug, files in impls.items():
+            impl_dir = workspace_path / "inputs" / slug
+            copied = _write_input_files(files, impl_dir)
+            all_copied[slug] = copied
 
-        if cudnn_files:
-            copied_cudnn = _write_input_files(cudnn_files, workspace_path / "inputs" / "cudnn")
-            # Find the .py entry point dynamically — any Python file is accepted
-            cudnn_py_files = [p for p in copied_cudnn if p.suffix == ".py"]
-            if not cudnn_py_files:
-                raise ValueError("cudnn_files must include at least one .py entry point.")
+        # Find the .cu impl to compile (first gen-* with a .cu file)
+        cu_slug = None
+        cu_files: list[Path] = []
+        for slug, copied in all_copied.items():
+            if slug.startswith("gen-") and any(p.suffix == ".cu" for p in copied):
+                cu_slug = slug
+                cu_files = copied
+                break
 
-        ref_py_files = [p for p in copied_reference if p.suffix == ".py"]
-        if not ref_py_files:
-            raise ValueError(
-                "reference_files must include at least one .py entry point."
-            )
+        # Legacy compat: also stage to inputs/reference/ and inputs/generated/
+        # so trial.py can find them via the old paths
+        ref_slugs = [s for s in impls if s.startswith("ref-")]
+        gen_py_slugs = [s for s in impls if s.startswith("gen-") and s != cu_slug]
 
-        source = _pick_single_cuda_source(copied_generated, copied_reference)
+        # First .py gen impl → inputs/reference/ (trial.py loads as "reference")
+        ref_dir = workspace_path / "inputs" / "reference"
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        for slug in gen_py_slugs:
+            for f in all_copied.get(slug, []):
+                if f.suffix == ".py":
+                    import shutil
+                    shutil.copy2(f, ref_dir / f.name)
+
+        # If no .py gen, use first ref as reference
+        if not gen_py_slugs and ref_slugs:
+            for f in all_copied.get(ref_slugs[0], []):
+                if f.suffix == ".py":
+                    import shutil
+                    shutil.copy2(f, ref_dir / f.name)
+
+        # First ref → inputs/cudnn/ (trial.py loads as "cudnn" baseline)
+        cudnn_dir = workspace_path / "inputs" / "cudnn"
+        cudnn_dir.mkdir(parents=True, exist_ok=True)
+        if ref_slugs:
+            for f in all_copied.get(ref_slugs[0], []):
+                if f.suffix == ".py":
+                    import shutil
+                    shutil.copy2(f, cudnn_dir / f.name)
+
+        # .cu → inputs/generated/generated.cu
+        gen_dir = workspace_path / "inputs" / "generated"
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        if cu_slug:
+            for f in cu_files:
+                if f.suffix == ".cu":
+                    import shutil
+                    shutil.copy2(f, gen_dir / "generated.cu")
+
+        if not cu_slug:
+            raise ValueError("No .cu impl found in impls — nothing to compile.")
+
+        source = gen_dir / "generated.cu"
 
         binary_rel = _compile_artifact_rel(attempt, source.stem, "bin")
         ptx_rel = _compile_artifact_rel(attempt, source.stem, "ptx")
@@ -1164,9 +1209,7 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
     result = run_compile_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
-        reference_files=request.reference_files,
-        generated_files=request.generated_files,
-        cudnn_files=request.cudnn_files or None,
+        impls=request.impls,
     )
     attempt = result["attempt"]
     artifact_map = _compile_artifact_map(result)
@@ -1229,11 +1272,21 @@ def trial_endpoint(request: TrialRequest) -> TrialResponse:
     items = {
         config_slug: TrialConfigOutput(
             status=item["status"],
-            reference=item.get("reference") or {},
-            generated=item.get("generated") or {},
-            cudnn=item.get("cudnn") or {},
-            correctness=item.get("correctness", {}),
-            performance=item.get("performance", {}),
+            golden_slug=item.get("golden_slug", ""),
+            impls={
+                # Map old trial.py output to impl-keyed format
+                # trial.py still outputs reference/generated/cudnn — adapt here
+                **({slug: ImplTrialResult(
+                    performance=item.get("reference", {}).get("performance", {}),
+                ) for slug in ["reference"] if item.get("reference", {}).get("performance")}),
+                **({slug: ImplTrialResult(
+                    performance=item.get("generated", {}).get("performance", {}),
+                    correctness=item.get("correctness", {}),
+                ) for slug in ["generated"] if item.get("generated", {}).get("performance")}),
+                **({slug: ImplTrialResult(
+                    performance=item.get("cudnn", {}).get("performance", {}),
+                ) for slug in ["cudnn"] if item.get("cudnn", {}).get("performance")}),
+            },
             artifacts=_capture_public_files(
                 result["workspace_path"],
                 [artifact["path"] for artifact in item.get("artifacts", [])],

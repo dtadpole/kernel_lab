@@ -66,7 +66,7 @@ else ifeq ($(KERNEL),fa4)
   _KERNEL_NCU_FILTER     := regex:"fa4"
   export CUDA_EXEC_HARNESS_NUM_INPUTS := 3
 else
-  # Unknown kernel — assume fixtures at conf/fixtures/$(KERNEL)/, generated at data/generated/
+  # Unknown kernel — assume ref at data/ref/$(KERNEL)/, gen at data/gen/$(ARCH)/$(KERNEL)/
   _KERNEL_DIRECTION_ID   := 99
   _KERNEL_DIRECTION_SLUG := $(KERNEL)
   _KERNEL_CONFIG_SLUG    := default

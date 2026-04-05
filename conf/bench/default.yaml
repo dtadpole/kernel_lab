@@ -6,5 +6,5 @@ timeout: 300        # per-config timeout in seconds
 
 # Paths (override via CLI, env, or config file)
 kb_repo: ~/kernel_lab_kb                # knowledge base repo for runs + gems
-runtime_root: ~/.cuda_exec_bench        # local runtime for compile/trial intermediates
+runtime_root: ~/.cuda_exec              # local runtime for compile/trial intermediates
 data_root: null                         # source data root (null = use project data/)

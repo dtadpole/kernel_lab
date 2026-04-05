@@ -164,16 +164,18 @@ def _extract_config_results(trial_result: dict) -> dict:
     for slug, cfg in trial_result.get("configs", {}).items():
         ref_perf = cfg.get("reference", {}).get("performance", {})
         gen_perf = cfg.get("generated", {}).get("performance", {})
+        cudnn_perf = cfg.get("cudnn", {}).get("performance", {})
         gen_correct = cfg.get("generated", {}).get("correctness", {})
 
         ref_median = ref_perf.get("latency_ms", {}).get("median")
         gen_median = gen_perf.get("latency_ms", {}).get("median")
+        cudnn_median = cudnn_perf.get("latency_ms", {}).get("median")
 
         speedup = None
         if ref_median and gen_median and gen_median > 0:
             speedup = round(ref_median / gen_median, 3)
 
-        configs_out[slug] = {
+        entry: dict[str, Any] = {
             "correctness": gen_correct.get("passed", False),
             "ref_median_ms": ref_median,
             "gen_median_ms": gen_median,
@@ -181,8 +183,13 @@ def _extract_config_results(trial_result: dict) -> dict:
             "ref_latency": ref_perf.get("latency_ms", {}),
             "gen_latency": gen_perf.get("latency_ms", {}),
         }
+        if cudnn_median is not None:
+            entry["cudnn_median_ms"] = cudnn_median
+            entry["cudnn_latency"] = cudnn_perf.get("latency_ms", {})
         if gen_correct.get("max_abs_error") is not None:
-            configs_out[slug]["max_abs_error"] = gen_correct["max_abs_error"]
+            entry["max_abs_error"] = gen_correct["max_abs_error"]
+
+        configs_out[slug] = entry
 
     return configs_out
 
@@ -225,21 +232,40 @@ def _generate_report(results: dict, gem_info: dict | None = None) -> str:
         lines.append(f"**Gem:** {len(improved)} config(s) improved — {', '.join(improved)}")
 
     lines.append("")
-    lines.append("| Config | Correct | Ref (ms) | Gen (ms) | Speedup |")
-    lines.append("|--------|---------|----------|----------|---------|")
 
+    # Check if any config has cudnn data
     configs = results.get("configs", {})
+    has_cudnn = any(cfg.get("cudnn_median_ms") is not None for cfg in configs.values())
+
+    header = "| Config | Correct | Ref (ms) | Gen (ms) |"
+    sep = "|--------|---------|----------|----------|"
+    if has_cudnn:
+        header += " cuDNN (ms) |"
+        sep += "------------|"
+    header += " Speedup |"
+    sep += "---------|"
+
+    lines.append(header)
+    lines.append(sep)
+
     for slug, cfg in configs.items():
         correct = "\u2713" if cfg.get("correctness") else "\u2717"
         ref_ms = cfg.get("ref_median_ms")
         gen_ms = cfg.get("gen_median_ms")
+        cudnn_ms = cfg.get("cudnn_median_ms")
         speedup = cfg.get("speedup")
 
         ref_str = f"{ref_ms:.4f}" if ref_ms is not None else "N/A"
         gen_str = f"{gen_ms:.4f}" if gen_ms is not None else "N/A"
         spd_str = f"{speedup:.2f}\u00d7" if speedup is not None else "N/A"
 
-        lines.append(f"| {slug} | {correct} | {ref_str} | {gen_str} | {spd_str} |")
+        row = f"| {slug} | {correct} | {ref_str} | {gen_str} |"
+        if has_cudnn:
+            cudnn_str = f"{cudnn_ms:.4f}" if cudnn_ms is not None else "N/A"
+            row += f" {cudnn_str} |"
+        row += f" {spd_str} |"
+
+        lines.append(row)
 
     lines.append("")
     return "\n".join(lines)

@@ -13,11 +13,15 @@ development — use `/ik:exec` for that.
 
 ## What it does
 
-1. Discovers all implementations via `cuda_exec.impls` (dynamic slug resolution)
-2. Loads ALL configs from `data/configs/{kernel}.json`
-3. For each `.cu` gen impl: compiles + trials every config against the primary reference
-4. `.py` gen impls are measured on the reference side during `.cu` trials
-5. Returns per-implementation results with correctness + latency
+1. **Snapshot** sources + configs to `~/kernel_lab_kb` (before any compile/trial)
+2. Discovers all implementations via `cuda_exec.impls` from the snapshot
+3. Loads ALL configs from the snapshot
+4. Compiles + trials each `.cu` gen impl against the primary reference
+5. `.py` gen impls are measured on the reference side during `.cu` trials
+6. Writes per-impl `results.json` + `report.md` to `kernel_lab_kb`
+7. If any config beats the previous best, creates a **gem** (versioned record)
+
+All compile/trial runs against the snapshot copy — never the original files.
 
 ## Usage
 
@@ -38,11 +42,65 @@ CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 ben
 CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 'bench.impls=[ref-cublas,gen-cuda]'
 ```
 
+### Custom paths
+
+```bash
+# Custom KB repo location
+.venv/bin/python -m cuda_exec.formal bench.kernel=vecadd bench.arch=sm90 bench.kb_repo=~/other_kb
+
+# Custom runtime (compile/trial intermediates)
+.venv/bin/python -m cuda_exec.formal bench.kernel=vecadd bench.arch=sm90 bench.runtime_root=/tmp/bench_runtime
+
+# Custom data root (skip snapshot, read from specified directory)
+.venv/bin/python -m cuda_exec.formal bench.kernel=vecadd bench.arch=sm90 bench.data_root=~/other_project/data
+```
+
 ### Custom timeout
 
 ```bash
 CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.timeout=600
 ```
+
+## Output Structure
+
+### kernel_lab_kb (git repo, text only)
+
+```
+ik_bench/
+  runs/<kernel>/<arch>/<YYYYMMDD_HHMMSS>/
+    command.json                    # invocation parameters
+    data/ref/<kernel>/              # snapshot of source files
+    data/gen/<arch>/<kernel>/
+    data/configs/<kernel>.json
+    impls/<impl_slug>/
+      compile/                      # ptxas + resource usage text
+      results.json                  # structured results (compact)
+      report.md                     # human-readable table
+  gems/<kernel>/<arch>/<impl_slug>/
+    v001_<YYYYMMDD_HHMMSS>/         # first gem = first run
+    v002_<YYYYMMDD_HHMMSS>/         # only created when a config beats v001
+    ...                             # gems are never deleted
+```
+
+### Local runtime (not in git)
+
+```
+~/.cuda_exec/                       # ik:exec runtime (unchanged)
+~/.cuda_exec_bench/                 # ik:bench runtime (isolated)
+  <kernel>/<arch>/<YYYYMMDD_HHMMSS>/
+    workspace/, artifacts/, logs/, state/
+```
+
+## Gem Rules
+
+A new gem is created when at least one config is faster than the latest gem,
+subject to noise thresholds:
+
+- Absolute improvement > 0.002 ms
+- Relative improvement > 0.2%
+- Both must be exceeded (AND)
+- First run is always a gem
+- Gems are never deleted — they form a progression of improvements
 
 ## Response Format
 
@@ -67,7 +125,7 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
         "configs": {
           "mat-256x256": {
             "status": "ok",
-            "correctness": { "passed": false, ... },
+            "correctness": { "passed": true, ... },
             "performance": { "latency_ms": { "median": 0.0108, ... } },
             "reference": { "performance": { "latency_ms": { "median": 0.033 } } },
             "generated": { "performance": { "latency_ms": { "median": 0.011 } } },
@@ -75,12 +133,6 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
           }
         }
       }
-    },
-    "gen-cutedsl": {
-      "impl": "gen-cutedsl",
-      "compile_ok": null,
-      "trial_ok": null,
-      "note": "Python impl — measured as reference/cudnn side when .cu impls are trialed"
     }
   }
 }
@@ -124,11 +176,14 @@ Example for `matmul/sm90` with `ref-cublas`, `gen-cutedsl`, `gen-cuda`:
 
 | | ik:exec | ik:bench |
 |---|---|---|
+| Source files | Original `data/` | Snapshot in `kernel_lab_kb` |
+| Runtime | `~/.cuda_exec/` | `~/.cuda_exec_bench/` (isolated) |
 | Compile | Separate step, Solver controls | Bundled, automatic |
 | Configs | Solver picks subset | ALL configs, mandatory |
 | Impls | Single impl per session | ALL impls (or specified subset) |
 | Profile | Yes (NCU deep dive) | No |
 | Turn mgmt | Solver manages turns | One-shot, auto-generated |
+| Results | In `~/.cuda_exec/` only | `kernel_lab_kb` runs + gems |
 | Used by | Solver (development) | Judge (formal assessment) |
 
 ## Rules
@@ -137,4 +192,19 @@ Example for `matmul/sm90` with `ref-cublas`, `gen-cutedsl`, `gen-cuda`:
 - **At least one ref-* impl** — enforced by `resolve_impls()`
 - **No profiling** — bench is for measurement, not diagnosis
 - **Atomic** — compile failure stops immediately, no partial results
+- **Snapshot-first** — sources are snapshotted before compile, never evaluate original files
 - **Read-only intent** — bench does not modify source files
+
+## Hydra Config
+
+All settings in `conf/bench/default.yaml`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `kernel` | required | Kernel name (matmul, vecadd, fa4) |
+| `arch` | required | GPU architecture (sm90, sm120) |
+| `impls` | `all` | "all" or list of impl slugs |
+| `timeout` | `300` | Per-config timeout (seconds) |
+| `kb_repo` | `~/kernel_lab_kb` | KB repo path for runs + gems |
+| `runtime_root` | `~/.cuda_exec` | Local runtime for intermediates |
+| `data_root` | `null` | Source data root (null = project data/) |

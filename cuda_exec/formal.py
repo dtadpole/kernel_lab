@@ -18,6 +18,7 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -50,6 +51,10 @@ def formal_benchmark(
     3. Compile + trial using snapshot file contents
     4. Write results + check gems (finalize_run)
     """
+    _ts_fmt = "%H:%M:%S"
+    bench_start = datetime.now()
+    logger.info("Bench start [%s] kernel=%s arch=%s", bench_start.strftime(_ts_fmt), kernel, arch)
+
     # --- Resolve paths from config ---
     import os
     kb_repo_path = Path(kb_repo).expanduser() if kb_repo else Path.home() / "kernel_lab_kb"
@@ -192,6 +197,9 @@ def formal_benchmark(
             bench_result["gems"] = {}
             bench_result["improved"] = False
 
+    bench_end = datetime.now()
+    bench_dur = (bench_end - bench_start).total_seconds()
+    logger.info("Bench end [%s] total=%.1fs", bench_end.strftime(_ts_fmt), bench_dur)
     return bench_result
 
 

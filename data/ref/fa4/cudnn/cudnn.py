@@ -92,31 +92,14 @@ def _config_from_env() -> dict[str, Any]:
 #  Model — cuDNN Flash Attention via PyTorch SDPA
 # ---------------------------------------------------------------------------
 
-def _cudnn_safe() -> bool:
-    """Check if cuDNN SDPA is safe (won't segfault due to driver mismatch)."""
-    import subprocess
-    try:
-        r = subprocess.run(
-            [sys.executable, "-c",
-             "import torch; torch.backends.cudnn.enabled = True; "
-             "q=torch.randn(1,1,8,64,device='cuda',dtype=torch.bfloat16); "
-             "torch.nn.functional.scaled_dot_product_attention(q,q,q)"],
-            capture_output=True, timeout=10, env={**os.environ}
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-_cudnn_is_safe: bool | None = None
-
-
 class Model(nn.Module):
     """cuDNN Flash Attention vendor baseline for H100 (SM90).
 
-    Forces the cuDNN backend by disabling the other SDPA backends
-    (flash_sdp and math_sdp). On H100 with cuDNN 8.9+, this dispatches
-    to cuDNN's fused multi-head attention kernel.
+    Forces the cuDNN backend via SDPA context manager. On H100 with
+    cuDNN 8.9+, this dispatches to cuDNN's fused multi-head attention.
+
+    If CUDA_EXEC_CUDNN_BROKEN=1 is set (e.g. cuDNN 9.19 + CUDA 13.0
+    driver segfaults), falls back to default SDPA (usually FlashAttention).
 
     GQA (grouped-query attention) is handled by expanding K/V heads
     to match Q heads before calling SDPA.
@@ -124,6 +107,7 @@ class Model(nn.Module):
 
     def __init__(self):
         super().__init__()
+        self._cudnn_broken = os.environ.get("CUDA_EXEC_CUDNN_BROKEN") == "1"
 
     def forward(
         self,
@@ -151,14 +135,8 @@ class Model(nn.Module):
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
-        global _cudnn_is_safe
-        if _cudnn_is_safe is None:
-            _cudnn_is_safe = _cudnn_safe()
-        if not _cudnn_is_safe:
-            with torch.nn.attention.sdpa_kernel([
-                torch.nn.attention.SDPBackend.MATH,
-            ]):
-                out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+        if self._cudnn_broken:
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
         else:
             try:
                 with torch.nn.attention.sdpa_kernel([

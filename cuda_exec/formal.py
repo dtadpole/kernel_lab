@@ -279,8 +279,16 @@ def formal_benchmark(
     bench_start = datetime.now()
     logger.info("Bench start [%s] kernel=%s arch=%s", bench_start.strftime(_ts_fmt), kernel, arch)
 
-    # --- Resolve paths from config ---
+    # --- Propagate host-specific flags to reference impls ---
     import os
+    from cuda_exec.host_env import _match_host_entry
+    _, host_entry = _match_host_entry()
+    if host_entry and host_entry.get("env", {}).get("cudnn_sdpa_broken"):
+        os.environ["CUDA_EXEC_CUDNN_BROKEN"] = "1"
+    else:
+        os.environ.pop("CUDA_EXEC_CUDNN_BROKEN", None)
+
+    # --- Resolve paths from config ---
     kb_repo_path = Path(kb_repo).expanduser() if kb_repo else Path.home() / "kernel_lab_kb"
     runtime_root_path = Path(runtime_root).expanduser() if runtime_root else Path.home() / ".cuda_exec_bench"
     data_root_path = Path(data_root).expanduser() if data_root else None

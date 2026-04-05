@@ -51,6 +51,11 @@ def formal_benchmark(
     3. Compile + trial using snapshot file contents
     4. Write results + check gems (finalize_run)
     """
+    # Resolve "auto" arch from host config / nvidia-smi
+    if arch == "auto":
+        from cuda_exec.host_env import resolve_arch
+        arch = resolve_arch()
+
     _ts_fmt = "%H:%M:%S"
     bench_start = datetime.now()
     logger.info("Bench start [%s] kernel=%s arch=%s", bench_start.strftime(_ts_fmt), kernel, arch)
@@ -283,10 +288,15 @@ def cli_main() -> None:
 
     bench_cfg = cfg.bench
 
-    # Set CUDA_VISIBLE_DEVICES from config if specified
+    # Set CUDA_VISIBLE_DEVICES: explicit gpu= > host config > env
     gpu = bench_cfg.get("gpu")
     if gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    elif "CUDA_VISIBLE_DEVICES" not in os.environ:
+        from cuda_exec.host_env import resolve_benchmark_gpus
+        bench_gpus = resolve_benchmark_gpus()
+        if bench_gpus:
+            os.environ["CUDA_VISIBLE_DEVICES"] = bench_gpus
 
     impls = bench_cfg.impls
     if isinstance(impls, str) and impls != "all":

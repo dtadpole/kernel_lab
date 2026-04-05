@@ -21,6 +21,7 @@ Detailed design rationale belongs in DESIGN.md.
 from __future__ import annotations
 
 import base64
+import logging
 from datetime import datetime, timezone
 import os
 import re
@@ -29,6 +30,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+logger = logging.getLogger(__name__)
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
 CUDA_TOOLKIT_BIN = CUDA_TOOLKIT_ROOT / "bin"
@@ -112,8 +114,11 @@ def resolve_workspace_bundle(
 
 
 def _merge_env(extra_env: Dict[str, str]) -> Dict[str, str]:
+    from cuda_exec.host_env import resolve_host_env
+
     env = os.environ.copy()
-    env.update(extra_env)
+    env.update(resolve_host_env())  # host-resolved CUDA_HOME, LD_PRELOAD
+    env.update(extra_env)           # caller overrides win
     return env
 
 
@@ -220,6 +225,7 @@ def _run_command(
     log_file: Optional[str] = None,
 ) -> dict:
     resolved_workspace = _resolve_existing_directory(workspace_path)
+    logger.info("CMD %s", " ".join(command))
     started = time.perf_counter()
     try:
         completed = subprocess.run(

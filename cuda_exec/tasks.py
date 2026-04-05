@@ -906,7 +906,7 @@ def run_profile_task(
         cu_files = list(impl_dir.glob("*.cu"))
         if cu_files:
             # .cu impl: profile the compiled binary
-            target_path, _ = _primary_artifact_from_manifest(workspace)
+            target_path, target_artifact = _primary_artifact_from_manifest(workspace)
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
@@ -957,8 +957,10 @@ def run_profile_task(
             ncu_text_rel = _config_artifact_rel("profile", attempt, config_slug, "ncu-report.txt")
             ncu_text_abs = str((Path(workspace["root_path"]) / ncu_text_rel).resolve())
             try:
+                ncu_report_cmd = [sys.executable, str(NCU_REPORT_SCRIPT), "--input", str(ncu_report_abs), "--output", ncu_text_abs]
+                logger.info("CMD %s", " ".join(ncu_report_cmd))
                 subprocess.run(
-                    [sys.executable, str(NCU_REPORT_SCRIPT), "--input", str(ncu_report_abs), "--output", ncu_text_abs],
+                    ncu_report_cmd,
                     capture_output=True,
                     text=True,
                     timeout=30,

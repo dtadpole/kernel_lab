@@ -2,7 +2,7 @@
 name: bench
 description: Formal benchmark — atomic compile + trial ALL configs for comprehensive kernel assessment
 user-invocable: true
-argument-hint: <kernel> [arch=smXX] [gpu=N] [impls=impl1,impl2]
+argument-hint: <kernel> [gpu=N] [arch=smXX] [impls=impl1,impl2]
 ---
 
 # Formal Benchmark
@@ -51,42 +51,42 @@ against either original `data/` or a snapshot copy.
 
 All compile/trial runs against the snapshot copy — never the original files.
 
+## Environment Resolution
+
+The benchmark auto-resolves the host environment via `cuda_exec.host_env`
+by matching the current hostname against `conf/hosts/default.yaml`:
+
+| What | Source | Override |
+|------|--------|----------|
+| `arch` | `env.torch_cuda_arch` or nvidia-smi | `bench.arch=sm90` |
+| `gpu` | `benchmark.cuda_visible_devices` | `bench.gpu=5` |
+| `CUDA_HOME` | `env.cuda_home` | (env var) |
+| `LD_PRELOAD` | `env.ld_preload` | (env var) |
+
+No manual environment setup is needed — `formal.py` reads the host config and
+applies the right settings automatically.
+
 ## Usage
 
 ```bash
 cd /home/zhenc/kernel_lab
 ```
 
-### Run benchmark
+### Run benchmark (only kernel is required)
 
 ```bash
-.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 bench.gpu=5
-.venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.gpu=5
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul
+.venv/bin/python -m cuda_exec.formal bench.kernel=fa4
 ```
 
-### Specific implementations
+### Overrides
 
 ```bash
-.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 bench.gpu=5 'bench.impls=[ref-cublas,gen-cuda]'
-```
-
-### Custom paths
-
-```bash
-# Custom KB repo location
-.venv/bin/python -m cuda_exec.formal bench.kernel=vecadd bench.arch=sm90 bench.kb_repo=~/other_kb
-
-# Custom runtime (compile/trial intermediates)
-.venv/bin/python -m cuda_exec.formal bench.kernel=vecadd bench.arch=sm90 bench.runtime_root=/tmp/bench_runtime
-
-# Custom data root (skip snapshot, read from specified directory)
-.venv/bin/python -m cuda_exec.formal bench.kernel=vecadd bench.arch=sm90 bench.data_root=~/other_project/data
-```
-
-### Custom timeout
-
-```bash
-.venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.gpu=5 bench.timeout=600
+# Specific GPU, arch, impls, or timeout
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.gpu=5
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul 'bench.impls=[ref-cublas,gen-cuda]'
+.venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.timeout=600
 ```
 
 ## Output Structure
@@ -274,10 +274,10 @@ All settings in `conf/bench/default.yaml`:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `kernel` | required | Kernel name (matmul, vecadd, fa4) |
-| `arch` | required | GPU architecture (sm90, sm120) |
+| `arch` | `auto` | GPU architecture — auto-detected from host config / nvidia-smi. Override: sm90, sm120 |
 | `impls` | `all` | "all" or list of impl slugs |
 | `timeout` | `300` | Per-config timeout (seconds) |
-| `gpu` | `null` | GPU index (sets CUDA_VISIBLE_DEVICES; null = use env) |
+| `gpu` | `null` | GPU index — auto-resolved from host config `benchmark.cuda_visible_devices` when null |
 | `kb_repo` | `~/kernel_lab_kb` | KB repo path for runs + gems |
 | `runtime_root` | `~/.cuda_exec` | Local runtime for intermediates |
 | `data_root` | `null` | Source data root (null = project data/) |

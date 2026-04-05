@@ -2,7 +2,7 @@
 name: bench
 description: Formal benchmark — atomic compile + trial ALL configs for comprehensive kernel assessment
 user-invocable: true
-argument-hint: <kernel> [--arch smXX] [--impls impl1 impl2 ...]
+argument-hint: <kernel> [--arch smXX] [--gpu N] [--impls impl1 impl2 ...]
 ---
 
 # Formal Benchmark
@@ -32,14 +32,14 @@ cd /home/zhenc/kernel_lab
 ### Run benchmark
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 bench.gpu=5
+.venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.gpu=5
 ```
 
 ### Specific implementations
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 'bench.impls=[ref-cublas,gen-cuda]'
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 bench.gpu=5 'bench.impls=[ref-cublas,gen-cuda]'
 ```
 
 ### Custom paths
@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul 
 ### Custom timeout
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.timeout=600
+.venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.arch=sm90 bench.gpu=5 bench.timeout=600
 ```
 
 ## Output Structure
@@ -205,6 +205,7 @@ All settings in `conf/bench/default.yaml`:
 | `arch` | required | GPU architecture (sm90, sm120) |
 | `impls` | `all` | "all" or list of impl slugs |
 | `timeout` | `300` | Per-config timeout (seconds) |
+| `gpu` | `null` | GPU index (sets CUDA_VISIBLE_DEVICES; null = use env) |
 | `kb_repo` | `~/kernel_lab_kb` | KB repo path for runs + gems |
 | `runtime_root` | `~/.cuda_exec` | Local runtime for intermediates |
 | `data_root` | `null` | Source data root (null = project data/) |

@@ -189,6 +189,7 @@ def cli_main() -> None:
     """CLI entry point for ik:bench (Hydra-based)."""
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
+    import os
     import sys
 
     _CONF_DIR = str(Path(__file__).resolve().parents[1] / "conf")
@@ -207,6 +208,12 @@ def cli_main() -> None:
     )
 
     bench_cfg = cfg.bench
+
+    # Set CUDA_VISIBLE_DEVICES from config if specified
+    gpu = bench_cfg.get("gpu")
+    if gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+
     impls = bench_cfg.impls
     if isinstance(impls, str) and impls != "all":
         impls = [impls]

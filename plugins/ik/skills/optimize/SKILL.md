@@ -3,7 +3,7 @@ name: optimize
 description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify, commit
 user-invocable: true
 disable-model-invocation: true
-argument-hint: <kernel> [--impl generated|reference] [--target smXX]
+argument-hint: <kernel> [--impl generated|reference] [--target smXX] [--gpu N]
 ---
 
 # Optimize Kernel
@@ -19,13 +19,17 @@ one, verifies improvement, and commits if successful.
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
 | `--impl` | implementation | no | `generated` | Which code to optimize: `generated` (hand-written CUDA) or `reference` (CuTe DSL) |
 | `--target` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from local GPU if omitted |
+| `--gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
 ```
 /ik:optimize fa4
 /ik:optimize matmul --impl reference
 /ik:optimize fa4 --target sm90
+/ik:optimize fa4 --gpu 4
 ```
+
+When `--gpu N` is provided, set `CUDA_VISIBLE_DEVICES=N` on all `/ik:exec` and `/ik:bench` commands.
 
 ## Auto-Detection
 

@@ -2,7 +2,7 @@
 name: exec
 description: Compile, trial, and profile CUDA kernels on local GPUs
 user-invocable: true
-argument-hint: <action> [options]
+argument-hint: <action> [--gpu N] [options]
 ---
 
 # CUDA Kernel Execution (Local)
@@ -11,7 +11,8 @@ Compile, trial, and profile CUDA kernels on local GPUs by calling `cuda_exec` ha
 
 ## GPU Selection
 
-Set `CUDA_VISIBLE_DEVICES` to select the GPU. Check `CLAUDE.md` or `AGENTS.md` for the assigned GPU indices for the current host.
+When the user specifies `--gpu N`, set `CUDA_VISIBLE_DEVICES=N` on the command.
+If no GPU is specified, check `CLAUDE.md` or `AGENTS.md` for the assigned GPU indices for the current host.
 
 ## Actions
 

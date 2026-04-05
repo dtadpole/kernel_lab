@@ -73,24 +73,9 @@ Then run a fresh evaluation to get ground-truth numbers for this session:
 example below. This table is mandatory after trial-all in both Phase 1 and
 Phase 5. Use box-drawing characters for the table border.
 
-```
-┌────────────────────────┬──────────────────┬──────────────────┬──────────────────┬──────────┬──────────┐
-│ NVIDIA H100 (h8_3)     │   cuDNN 9.19.0   │   FA4 CuTe DSL   │  Generated CUDA  │ FA4 DSL  │ Gen CUDA │
-│ GPU4, torch 2.11+cu128 │  TFLOPS   (ms)   │  v4.0.0b7  (ms)  │  TFLOPS   (ms)   │ vs cuDNN │ vs cuDNN │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-causal-b8-s4096    │  565.5  (0.972)  │  549.2  (1.001)  │  381.7  (1.440)  │  0.97×   │  0.67×   │
-├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┤
-│ mha-causal-b4-s8192    │  599.8  (1.833)  │  558.6  (1.968)  │  388.7  (2.829)  │  0.93×   │  0.65×   │
-└────────────────────────┴──────────────────┴──────────────────┴──────────────────┴──────────┴──────────┘
-```
-
-Column definitions:
-- **cuDNN / FA4 CuTe DSL / Generated CUDA**: TFLOPS (effective throughput) and (ms) latency
-- **FA4 DSL vs cuDNN**: Speedup ratio (>1.0 = FA4 CuTe DSL is faster)
-- **Gen CUDA vs cuDNN**: Speedup ratio (>1.0 = generated is faster)
-- **% of peak**: Best config's TFLOPS / GPU theoretical peak
-- Header row 1: GPU model, host name. Row 2: GPU index, torch version
-- Reference columns show library version: cuDNN version, flash-attn-4 version
+**Use `/ik:bench` for output.** Do not create a custom table — run bench and
+use its output format (dynamic columns, correctness indicators, TFLOPS).
+If any config shows ✗, the optimization is REJECTED.
 
 #### 1b. Profile Selectively
 
@@ -251,50 +236,61 @@ idea to implement first.
    - Check compile output: register count, spill bytes, shared memory
    - If compile fails, fix and retry (up to 3 compile attempts)
    - If register spills increased substantially, reconsider the approach
-2. **Trial** across **ALL** configs (every config, no exceptions)
-   - Check correctness first — all configs must pass
-   - If correctness fails, fix and retry (up to 3 correctness attempts)
-   - **Output the performance comparison table** (same format as Phase 1a)
-     after trial-all completes — this is mandatory
-3. **Profile selectively** — NCU profiling is expensive. Only profile the
+
+2. **Correctness gate** — this is a **hard requirement**, not optional
+   - **Trial** across **ALL** configs (every config, no exceptions)
+   - **Every config must pass correctness.** If ANY config fails → REJECT.
+   - If correctness fails, fix and retry (up to 3 attempts)
+   - After 3 failed attempts → **revert immediately**, move to next idea
+   - **Never skip correctness.** Never commit code that fails correctness.
+   - **Never weaken tolerances** to make a failing kernel pass.
+
+3. **Output the performance comparison table** (same format as Phase 1a)
+   after trial-all completes — this is mandatory
+
+4. **Profile selectively** — NCU profiling is expensive. Only profile the
    **same 1-2 config(s)** profiled in Phase 1b, to compare the specific NCU
    metrics targeted by this optimization. Do NOT profile all configs.
-4. **Compare** new latency vs baseline from Phase 1
+
+5. **Compare** new latency vs baseline from Phase 1
 
 #### Decision Point
 
 ```
                     ┌─────────────────────┐
-                    │ Trial & Profile  │
+                    │   Trial ALL configs  │
                     └────────┬────────────┘
                              │
-              ┌──────────────┼──────────────┐
-              │              │              │
-         Improved      No change      Regression
-              │              │              │
-              v              v              v
-          Phase 6       Analyze why    Revert code
-          (commit)      ┌────┘         to baseline
-                        │              ┌────┘
-                        v              v
-                   Profile the    Analyze why
-                   attempt to     it regressed
-                   understand     ┌────┘
-                        │              │
-                        v              v
-                   Update mental   Update mental
-                   model with      model with
-                   new evidence    new evidence
-                        │              │
-                        └──────┬───────┘
-                               v
-                        Return to Phase 3
-                        (next idea on list)
+                    ┌────────┴────────┐
+                    │ Correctness?    │
+                    └────────┬────────┘
+                             │
+                   FAIL ─────┼───── PASS
+                     │               │
+                     v               │
+                  Fix & retry        │
+                  (up to 3x)         │
+                     │               │
+                  Still fails?       │
+                     │               │
+                     v               │
+                  REJECT:            │
+                  revert to          │
+                  baseline           │
+                                     │
+                      ┌──────────────┼──────────────┐
+                      │              │              │
+                 Improved      No change      Regression
+                      │              │              │
+                      v              v              v
+                  Phase 6       Analyze why    Revert code
+                  (commit)      then retry     to baseline
 ```
 
-- **Improvement confirmed** (any config improved, no config regressed > 2%) → **Phase 6** (commit)
-- **No improvement or regression** → **Phase 7** (revert, learn, retry)
-- **Correctness failure after 3 fix attempts** → **Phase 7** (revert, move to next idea)
+- **Correctness fails** → REJECT immediately. Revert. No exceptions.
+- **Correctness passes + improvement** → Phase 6 (commit)
+- **Correctness passes + no improvement** → Phase 7 (revert, learn, retry)
+- **Correctness passes + regression** → Phase 7 (revert, learn, retry)
 
 ### Phase 6: Commit Results (only if improvement confirmed)
 
@@ -316,26 +312,21 @@ Include:
 - NCU metrics comparison (before vs after)
 - What worked and why
 
-#### 6b. Commit and Push
+#### 6b. Final bench
+
+**Run `/ik:bench` as the last step before committing.** This is mandatory.
+The bench output is the authoritative record of performance and correctness.
+If bench shows any ✗, do NOT commit — go back and fix.
+
+#### 6c. Commit and Push
 
 ```bash
-git add data/generated/{arch}/{kernel}/generated.cu   # or reference file
+git add data/gen/{arch}/{kernel}/cuda.cu
 git add results/{arch}/{gpu_name}/{kernel}/*.md
 git commit -m "perf: {kernel} — {short description of optimization}
 
 {1-2 sentence summary of what changed and the improvement}"
 git push
-```
-
-#### 6c. Report
-
-Print a summary:
-```
-=== Optimization Complete ===
-Kernel: {kernel}
-Target: {arch} ({gpu_name})
-Change: {description}
-Result: {improvement summary across configs}
 Commit: {hash}
 ```
 

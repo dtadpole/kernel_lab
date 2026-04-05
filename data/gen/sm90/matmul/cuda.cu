@@ -1,13 +1,16 @@
 /*
- * BF16 matmul for SM90 — WGMMA m64n128k16 via inline PTX.
+ * BF16 matmul for SM90 — WGMMA + TMA loads.
  *
  * 1 warpgroup (128 threads), CTA tile 128×128, TILE_K=64.
- * 2× m64n128k16 per K-step (rows 0-63 and 64-127) × 4 k16 steps.
- * 128B swizzle SMEM layout, double buffer.
+ * TMA cp.async.bulk.tensor.2d for global→shared (zero instruction overhead).
+ * mbarrier for TMA completion tracking.
+ * 128B swizzle SMEM (handled by TMA hardware).
+ * Pre-transposed B (N×K layout).
  * FP32 accumulation → BF16 output.
  */
 #include <cuda_bf16.h>
-#include <cuda_pipeline.h>
+#include <cuda.h>
+#include <dlfcn.h>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -18,22 +21,75 @@
 #define THREADS   128
 #define STAGES    2
 
-#define A_BYTES   (TILE_M * TILE_K * 2)   /* 128×64×2 = 16384 */
-#define B_BYTES   (TILE_N * TILE_K * 2)   /* 128×64×2 = 16384 */
+#define A_BYTES   (TILE_M * TILE_K * 2)   /* 16384 */
+#define B_BYTES   (TILE_N * TILE_K * 2)   /* 16384 */
 #define STAGE_BYTES (A_BYTES + B_BYTES)    /* 32768 */
+/* SMEM: 2 stages + 2 mbarriers (16 bytes each, 128-byte aligned) */
+#define MBAR_OFFSET (STAGES * STAGE_BYTES)
+#define SMEM_TOTAL  (MBAR_OFFSET + 256)   /* 256 for aligned mbarriers */
 
 /* =========================================================================
- * WGMMA descriptor (128B swizzle layout)
+ * PTX helpers
+ * ========================================================================= */
+__device__ __forceinline__
+void mbarrier_init(uint64_t* mbar, unsigned count) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.init.shared.b64 [%0], %1;\n" :: "r"(addr), "r"(count));
+}
+
+__device__ __forceinline__
+void mbarrier_arrive_expect_tx(uint64_t* mbar, unsigned tx_bytes) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;\n"
+                 :: "r"(addr), "r"(tx_bytes));
+}
+
+__device__ __forceinline__
+void mbarrier_wait_parity(uint64_t* mbar, unsigned phase) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    unsigned result;
+    do {
+        asm volatile(
+            "{\n .reg .pred p;\n"
+            " mbarrier.try_wait.parity.shared.b64 p, [%1], %2;\n"
+            " selp.u32 %0, 1, 0, p;\n"
+            "}\n"
+            : "=r"(result) : "r"(addr), "r"(phase));
+    } while (result == 0);
+}
+
+__device__ __forceinline__
+void mbarrier_inval(uint64_t* mbar) {
+    unsigned addr = __cvta_generic_to_shared(mbar);
+    asm volatile("mbarrier.inval.shared.b64 [%0];\n" :: "r"(addr));
+}
+
+__device__ __forceinline__
+void tma_load_2d(void* smem_dst, const void* tma_desc,
+                 int coord0, int coord1, uint64_t* mbar) {
+    unsigned smem_addr = __cvta_generic_to_shared(smem_dst);
+    unsigned mbar_addr = __cvta_generic_to_shared(mbar);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile"
+        ".mbarrier::complete_tx::bytes"
+        " [%0], [%1, {%2, %3}], [%4];\n"
+        :: "r"(smem_addr), "l"(tma_desc),
+           "r"(coord0), "r"(coord1), "r"(mbar_addr)
+        : "memory");
+}
+
+/* =========================================================================
+ * WGMMA helpers (same as before)
  * ========================================================================= */
 __device__ __forceinline__
 uint64_t make_desc(const void* smem_ptr, int tile_k) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    int stride_16B = (8 * tile_k * 2) >> 4;  /* 8 rows × K cols × 2 bytes */
+    int stride_16B = (8 * tile_k * 2) >> 4;
     uint64_t desc = 0;
-    desc |= (uint64_t)((addr >> 4) & 0x3FFF);               // start_address
-    desc |= (uint64_t)(1) << 16;                              // leading_byte_off
-    desc |= (uint64_t)(stride_16B & 0x3FFF) << 32;           // stride_byte_off
-    desc |= (uint64_t)(1) << 62;                              // layout_type = B128
+    desc |= (uint64_t)((addr >> 4) & 0x3FFF);
+    desc |= (uint64_t)(1) << 16;
+    desc |= (uint64_t)(stride_16B & 0x3FFF) << 32;
+    desc |= (uint64_t)(1) << 62;
     return desc;
 }
 
@@ -42,18 +98,6 @@ uint64_t desc_advance(uint64_t desc, int offset_16B) {
     uint32_t lo = (uint32_t)desc + (uint32_t)offset_16B;
     uint32_t hi = (uint32_t)(desc >> 32);
     return ((uint64_t)hi << 32) | (uint64_t)lo;
-}
-
-/* =========================================================================
- * WGMMA helpers
- * ========================================================================= */
-/* 128B XOR swizzle: permutes the 16B-granule index within each 128B line
- * by XOR with the line index (bits [9:7] of byte offset).
- * This eliminates shared memory bank conflicts for WGMMA access patterns.
- * byte_offset → swizzled_byte_offset within the matrix. */
-__device__ __forceinline__
-int swizzle_128B(int byte_offset) {
-    return byte_offset ^ (((byte_offset >> 7) & 0x7) << 4);
 }
 
 __device__ __forceinline__ void wgmma_fence() {
@@ -66,7 +110,6 @@ __device__ __forceinline__ void wgmma_wait0() {
     asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
 }
 
-/* Single m64n128k16 WGMMA instruction */
 __device__ __forceinline__
 void wgmma_m64n128k16(float (&d)[64], uint64_t da, uint64_t db, int scale_d) {
     asm volatile(
@@ -97,11 +140,7 @@ void wgmma_m64n128k16(float (&d)[64], uint64_t da, uint64_t db, int scale_d) {
 }
 
 /* =========================================================================
- * Epilogue: WGMMA m64n128 accumulator → global
- *
- * Register pair j (0..31): acc[4*(j/2) + 2*(j%2)] and acc[4*(j/2) + 2*(j%2) + 1]
- * row = warp*16 + (j%2)*8 + lane/4
- * col = (j/2)*8 + (lane%4)*2 + {0,1}
+ * Epilogue
  * ========================================================================= */
 __device__ __forceinline__
 void store_acc(__nv_bfloat16* C, float (&acc)[64],
@@ -110,13 +149,9 @@ void store_acc(__nv_bfloat16* C, float (&acc)[64],
     int lane = threadIdx.x % 32;
     int row_base = ctaRow + warp * 16 + lane / 4;
     int col_base = ctaCol + (lane % 4) * 2;
-
-    /* acc[4p+s]: row = row_base + (s/2)*8, col = col_base + p*8 + (s%2) */
     for (int p = 0; p < 16; p++) {
         int col = col_base + p * 8;
-        int row0 = row_base;       /* s=0,1 */
-        int row8 = row_base + 8;   /* s=2,3 */
-
+        int row0 = row_base, row8 = row_base + 8;
         if (row0 < M && col < N)
             C[row0 * N + col] = __float2bfloat16(acc[4*p]);
         if (row0 < M && col + 1 < N)
@@ -129,147 +164,64 @@ void store_acc(__nv_bfloat16* C, float (&acc)[64],
 }
 
 /* =========================================================================
- * B transpose kernel — run once before main matmul
- * ========================================================================= */
-__global__ void transpose_bf16(
-    const __nv_bfloat16* __restrict__ src,  /* K×N row-major */
-    __nv_bfloat16* __restrict__ dst,         /* N×K row-major */
-    int K, int N)
-{
-    /* Simple coalesced transpose using shared memory tile */
-    __shared__ __nv_bfloat16 tile[32][33]; /* +1 padding to avoid bank conflicts */
-    int x = blockIdx.x * 32 + threadIdx.x;
-    int y = blockIdx.y * 32 + threadIdx.y;
-
-    /* Read K×N → shared (coalesced) */
-    if (y < K && x < N)
-        tile[threadIdx.y][threadIdx.x] = src[y * N + x];
-    else
-        tile[threadIdx.y][threadIdx.x] = __float2bfloat16(0.0f);
-    __syncthreads();
-
-    /* Write N×K from shared (coalesced) */
-    int ox = blockIdx.y * 32 + threadIdx.x;  /* swapped */
-    int oy = blockIdx.x * 32 + threadIdx.y;
-    if (oy < N && ox < K)
-        dst[oy * K + ox] = tile[threadIdx.x][threadIdx.y];
-}
-
-/* =========================================================================
- * Main WGMMA kernel — A and Bt both in row-major, vectorized loads
+ * Main kernel — TMA loads + WGMMA compute
  * ========================================================================= */
 __global__ void __launch_bounds__(THREADS, 1)
-matmul_wgmma(
-    const __nv_bfloat16* __restrict__ A,
-    const __nv_bfloat16* __restrict__ Bt,   /* N×K row-major (pre-transposed) */
-    __nv_bfloat16* __restrict__ C,
-    int M, int N, int K)
+matmul_wgmma_tma(
+    __nv_bfloat16* __restrict__ C, int M, int N, int K,
+    const __grid_constant__ CUtensorMap tma_A,
+    const __grid_constant__ CUtensorMap tma_B)
 {
     asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n");
 
     extern __shared__ char smem[];
-    /* Double buffer: [stage0_A | stage0_B | stage1_A | stage1_B] */
-    __nv_bfloat16* sA[2] = {
-        (__nv_bfloat16*)(smem),
-        (__nv_bfloat16*)(smem + STAGE_BYTES)
-    };
-    __nv_bfloat16* sB[2] = {
-        (__nv_bfloat16*)(smem + A_BYTES),
-        (__nv_bfloat16*)(smem + STAGE_BYTES + A_BYTES)
-    };
+    char* sA[STAGES], *sB[STAGES];
+    for (int s = 0; s < STAGES; s++) {
+        sA[s] = smem + s * STAGE_BYTES;
+        sB[s] = smem + s * STAGE_BYTES + A_BYTES;
+    }
+    uint64_t* mbar = (uint64_t*)(smem + MBAR_OFFSET);
 
     int ctaRow = blockIdx.y * TILE_M;
     int ctaCol = blockIdx.x * TILE_N;
     int tid = threadIdx.x;
+    int numK = (K + TILE_K - 1) / TILE_K;
 
-    /* Two sets of accumulators: rows 0-63 and rows 64-127 */
+    /* Init mbarriers (only 1 thread) */
+    if (tid == 0) {
+        for (int s = 0; s < STAGES; s++)
+            mbarrier_init(&mbar[s], 1);  /* 1 arrive for TMA */
+    }
+    __syncthreads();
+
     float acc0[64], acc1[64];
     #pragma unroll
     for (int i = 0; i < 64; i++) { acc0[i] = 0.0f; acc1[i] = 0.0f; }
 
-    int numK = (K + TILE_K - 1) / TILE_K;
-
-    /* Helper: load tile into SMEM with 128B swizzle + cp.async 16B vectorized */
-    /* Each 128B line = 64 BF16. With TILE_K=64, each row = 1 line exactly.
-     * cp.async 16B loads: 8 BF16 per load, 8 loads per row.
-     * 128 threads, A has 128 rows × 8 loads = 1024 loads total → 8 per thread.
-     * Same for B: 128 rows × 8 loads = 1024 loads → 8 per thread. */
-    auto load_tile = [&](int buf, int kOff) {
-        /* A: row-major M×K, each row = TILE_K BF16 = 128B */
-        for (int i = tid; i < TILE_M * (TILE_K / 8); i += THREADS) {
-            int row = i / (TILE_K / 8);
-            int chunk = i % (TILE_K / 8);  /* 0..7, each chunk = 8 BF16 = 16B */
-            int gR = ctaRow + row;
-            int gC = kOff + chunk * 8;
-
-            int byte_off = row * TILE_K * 2 + chunk * 16;
-            int sw_byte = swizzle_128B(byte_off);
-
-            if (gR < M && gC + 7 < K) {
-                __pipeline_memcpy_async(
-                    (char*)sA[buf] + sw_byte,
-                    &A[gR * K + gC],
-                    16);
-            } else {
-                /* Boundary: scalar fallback */
-                for (int j = 0; j < 8; j++) {
-                    int elem_byte = sw_byte + j * 2;
-                    ((__nv_bfloat16*)((char*)sA[buf]))[elem_byte / 2] =
-                        (gR < M && gC + j < K) ? A[gR * K + gC + j] : __float2bfloat16(0.0f);
-                }
-            }
+    /* Prefill: load first STAGES tiles via TMA */
+    int prefill = (numK < STAGES) ? numK : STAGES;
+    for (int s = 0; s < prefill; s++) {
+        if (tid == 0) {
+            mbarrier_arrive_expect_tx(&mbar[s], A_BYTES + B_BYTES);
+            /* TMA load A: dims are [K, M], coord = (k_offset, m_offset) */
+            tma_load_2d(sA[s], &tma_A, s * TILE_K, ctaRow, &mbar[s]);
+            /* TMA load B: dims are [K, N], coord = (k_offset, n_offset) */
+            tma_load_2d(sB[s], &tma_B, s * TILE_K, ctaCol, &mbar[s]);
         }
-        /* B: Bt is N×K row-major (pre-transposed), same layout as A.
-         * sB: 128 rows (N) × 64 cols (K), each row = 128B = 1 swizzle line.
-         * Vectorized 16B cp.async loads. */
-        for (int i = tid; i < TILE_N * (TILE_K / 8); i += THREADS) {
-            int row = i / (TILE_K / 8);
-            int chunk = i % (TILE_K / 8);
-            int gR = ctaCol + row;
-            int gC = kOff + chunk * 8;
-
-            int byte_off = row * TILE_K * 2 + chunk * 16;
-            int sw_byte = swizzle_128B(byte_off);
-
-            if (gR < N && gC + 7 < K) {
-                __pipeline_memcpy_async(
-                    (char*)sB[buf] + sw_byte,
-                    &Bt[gR * K + gC],
-                    16);
-            } else {
-                for (int j = 0; j < 8; j++) {
-                    int elem_byte = sw_byte + j * 2;
-                    ((__nv_bfloat16*)((char*)sB[buf]))[elem_byte / 2] =
-                        (gR < N && gC + j < K) ? Bt[gR * K + gC + j] : __float2bfloat16(0.0f);
-                }
-            }
-        }
-    };
-
-    load_tile(0, 0);
-    __pipeline_commit();
-    __pipeline_wait_prior(0);
-    __syncthreads();
+    }
 
     for (int kt = 0; kt < numK; kt++) {
-        int cur = kt & 1;
-        int nxt = 1 - cur;
+        int cur = kt % STAGES;
 
-        if (kt + 1 < numK) {
-            load_tile(nxt, (kt + 1) * TILE_K);
-            __pipeline_commit();
-        }
+        /* Wait for TMA load to complete */
+        mbarrier_wait_parity(&mbar[cur], (kt / STAGES) & 1);
 
-        /* WGMMA: 2 row groups × 4 k16 steps = 8 WGMMA calls per K-tile */
-        /* A top half (rows 0-63) */
+        /* WGMMA compute */
         uint64_t da0 = make_desc(sA[cur], TILE_K);
-        /* A bottom half (rows 64-127): offset by 64*TILE_K*2 bytes */
-        uint64_t da1 = make_desc((__nv_bfloat16*)((char*)sA[cur] + 64 * TILE_K * 2), TILE_K);
-        /* B (shared for both row groups) */
+        uint64_t da1 = make_desc(sA[cur] + 64 * TILE_K * 2, TILE_K);
         uint64_t db = make_desc(sB[cur], TILE_K);
 
         int sd = (kt == 0) ? 0 : 1;
-
         wgmma_fence();
         for (int ks = 0; ks < 4; ks++) {
             uint64_t dak0 = desc_advance(da0, ks * 2);
@@ -281,15 +233,78 @@ matmul_wgmma(
         wgmma_commit();
         wgmma_wait0();
 
-        if (kt + 1 < numK) {
-            __pipeline_wait_prior(0);
-            __syncthreads();
+        /* Issue next TMA load (reuse this stage's buffer) */
+        __syncthreads();
+        int futK = kt + STAGES;
+        if (futK < numK && tid == 0) {
+            mbarrier_arrive_expect_tx(&mbar[cur], A_BYTES + B_BYTES);
+            tma_load_2d(sA[cur], &tma_A, futK * TILE_K, ctaRow, &mbar[cur]);
+            tma_load_2d(sB[cur], &tma_B, futK * TILE_K, ctaCol, &mbar[cur]);
         }
     }
 
-    /* Epilogue: store both row groups */
-    store_acc(C, acc0, ctaRow, ctaCol, M, N);        /* rows 0-63 */
-    store_acc(C, acc1, ctaRow + 64, ctaCol, M, N);   /* rows 64-127 */
+    /* Epilogue */
+    store_acc(C, acc0, ctaRow, ctaCol, M, N);
+    store_acc(C, acc1, ctaRow + 64, ctaCol, M, N);
+
+    /* Invalidate barriers */
+    if (tid == 0) {
+        for (int s = 0; s < STAGES; s++)
+            mbarrier_inval(&mbar[s]);
+    }
+}
+
+/* =========================================================================
+ * B transpose kernel
+ * ========================================================================= */
+__global__ void transpose_bf16(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    int K, int N)
+{
+    __shared__ __nv_bfloat16 tile[32][33];
+    int x = blockIdx.x * 32 + threadIdx.x;
+    int y = blockIdx.y * 32 + threadIdx.y;
+    if (y < K && x < N)
+        tile[threadIdx.y][threadIdx.x] = src[y * N + x];
+    else
+        tile[threadIdx.y][threadIdx.x] = __float2bfloat16(0.0f);
+    __syncthreads();
+    int ox = blockIdx.y * 32 + threadIdx.x;
+    int oy = blockIdx.x * 32 + threadIdx.y;
+    if (oy < N && ox < K)
+        dst[oy * K + ox] = tile[threadIdx.x][threadIdx.y];
+}
+
+/* =========================================================================
+ * Host: TMA encoder, kernel dispatch
+ * ========================================================================= */
+typedef CUresult (*cuTensorMapEncodeTiled_fn)(
+    CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*,
+    const cuuint64_t*, const cuuint64_t*, const cuuint32_t*, const cuuint32_t*,
+    CUtensorMapInterleave, CUtensorMapSwizzle, CUtensorMapL2promotion,
+    CUtensorMapFloatOOBfill);
+
+static cuTensorMapEncodeTiled_fn s_encodeTiled = nullptr;
+
+static bool init_tma_encoder() {
+    if (s_encodeTiled) return true;
+    void* handle = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_NOLOAD);
+    if (!handle) handle = dlopen("libcuda.so.1", RTLD_LAZY);
+    if (!handle) handle = dlopen("libcuda.so", RTLD_LAZY);
+    if (!handle) return false;
+
+    typedef CUresult (*getProc_fn)(const char*, void**, int, cuuint64_t,
+                                   CUdriverProcAddressQueryResult*);
+    getProc_fn getProc = (getProc_fn)dlsym(handle, "cuGetProcAddress_v2");
+    if (!getProc) getProc = (getProc_fn)dlsym(handle, "cuGetProcAddress");
+    if (!getProc) return false;
+
+    CUdriverProcAddressQueryResult status;
+    CUresult res = getProc("cuTensorMapEncodeTiled",
+                           (void**)&s_encodeTiled, 12000,
+                           CU_GET_PROC_ADDRESS_DEFAULT, &status);
+    return (res == CUDA_SUCCESS && s_encodeTiled);
 }
 
 extern "C" int kernel_run(
@@ -299,26 +314,54 @@ extern "C" int kernel_run(
 {
     int dim = (int)sqrtf((float)n);
     if (dim * dim != n) return 1;
+    if (!init_tma_encoder()) { fprintf(stderr, "TMA init failed\n"); return -1; }
 
-    const __nv_bfloat16* A = inputs[0];  /* M×K = dim×dim */
-    const __nv_bfloat16* B = inputs[1];  /* K×N = dim×dim */
+    const __nv_bfloat16* A = inputs[0];
+    const __nv_bfloat16* B = inputs[1];
     __nv_bfloat16* C = outputs[0];
+    int M = dim, N = dim, K = dim;
 
     /* Pre-transpose B: K×N → Bt: N×K */
     __nv_bfloat16* Bt;
-    cudaMalloc(&Bt, (size_t)dim * dim * sizeof(__nv_bfloat16));
+    cudaMalloc(&Bt, (size_t)K * N * sizeof(__nv_bfloat16));
     {
-        dim3 tblock(32, 32);
-        dim3 tgrid((dim + 31) / 32, (dim + 31) / 32);
-        transpose_bf16<<<tgrid, tblock, 0, stream>>>(B, Bt, dim, dim);
+        dim3 tb(32, 32);
+        dim3 tg((N + 31) / 32, (K + 31) / 32);
+        transpose_bf16<<<tg, tb, 0, stream>>>(B, Bt, K, N);
     }
 
-    /* Main GEMM */
+    /* Create TMA descriptors */
+    CUtensorMap tma_A, tma_B;
+    {
+        cuuint64_t dims[2] = {(cuuint64_t)K, (cuuint64_t)M};
+        cuuint64_t str[1]  = {(cuuint64_t)(K * 2)};
+        cuuint32_t box[2]  = {(cuuint32_t)TILE_K, (cuuint32_t)TILE_M};
+        cuuint32_t el[2]   = {1, 1};
+        CUresult r = s_encodeTiled(&tma_A, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)A, dims, str, box, el,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (r != CUDA_SUCCESS) return -2;
+    }
+    {
+        cuuint64_t dims[2] = {(cuuint64_t)K, (cuuint64_t)N};
+        cuuint64_t str[1]  = {(cuuint64_t)(K * 2)};
+        cuuint32_t box[2]  = {(cuuint32_t)TILE_K, (cuuint32_t)TILE_N};
+        cuuint32_t el[2]   = {1, 1};
+        CUresult r = s_encodeTiled(&tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)Bt, dims, str, box, el,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+            CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (r != CUDA_SUCCESS) return -3;
+    }
+
+    /* Launch */
     dim3 block(THREADS);
-    dim3 grid((dim + TILE_N - 1) / TILE_N, (dim + TILE_M - 1) / TILE_M);
-    size_t smem = STAGES * STAGE_BYTES;
-    cudaFuncSetAttribute(matmul_wgmma, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-    matmul_wgmma<<<grid, block, smem, stream>>>(A, Bt, C, dim, dim, dim);
+    dim3 grid((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
+    cudaFuncSetAttribute(matmul_wgmma_tma,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
+    matmul_wgmma_tma<<<grid, block, SMEM_TOTAL, stream>>>(
+        C, M, N, K, tma_A, tma_B);
 
     cudaFree(Bt);
     return 0;

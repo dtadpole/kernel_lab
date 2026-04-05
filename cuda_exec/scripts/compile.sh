@@ -136,6 +136,42 @@ else
   BINARY_CMD=("$NVCC" "${COMMON_NVCC_ARGS[@]}" "$SOURCE" -o "$OUTPUT")
 fi
 
+# Dump environment info
+ENV_INFO_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.env-info.txt"
+{
+  echo "=== Environment ==="
+  echo "hostname: $(hostname)"
+  echo "date: $(date -Iseconds)"
+  echo "user: $(whoami)"
+  echo ""
+  echo "=== CUDA ==="
+  echo "CUDA_HOME: ${CUDA_HOME}"
+  echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<not set>}"
+  echo "nvcc: $("$NVCC" --version 2>&1 | tail -1)"
+  echo "ptxas: $("$PTXAS" --version 2>&1 | tail -1)"
+  echo "nvdisasm: $("$NVDISASM" --version 2>&1 | tail -1)"
+  echo "cuobjdump: $("$CUOBJDUMP" --version 2>&1 | tail -1)"
+  echo "PTXAS_ARCH: $PTXAS_ARCH"
+  echo "ARCH: $ARCH"
+  echo ""
+  echo "=== GPU ==="
+  nvidia-smi --query-gpu=index,name,driver_version,compute_cap,memory.total,temperature.gpu,power.draw --format=csv,noheader 2>/dev/null || echo "<nvidia-smi not available>"
+  echo ""
+  echo "=== Compile flags ==="
+  echo "CPP_STD: $CPP_STD"
+  echo "OPT_LEVEL: $OPT_LEVEL"
+  echo "LINEINFO: $LINEINFO"
+  echo "PTXAS_FLAGS: $PTXAS_FLAGS"
+  echo "NVDISASM_FLAGS: $NVDISASM_FLAGS"
+  printf 'COMMON_NVCC_ARGS:'
+  printf ' %q' "${COMMON_NVCC_ARGS[@]}"
+  printf '\n'
+  echo ""
+  echo "=== Python ==="
+  python3 --version 2>/dev/null || echo "<python3 not available>"
+  echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-<not set>}"
+} > "$ENV_INFO_PATH" 2>&1
+
 echo "toolkit_pipeline:"
 echo "  cwd: $(pwd)"
 echo "  source: $SOURCE"

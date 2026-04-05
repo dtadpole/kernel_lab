@@ -3,7 +3,7 @@ name: optimize
 description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify
 user-invocable: true
 disable-model-invocation: true
-argument-hint: <kernel> [impl=<slug>] [arch=smXX] [gpu=N]
+argument-hint: <kernel> [gen=name] [ref=name] [arch=smXX] [gpu=N]
 ---
 
 # Optimize Kernel
@@ -12,27 +12,34 @@ Autonomous optimization loop for CUDA kernels. Profiles current performance,
 identifies gaps, brainstorms data-driven ideas, implements the most promising
 one, verifies improvement, and commits if successful.
 
-**Optimization target vs benchmarking scope**: `impl` specifies which single
-implementation to optimize (default: `gen-cuda`). But when calling `/ik:bench`
-or `/ik:exec action=trial`, ALL implementations are included — the target impl
-is compared against all `ref-*` baselines and other `gen-*` impls for context.
-Only the target impl's source code is modified during optimization.
+**Optimization target vs benchmarking scope**: `gen=` specifies the single
+implementation to optimize. `ref=` specifies which reference(s) to compare
+against (can be multiple). When calling `/ik:bench` or `/ik:exec action=trial`,
+all specified refs and the gen target are included. Only the `gen=` impl source
+code is modified during optimization.
 
 ## Arguments
 
 | Position | Name | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
-| `impl` | impl slug | no | `gen-cuda` | Which impl to optimize, e.g. `gen-cuda`, `ref-cublas`. Uses dynamic slug format `{source}-{name}` |
+| `gen` | gen name | no | `cuda` | Optimization target (exactly one). Maps to `gen-{name}` slug |
+| `ref` | ref name(s) | no | all `ref-*` | Reference baseline(s) for comparison. Comma-separated for multiple: `ref=cublas,cudnn` |
 | `arch` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
+
+The `gen=` and `ref=` values are short names (not full slugs). They map
+directly to file stems in `data/gen/{arch}/{kernel}/` and `data/ref/{kernel}/`:
+- `gen=cuda` → `gen-cuda` → `data/gen/sm90/matmul/cuda.cu`
+- `ref=cublas` → `ref-cublas` → `data/ref/matmul/cublas.py`
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
 ```
 /ik:optimize fa4
-/ik:optimize matmul impl=gen-cuda
-/ik:optimize fa4 arch=sm90
-/ik:optimize fa4 gpu=4
+/ik:optimize matmul gen=cuda
+/ik:optimize matmul gen=cuda ref=cublas
+/ik:optimize fa4 gen=cuda ref=cudnn,cutedsl
+/ik:optimize fa4 arch=sm90 gpu=4
 ```
 
 When `gpu=N` is provided, set `CUDA_VISIBLE_DEVICES=N` on all `/ik:exec` and `/ik:bench` commands.

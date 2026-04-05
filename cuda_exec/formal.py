@@ -79,13 +79,22 @@ def formal_benchmark(
         )
 
         if gen["file_type"] == "cu":
-            # .cu needs compile: reference = primary_ref, generated = this .cu
+            # .cu needs compile
+            # reference = primary_ref .py files + any .py gen impl files (for measurement)
+            ref_files = dict(primary_ref["files"])
+            # Include .py gen impls as additional reference files
+            py_gens = [g for g in gens if g["file_type"] == "py"]
+            for pg in py_gens:
+                ref_files.update(pg["files"])
+            # cudnn = second ref (vendor baseline) if available
+            cudnn = refs[1]["files"] if len(refs) > 1 else {}
+
             compile_req = CompileRequest(
                 metadata=metadata,
                 timeout_seconds=timeout_seconds,
-                reference_files=primary_ref["files"],
+                reference_files=ref_files,
                 generated_files=gen["files"],
-                cudnn_files=refs[1]["files"] if len(refs) > 1 else {},
+                cudnn_files=cudnn,
             )
             compile_resp = compile_endpoint(compile_req)
             compile_result = compile_resp.model_dump(mode="json")
@@ -100,10 +109,22 @@ def formal_benchmark(
                 }
                 continue
         else:
-            # .py gen implementations don't need compile
-            compile_result = None
+            # .py gen implementations: compile with primary_ref as reference,
+            # but pass gen's .py files as the reference (it becomes the "reference"
+            # in the trial), and use a no-op .cu stub.
+            # For now, skip .py gens in the compile→trial flow — they'll be
+            # measured as part of the reference/cudnn side when another .cu is trialed.
+            results[gen["slug"]] = {
+                "impl": gen["slug"],
+                "compile_ok": None,  # N/A — .py impl, no compile needed
+                "trial_ok": None,    # measured as reference side in .cu trials
+                "compile_result": None,
+                "trial_result": None,
+                "note": "Python impl — measured as reference/cudnn side when .cu impls are trialed",
+            }
+            continue
 
-        # Trial ALL configs
+        # Trial ALL configs (only for .cu impls that were compiled)
         trial_req = TrialRequest(
             metadata=metadata,
             timeout_seconds=timeout_seconds,
@@ -114,7 +135,7 @@ def formal_benchmark(
 
         results[gen["slug"]] = {
             "impl": gen["slug"],
-            "compile_ok": compile_result is None or compile_result.get("all_ok", False),
+            "compile_ok": compile_result.get("all_ok", False),
             "trial_ok": trial_resp.all_ok,
             "compile_result": compile_result,
             "trial_result": trial_result,

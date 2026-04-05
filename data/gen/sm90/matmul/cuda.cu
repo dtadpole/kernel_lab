@@ -1,9 +1,9 @@
 /*
  * BF16 matmul for SM90 — WGMMA m64n128k16 via inline PTX.
  *
- * 1 warpgroup (128 threads), CTA tile 64×128, TILE_K=64.
- * 4× WGMMA m64n128k16 per K-tile (k16 × 4 = k64).
- * 128B swizzle SMEM layout, cp.async loads, double buffer.
+ * 1 warpgroup (128 threads), CTA tile 128×128, TILE_K=64.
+ * 2× m64n128k16 per K-step (rows 0-63 and 64-127) × 4 k16 steps.
+ * 128B swizzle SMEM layout, double buffer.
  * FP32 accumulation → BF16 output.
  */
 #include <cuda_bf16.h>
@@ -11,15 +11,15 @@
 #include <cstdio>
 #include <cmath>
 
-#define TILE_M    64
+#define TILE_M    128
 #define TILE_N    128
-#define TILE_K    64     /* Must be 64 for 128B swizzle alignment */
+#define TILE_K    64
 #define THREADS   128
 #define STAGES    2
 
-#define A_BYTES   (TILE_M * TILE_K * 2)   /* 64×64×2 = 8192 */
+#define A_BYTES   (TILE_M * TILE_K * 2)   /* 128×64×2 = 16384 */
 #define B_BYTES   (TILE_N * TILE_K * 2)   /* 128×64×2 = 16384 */
-#define STAGE_BYTES (A_BYTES + B_BYTES)    /* 24576 */
+#define STAGE_BYTES (A_BYTES + B_BYTES)    /* 32768 */
 
 /* =========================================================================
  * WGMMA descriptor (128B swizzle layout)
@@ -154,9 +154,10 @@ matmul_wgmma(
     int ctaCol = blockIdx.x * TILE_N;
     int tid = threadIdx.x;
 
-    float acc[64];
+    /* Two sets of accumulators: rows 0-63 and rows 64-127 */
+    float acc0[64], acc1[64];
     #pragma unroll
-    for (int i = 0; i < 64; i++) acc[i] = 0.0f;
+    for (int i = 0; i < 64; i++) { acc0[i] = 0.0f; acc1[i] = 0.0f; }
 
     int numK = (K + TILE_K - 1) / TILE_K;
 
@@ -190,19 +191,24 @@ matmul_wgmma(
         if (kt + 1 < numK)
             load_tile(nxt, (kt + 1) * TILE_K);
 
-        /* WGMMA: 4× m64n128k16 to cover TILE_K=64 */
-        uint64_t da = make_desc(sA[cur], TILE_K);
+        /* WGMMA: 2 row groups × 4 k16 steps = 8 WGMMA calls per K-tile */
+        /* A top half (rows 0-63) */
+        uint64_t da0 = make_desc(sA[cur], TILE_K);
+        /* A bottom half (rows 64-127): offset by 64*TILE_K*2 bytes */
+        uint64_t da1 = make_desc((__nv_bfloat16*)((char*)sA[cur] + 64 * TILE_K * 2), TILE_K);
+        /* B (shared for both row groups) */
         uint64_t db = make_desc(sB[cur], TILE_K);
 
+        int sd = (kt == 0) ? 0 : 1;
+
         wgmma_fence();
-        /* k=0 */
-        wgmma_m64n128k16(acc, da, db, (kt == 0) ? 0 : 1);
-        /* k=16: advance by 2 units (32 bytes = 16 BF16) */
-        wgmma_m64n128k16(acc, desc_advance(da, 2), desc_advance(db, 2), 1);
-        /* k=32 */
-        wgmma_m64n128k16(acc, desc_advance(da, 4), desc_advance(db, 4), 1);
-        /* k=48 */
-        wgmma_m64n128k16(acc, desc_advance(da, 6), desc_advance(db, 6), 1);
+        for (int ks = 0; ks < 4; ks++) {
+            uint64_t dak0 = desc_advance(da0, ks * 2);
+            uint64_t dak1 = desc_advance(da1, ks * 2);
+            uint64_t dbk  = desc_advance(db,  ks * 2);
+            wgmma_m64n128k16(acc0, dak0, dbk, (ks == 0) ? sd : 1);
+            wgmma_m64n128k16(acc1, dak1, dbk, (ks == 0) ? sd : 1);
+        }
         wgmma_commit();
         wgmma_wait0();
 
@@ -210,8 +216,9 @@ matmul_wgmma(
             __syncthreads();
     }
 
-    /* Epilogue */
-    store_acc(C, acc, ctaRow, ctaCol, M, N);
+    /* Epilogue: store both row groups */
+    store_acc(C, acc0, ctaRow, ctaCol, M, N);        /* rows 0-63 */
+    store_acc(C, acc1, ctaRow + 64, ctaCol, M, N);   /* rows 64-127 */
 }
 
 extern "C" int kernel_run(

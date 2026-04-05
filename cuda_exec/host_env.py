@@ -167,8 +167,8 @@ def resolve_gpu_peak_tflops() -> float:
     """
     _, entry = _match_host_entry()
     if entry:
-        return float(entry.get("hardware", {}).get("peak_tflops_bf16", 989.4))
-    return 989.4  # H100 SXM5 default
+        return float(entry.get("hardware", {}).get("peak_tflops_bf16", 800))
+    return 800  # Meta H100 R&R SKU @ 650W default
 
 
 def resolve_gpu_name() -> str:

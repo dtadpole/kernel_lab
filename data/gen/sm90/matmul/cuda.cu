@@ -1,185 +1,217 @@
 /*
- * BF16 matmul for SM90 — WMMA + cp.async, 128×128×32 tiles, double buffer.
+ * BF16 matmul for SM90 — WGMMA m64n128k16 via inline PTX.
  *
- * Improvements over previous:
- * - TILE_K=32 (2 WMMA K-steps per tile load)
- * - cp.async for async global→shared memory copies
- * - Vectorized 64-bit loads (4 × BF16 per load)
- * - cp.async.commit_group / cp.async.wait_group for pipelining
+ * 1 warpgroup (128 threads), CTA tile 64×128, TILE_K=64.
+ * 4× WGMMA m64n128k16 per K-tile (k16 × 4 = k64).
+ * 128B swizzle SMEM layout, cp.async loads, double buffer.
+ * FP32 accumulation → BF16 output.
  */
 #include <cuda_bf16.h>
-#include <cuda_pipeline.h>
+#include <cstdint>
 #include <cstdio>
 #include <cmath>
-#include <mma.h>
 
-using namespace nvcuda;
+#define TILE_M    64
+#define TILE_N    128
+#define TILE_K    64     /* Must be 64 for 128B swizzle alignment */
+#define THREADS   128
+#define STAGES    2
 
-#define WMMA_M 16
-#define WMMA_N 16
-#define WMMA_K 16
-#define WARP_SIZE 32
-#define TILE_M 128
-#define TILE_N 128
-#define TILE_K 32
-#define WARPS 8
-#define THREADS (WARPS * WARP_SIZE)
-#define WARP_ROWS 4
-#define WARP_COLS 2
-#define WARP_WMMA_M 2
-#define WARP_WMMA_N 4
+#define A_BYTES   (TILE_M * TILE_K * 2)   /* 64×64×2 = 8192 */
+#define B_BYTES   (TILE_N * TILE_K * 2)   /* 128×64×2 = 16384 */
+#define STAGE_BYTES (A_BYTES + B_BYTES)    /* 24576 */
 
-/* Shared memory: double-buffered A and B tiles */
-/* A: 128×32 = 8KB per buffer, B: 32×128 = 8KB per buffer → 32KB total */
+/* =========================================================================
+ * WGMMA descriptor (128B swizzle layout)
+ * ========================================================================= */
+__device__ __forceinline__
+uint64_t make_desc(const void* smem_ptr, int tile_k) {
+    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    int stride_16B = (8 * tile_k * 2) >> 4;  /* 8 rows × K cols × 2 bytes */
+    uint64_t desc = 0;
+    desc |= (uint64_t)((addr >> 4) & 0x3FFF);               // start_address
+    desc |= (uint64_t)(1) << 16;                              // leading_byte_off
+    desc |= (uint64_t)(stride_16B & 0x3FFF) << 32;           // stride_byte_off
+    desc |= (uint64_t)(1) << 62;                              // layout_type = B128
+    return desc;
+}
 
 __device__ __forceinline__
-void load_tile_async(
-    __nv_bfloat16 sA[][TILE_K],
-    __nv_bfloat16 sB[][TILE_N],
-    const __nv_bfloat16* __restrict__ A,
-    const __nv_bfloat16* __restrict__ B,
-    int ctaRow, int ctaCol, int k,
-    int M, int N, int K, int tid)
-{
-    /* Load A tile: 128 rows × 32 cols = 4096 BF16 = 8KB */
-    /* 256 threads, each loads 16 elements (8 × uint32 = 4 BF16 per uint32) */
-    for (int i = tid; i < TILE_M * TILE_K / 4; i += THREADS) {
-        int elem_idx = i * 4;
-        int r = elem_idx / TILE_K;
-        int c = elem_idx % TILE_K;
-        int gR = ctaRow + r;
-        int gC = k + c;
+uint64_t desc_advance(uint64_t desc, int offset_16B) {
+    uint32_t lo = (uint32_t)desc + (uint32_t)offset_16B;
+    uint32_t hi = (uint32_t)(desc >> 32);
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
 
-        if (gR < M && gC + 3 < K) {
-            /* Vectorized 64-bit async copy (4 × BF16) */
-            __pipeline_memcpy_async(
-                &sA[r][c],
-                &A[gR * K + gC],
-                8  /* 4 × sizeof(BF16) = 8 bytes */
-            );
-        } else {
-            /* Boundary: scalar fallback */
-            for (int j = 0; j < 4; j++) {
-                sA[r][c + j] = (gR < M && gC + j < K)
-                    ? A[gR * K + gC + j]
-                    : __float2bfloat16(0.0f);
-            }
-        }
-    }
+/* =========================================================================
+ * WGMMA helpers
+ * ========================================================================= */
+/* 128B XOR swizzle: permutes the 16B-granule index within each 128B line
+ * by XOR with the line index (bits [9:7] of byte offset).
+ * This eliminates shared memory bank conflicts for WGMMA access patterns.
+ * byte_offset → swizzled_byte_offset within the matrix. */
+__device__ __forceinline__
+int swizzle_128B(int byte_offset) {
+    return byte_offset ^ (((byte_offset >> 7) & 0x7) << 4);
+}
 
-    /* Load B tile: 32 rows × 128 cols = 4096 BF16 = 8KB */
-    for (int i = tid; i < TILE_K * TILE_N / 4; i += THREADS) {
-        int elem_idx = i * 4;
-        int r = elem_idx / TILE_N;
-        int c = elem_idx % TILE_N;
-        int gR = k + r;
-        int gC = ctaCol + c;
+__device__ __forceinline__ void wgmma_fence() {
+    asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+}
+__device__ __forceinline__ void wgmma_commit() {
+    asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
+}
+__device__ __forceinline__ void wgmma_wait0() {
+    asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+}
 
-        if (gR < K && gC + 3 < N) {
-            __pipeline_memcpy_async(
-                &sB[r][c],
-                &B[gR * N + gC],
-                8
-            );
-        } else {
-            for (int j = 0; j < 4; j++) {
-                sB[r][c + j] = (gR < K && gC + j < N)
-                    ? B[gR * N + gC + j]
-                    : __float2bfloat16(0.0f);
-            }
-        }
+/* Single m64n128k16 WGMMA instruction */
+__device__ __forceinline__
+void wgmma_m64n128k16(float (&d)[64], uint64_t da, uint64_t db, int scale_d) {
+    asm volatile(
+        "{\n.reg .pred p;\nsetp.ne.b32 p, %66, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+        "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"
+        "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,"
+        "%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,"
+        "%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63},"
+        "%64,%65,p,1,1,0,0;\n}\n"
+        : "+f"(d[0]),"+f"(d[1]),"+f"(d[2]),"+f"(d[3]),
+          "+f"(d[4]),"+f"(d[5]),"+f"(d[6]),"+f"(d[7]),
+          "+f"(d[8]),"+f"(d[9]),"+f"(d[10]),"+f"(d[11]),
+          "+f"(d[12]),"+f"(d[13]),"+f"(d[14]),"+f"(d[15]),
+          "+f"(d[16]),"+f"(d[17]),"+f"(d[18]),"+f"(d[19]),
+          "+f"(d[20]),"+f"(d[21]),"+f"(d[22]),"+f"(d[23]),
+          "+f"(d[24]),"+f"(d[25]),"+f"(d[26]),"+f"(d[27]),
+          "+f"(d[28]),"+f"(d[29]),"+f"(d[30]),"+f"(d[31]),
+          "+f"(d[32]),"+f"(d[33]),"+f"(d[34]),"+f"(d[35]),
+          "+f"(d[36]),"+f"(d[37]),"+f"(d[38]),"+f"(d[39]),
+          "+f"(d[40]),"+f"(d[41]),"+f"(d[42]),"+f"(d[43]),
+          "+f"(d[44]),"+f"(d[45]),"+f"(d[46]),"+f"(d[47]),
+          "+f"(d[48]),"+f"(d[49]),"+f"(d[50]),"+f"(d[51]),
+          "+f"(d[52]),"+f"(d[53]),"+f"(d[54]),"+f"(d[55]),
+          "+f"(d[56]),"+f"(d[57]),"+f"(d[58]),"+f"(d[59]),
+          "+f"(d[60]),"+f"(d[61]),"+f"(d[62]),"+f"(d[63])
+        : "l"(da), "l"(db), "r"(scale_d));
+}
+
+/* =========================================================================
+ * Epilogue: WGMMA m64n128 accumulator → global
+ *
+ * Register pair j (0..31): acc[4*(j/2) + 2*(j%2)] and acc[4*(j/2) + 2*(j%2) + 1]
+ * row = warp*16 + (j%2)*8 + lane/4
+ * col = (j/2)*8 + (lane%4)*2 + {0,1}
+ * ========================================================================= */
+__device__ __forceinline__
+void store_acc(__nv_bfloat16* C, float (&acc)[64],
+               int ctaRow, int ctaCol, int M, int N) {
+    int warp = threadIdx.x / 32;
+    int lane = threadIdx.x % 32;
+    int row_base = ctaRow + warp * 16 + lane / 4;
+    int col_base = ctaCol + (lane % 4) * 2;
+
+    /* acc[4p+s]: row = row_base + (s/2)*8, col = col_base + p*8 + (s%2) */
+    for (int p = 0; p < 16; p++) {
+        int col = col_base + p * 8;
+        int row0 = row_base;       /* s=0,1 */
+        int row8 = row_base + 8;   /* s=2,3 */
+
+        if (row0 < M && col < N)
+            C[row0 * N + col] = __float2bfloat16(acc[4*p]);
+        if (row0 < M && col + 1 < N)
+            C[row0 * N + col + 1] = __float2bfloat16(acc[4*p + 1]);
+        if (row8 < M && col < N)
+            C[row8 * N + col] = __float2bfloat16(acc[4*p + 2]);
+        if (row8 < M && col + 1 < N)
+            C[row8 * N + col + 1] = __float2bfloat16(acc[4*p + 3]);
     }
 }
 
-__global__ void matmul_wmma_async(
+/* =========================================================================
+ * Kernel
+ * ========================================================================= */
+__global__ void __launch_bounds__(THREADS, 1)
+matmul_wgmma(
     const __nv_bfloat16* __restrict__ A,
     const __nv_bfloat16* __restrict__ B,
     __nv_bfloat16* __restrict__ C,
     int M, int N, int K)
 {
-    __shared__ __nv_bfloat16 sA[2][TILE_M][TILE_K];
-    __shared__ __nv_bfloat16 sB[2][TILE_K][TILE_N];
+    asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n");
 
-    int warpId = threadIdx.x / WARP_SIZE;
-    int warpRow = warpId / WARP_COLS;
-    int warpCol = warpId % WARP_COLS;
+    extern __shared__ char smem[];
+    /* Double buffer: [stage0_A | stage0_B | stage1_A | stage1_B] */
+    __nv_bfloat16* sA[2] = {
+        (__nv_bfloat16*)(smem),
+        (__nv_bfloat16*)(smem + STAGE_BYTES)
+    };
+    __nv_bfloat16* sB[2] = {
+        (__nv_bfloat16*)(smem + A_BYTES),
+        (__nv_bfloat16*)(smem + STAGE_BYTES + A_BYTES)
+    };
+
     int ctaRow = blockIdx.y * TILE_M;
     int ctaCol = blockIdx.x * TILE_N;
     int tid = threadIdx.x;
 
-    /* Accumulators */
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc[WARP_WMMA_M][WARP_WMMA_N];
-    for (int i = 0; i < WARP_WMMA_M; i++)
-        for (int j = 0; j < WARP_WMMA_N; j++)
-            wmma::fill_fragment(acc[i][j], 0.0f);
-
-    /* Load first tile asynchronously */
-    load_tile_async(sA[0], sB[0], A, B, ctaRow, ctaCol, 0, M, N, K, tid);
-    __pipeline_commit();
-    __pipeline_wait_prior(0);
-    __syncthreads();
+    float acc[64];
+    #pragma unroll
+    for (int i = 0; i < 64; i++) acc[i] = 0.0f;
 
     int numK = (K + TILE_K - 1) / TILE_K;
+
+    /* Helper: load tile into SMEM with 128B swizzle */
+    auto load_tile = [&](int buf, int kOff) {
+        /* A: M×K row-major, swizzled */
+        for (int i = tid; i < TILE_M * TILE_K; i += THREADS) {
+            int r = i / TILE_K, c = i % TILE_K;
+            int gR = ctaRow + r, gC = kOff + c;
+            int byte_off = (r * TILE_K + c) * 2;
+            int sw_off = swizzle_128B(byte_off) / 2;
+            sA[buf][sw_off] = (gR < M && gC < K) ? A[gR * K + gC] : __float2bfloat16(0.0f);
+        }
+        /* B: stored as N×K (transposed), swizzled */
+        for (int i = tid; i < TILE_N * TILE_K; i += THREADS) {
+            int r = i / TILE_K, c = i % TILE_K;
+            int gR = ctaCol + r, gC = kOff + c;
+            int byte_off = (r * TILE_K + c) * 2;
+            int sw_off = swizzle_128B(byte_off) / 2;
+            sB[buf][sw_off] = (gR < N && gC < K) ? B[gC * N + gR] : __float2bfloat16(0.0f);
+        }
+    };
+
+    load_tile(0, 0);
+    __syncthreads();
 
     for (int kt = 0; kt < numK; kt++) {
         int cur = kt & 1;
         int nxt = 1 - cur;
 
-        /* Prefetch next tile */
-        if (kt + 1 < numK) {
-            load_tile_async(sA[nxt], sB[nxt], A, B, ctaRow, ctaCol,
-                           (kt + 1) * TILE_K, M, N, K, tid);
-            __pipeline_commit();
-        }
+        if (kt + 1 < numK)
+            load_tile(nxt, (kt + 1) * TILE_K);
 
-        /* Compute: 2 WMMA K-steps per TILE_K=32 */
-        for (int kk = 0; kk < TILE_K; kk += WMMA_K) {
-            for (int wi = 0; wi < WARP_WMMA_M; wi++) {
-                for (int wj = 0; wj < WARP_WMMA_N; wj++) {
-                    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K,
-                                   __nv_bfloat16, wmma::row_major> a_frag;
-                    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K,
-                                   __nv_bfloat16, wmma::row_major> b_frag;
+        /* WGMMA: 4× m64n128k16 to cover TILE_K=64 */
+        uint64_t da = make_desc(sA[cur], TILE_K);
+        uint64_t db = make_desc(sB[cur], TILE_K);
 
-                    int aRow = warpRow * (TILE_M / WARP_ROWS) + wi * WMMA_M;
-                    int bCol = warpCol * (TILE_N / WARP_COLS) + wj * WMMA_N;
+        wgmma_fence();
+        /* k=0 */
+        wgmma_m64n128k16(acc, da, db, (kt == 0) ? 0 : 1);
+        /* k=16: advance by 2 units (32 bytes = 16 BF16) */
+        wgmma_m64n128k16(acc, desc_advance(da, 2), desc_advance(db, 2), 1);
+        /* k=32 */
+        wgmma_m64n128k16(acc, desc_advance(da, 4), desc_advance(db, 4), 1);
+        /* k=48 */
+        wgmma_m64n128k16(acc, desc_advance(da, 6), desc_advance(db, 6), 1);
+        wgmma_commit();
+        wgmma_wait0();
 
-                    wmma::load_matrix_sync(a_frag, &sA[cur][aRow][kk], TILE_K);
-                    wmma::load_matrix_sync(b_frag, &sB[cur][kk][bCol], TILE_N);
-                    wmma::mma_sync(acc[wi][wj], a_frag, b_frag, acc[wi][wj]);
-                }
-            }
-        }
-
-        /* Wait for prefetch before swapping buffers */
-        if (kt + 1 < numK) {
-            __pipeline_wait_prior(0);
-        }
-        __syncthreads();
+        if (kt + 1 < numK)
+            __syncthreads();
     }
 
-    /* Store: per-warp temp buffer for FP32 → BF16 conversion */
-    __shared__ float sOut[WARPS][WMMA_M][WMMA_N];
-
-    for (int wi = 0; wi < WARP_WMMA_M; wi++) {
-        for (int wj = 0; wj < WARP_WMMA_N; wj++) {
-            int outRow = ctaRow + warpRow * (TILE_M / WARP_ROWS) + wi * WMMA_M;
-            int outCol = ctaCol + warpCol * (TILE_N / WARP_COLS) + wj * WMMA_N;
-
-            wmma::store_matrix_sync(&sOut[warpId][0][0], acc[wi][wj],
-                                    WMMA_N, wmma::mem_row_major);
-
-            int laneId = threadIdx.x % WARP_SIZE;
-            for (int idx = laneId; idx < WMMA_M * WMMA_N; idx += WARP_SIZE) {
-                int r = idx / WMMA_N;
-                int c = idx % WMMA_N;
-                int gR = outRow + r;
-                int gC = outCol + c;
-                if (gR < M && gC < N)
-                    C[gR * N + gC] = __float2bfloat16(sOut[warpId][r][c]);
-            }
-        }
-    }
+    /* Epilogue */
+    store_acc(C, acc, ctaRow, ctaCol, M, N);
 }
 
 extern "C" int kernel_run(
@@ -192,7 +224,9 @@ extern "C" int kernel_run(
 
     dim3 block(THREADS);
     dim3 grid((dim + TILE_N - 1) / TILE_N, (dim + TILE_M - 1) / TILE_M);
-    matmul_wmma_async<<<grid, block, 0, stream>>>(
+    size_t smem = STAGES * STAGE_BYTES;
+    cudaFuncSetAttribute(matmul_wgmma, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    matmul_wgmma<<<grid, block, smem, stream>>>(
         inputs[0], inputs[1], outputs[0], dim, dim, dim);
     return 0;
 }

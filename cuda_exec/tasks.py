@@ -1218,10 +1218,7 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
                 stdout=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.resource-usage.stdout", inline=True),
                 stderr=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.resource-usage.stderr", inline=True),
             ),
-            nvdisasm=ToolIOPair(
-                stdout=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.nvdisasm.stdout", inline=True),
-                stderr=_capture_public_file(workspace_path, f"logs/compile.{_attempt_tag(attempt)}.nvdisasm.stderr", inline=True),
-            ),
+            # nvdisasm stdout/stderr omitted — SASS dump is large and saved to disk as artifact
         ),
     )
 

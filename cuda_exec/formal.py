@@ -137,7 +137,7 @@ def formal_benchmark(
             "trial_result": trial_result,
         }
 
-    return {
+    bench_result = {
         "kernel": kernel,
         "arch": arch,
         "num_configs": len(configs),
@@ -146,6 +146,17 @@ def formal_benchmark(
         "gens": [r["slug"] for r in gens],
         "results": results,
     }
+
+    # Write run + gem to kernel_lab_kb
+    try:
+        from cuda_exec.trajectory import write_trajectory
+        traj_path = write_trajectory(bench_result)
+        if traj_path:
+            logger.info("Trajectory written to %s", traj_path)
+    except Exception as exc:
+        logger.warning("Failed to write trajectory: %s", exc)
+
+    return bench_result
 
 
 def cli_main() -> None:

@@ -284,10 +284,12 @@ def generate_inputs(
 
     if "fa4" in family or "mha" in family or len(shape) == 4:
         batch, seq_len, num_heads, head_dim = shape
+        num_kv_heads = int(config.get("num_kv_heads", num_heads))
+        causal = bool(config.get("causal", False))
         Q = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
-        K = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
-        V = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
-        return [Q, K, V]
+        K = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device)
+        V = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device)
+        return [Q, K, V, causal]
 
     if len(shape) == 1:
         # Vector ops (e.g., vecadd)

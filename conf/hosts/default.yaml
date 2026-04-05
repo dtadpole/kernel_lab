@@ -105,6 +105,7 @@ hosts:
       torch_cuda_arch: "9.0"       # Hopper = sm_90
       ld_preload: null              # not needed — fbcode libcuda matches system driver (both 570.86.15)
       python: /usr/local/bin/python3  # 3.12.13+meta
+      cudnn_sdpa_broken: false
     network:
       internet: true
       proxy_bypass_method: "fwdproxy"
@@ -136,6 +137,10 @@ hosts:
       # with "driver too old (found version 12040)".
       ld_preload: /usr/lib64/libcuda.so.580.65.06
       python: /usr/local/bin/python3  # 3.12.13+meta
+      # cuDNN 9.19 (bundled with torch 2.11+cu130) segfaults on CUDA 13.0
+      # driver during cudnnCreate → cuModuleLoadData. SDPA must exclude
+      # CUDNN_ATTENTION backend; use FLASH_ATTENTION instead.
+      cudnn_sdpa_broken: true
     network:
       internet: false               # fwdproxy blocks CONNECT tunnels
       proxy_bypass_method: "ssh_localhost"  # for Claude Code sandbox

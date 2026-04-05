@@ -181,12 +181,20 @@ def _verify_correctness(
         model = model.cuda(device=device)
 
         # Reproduce harness fill_random_bf16 PRNG for each input tensor
-        # Seeds are 1, 2, 3, ... matching eval_harness.cu correctness pass
+        # Seeds are 1, 2, 3, ... matching eval_harness.cu correctness pass.
+        # generate_inputs may return non-tensor items (e.g. causal bool for FA4);
+        # only generate PRNG tensors for the tensor positions, pass-through the rest.
+        template_inputs = generate_inputs(config, device)
         harness_inputs = []
-        for j in range(num_inputs):
-            correctness_seed = j + 1
-            t = _harness_fill_random_bf16(input_size, correctness_seed)
-            harness_inputs.append(t.to(device).reshape(shape))
+        tensor_idx = 0
+        for item in template_inputs:
+            if isinstance(item, torch.Tensor):
+                correctness_seed = tensor_idx + 1
+                t = _harness_fill_random_bf16(input_size, correctness_seed)
+                harness_inputs.append(t.to(device).reshape(item.shape))
+                tensor_idx += 1
+            else:
+                harness_inputs.append(item)  # pass-through bool, int, etc.
 
         ref_output = model(*harness_inputs)
         torch.cuda.synchronize(device=device)

@@ -1,9 +1,9 @@
 ---
 name: optimize
-description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify, commit
+description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify
 user-invocable: true
 disable-model-invocation: true
-argument-hint: <kernel> [--impl generated|reference] [--target smXX] [--gpu N]
+argument-hint: <kernel> [--impl <slug>] [--target smXX] [--gpu N]
 ---
 
 # Optimize Kernel
@@ -17,14 +17,14 @@ one, verifies improvement, and commits if successful.
 | Position | Name | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
-| `--impl` | implementation | no | `generated` | Which code to optimize: `generated` (hand-written CUDA) or `reference` (CuTe DSL) |
+| `--impl` | impl slug | no | first `gen-*` | Which impl to optimize, e.g. `gen-cuda`, `ref-cublas`. Uses dynamic slug format `{source}-{name}` |
 | `--target` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `--gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
 ```
 /ik:optimize fa4
-/ik:optimize matmul --impl reference
+/ik:optimize matmul --impl gen-cuda
 /ik:optimize fa4 --target sm90
 /ik:optimize fa4 --gpu 4
 ```
@@ -41,16 +41,26 @@ nvidia-smi --query-gpu=compute_cap --format=csv,noheader
 ```
 Map compute capability to arch: `12.0` -> `sm120`, `9.0` -> `sm90`, `8.0` -> `sm80`.
 
+## Implementation Slugs
+
+Implementations use dynamic slugs: `{source}-{name}` (e.g. `ref-cublas`, `gen-cuda`).
+See `cuda_exec/impls.py` for slug resolution logic.
+
+To discover all available impls for a kernel+arch:
+```python
+from cuda_exec.impls import list_impls
+list_impls("matmul", "sm90")  # → [{"slug": "ref-cublas", ...}, {"slug": "gen-cuda", ...}, ...]
+```
+
 ## Project Layout
 
 Before starting, know where things live:
 
 | What | Path |
 |------|------|
-| Fixture configs | `data/fixtures/{arch}/{kernel}/configs.json` |
-| CuTe DSL reference | `data/fixtures/{arch}/{kernel}/cutedsl.py` |
-| cuDNN wrapper | `data/fixtures/{arch}/{kernel}/cudnn.py` (if exists) |
-| Generated code | `data/generated/{arch}/{kernel}/generated.cu` |
+| Reference impls | `data/ref/{kernel}/` → slugs `ref-{stem}` |
+| Generated impls | `data/gen/{arch}/{kernel}/` → slugs `gen-{stem}` |
+| Configs | `data/configs/{kernel}.json` |
 | Results | `results/{arch}/{gpu_name}/{kernel}/` |
 | Roofline specs | `docs/roofline/` |
 | NVIDIA docs (local) | Use `/ik:docs` to search indexed CUDA Toolkit docs |
@@ -71,9 +81,15 @@ most recent.
 
 Then run a fresh evaluation to get ground-truth numbers for this session:
 
-1. Use `/ik:exec` to **compile** the current generated code
-2. Use `/ik:exec` to **trial** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
-3. Record latency for generated code vs reference (CuTe DSL) vs cuDNN/cuBLAS
+1. **Compile** via `/ik:exec`:
+   ```bash
+   .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel={kernel} exec.arch={arch} exec.impl={slug} exec.gpu={gpu} exec.run_tag={run_tag} exec.turn={turn}
+   ```
+2. **Trial** ALL configs via `/ik:exec`:
+   ```bash
+   .venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel={kernel} exec.arch={arch} exec.impl={slug} exec.gpu={gpu} exec.run_tag={run_tag} exec.turn={turn}
+   ```
+3. Record latency for the target impl vs all `ref-*` baselines
 
 **After every full evaluation, output a performance comparison table** like the
 example below. This table is mandatory after trial-all in both Phase 1 and
@@ -87,12 +103,17 @@ If any config shows ✗, the optimization is REJECTED.
 
 **Do NOT profile all configs.** Profiling is expensive. Pick 1-2 configs that
 are most representative or most interesting based on the evaluation results:
-- The config with the **largest gap** vs reference/cuDNN (biggest opportunity)
+- The config with the **largest gap** vs the best `ref-*` baseline (biggest opportunity)
 - One **representative** config (e.g., the most common batch/seq_len combo)
 
-Use `/ik:exec` to **profile** with NCU on the selected config(s):
-- Profile the **generated** kernel
-- Profile the **reference** kernel (CuTe DSL side) on the same config
+**Profile** via `/ik:exec`:
+```bash
+# Profile the target impl
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel={kernel} exec.arch={arch} exec.impl={slug} exec.gpu={gpu} exec.run_tag={run_tag} exec.turn={turn} 'exec.configs=[{config_slug}]' exec.side=generated
+
+# Profile the best ref-* impl for comparison
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel={kernel} exec.arch={arch} exec.impl={slug} exec.gpu={gpu} exec.run_tag={run_tag} exec.turn={turn} 'exec.configs=[{config_slug}]' exec.side=reference
+```
 
 Collect key NCU metrics:
 - Compute throughput (SM %)
@@ -123,8 +144,8 @@ the best baseline:
 
 #### 2a. Compare Profiles
 
-Side-by-side the NCU metrics between generated and reference/cuDNN. Identify
-which hardware resource is the bottleneck:
+Side-by-side the NCU metrics between the target impl and the best `ref-*`
+baseline. Identify which hardware resource is the bottleneck:
 - **Compute-bound**: SM % is high, memory % is low
 - **Memory-bound**: DRAM % is high, SM % is low
 - **Latency-bound**: Both are low — look at warp stalls
@@ -183,16 +204,17 @@ Two key sources of institutional knowledge beyond docs and profiles:
 
 **Previous implementations** — compare different implementations of the same
 kernel to understand what techniques each uses:
-- Compare CuTe DSL reference (`data/fixtures/{arch}/{kernel}/cutedsl.py`) vs
-  hand-written CUDA (`data/generated/{arch}/{kernel}/generated.cu`) — what
-  instructions, tile sizes, and pipeline strategies does each use?
-- Use `git log` to find earlier versions of the generated code:
+- Use `list_impls(kernel, arch)` to discover all available slugs
+- Compare `ref-*` impls vs `gen-*` impls — what instructions, tile sizes,
+  and pipeline strategies does each use?
+- Use `git log` to find earlier versions:
   ```bash
-  git log --oneline --all -- data/generated/{arch}/{kernel}/generated.cu
+  git log --oneline --all -- data/gen/{arch}/{kernel}/
+  git log --oneline --all -- data/ref/{kernel}/
   ```
 - Read previous versions for ideas:
   ```bash
-  git show <commit>:data/generated/{arch}/{kernel}/generated.cu
+  git show <commit>:data/gen/{arch}/{kernel}/{name}.cu
   ```
 
 **Previous results** — the `results/{arch}/{gpu_name}/{kernel}/` folder is a
@@ -224,7 +246,10 @@ idea to implement first.
 
 1. **Snapshot baseline** — before modifying any code, save the current file:
    ```bash
-   cp data/generated/{arch}/{kernel}/generated.cu data/generated/{arch}/{kernel}/generated.cu.baseline
+   # For gen-* impl (e.g. gen-cuda → data/gen/{arch}/{kernel}/cuda.cu)
+   cp data/gen/{arch}/{kernel}/{name}.cu data/gen/{arch}/{kernel}/{name}.cu.baseline
+   # For ref-* impl (e.g. ref-cublas → data/ref/{kernel}/cublas.py)
+   cp data/ref/{kernel}/{name}.py data/ref/{kernel}/{name}.py.baseline
    ```
    This enables clean revert if the attempt fails.
 2. **Write a plan** — describe exactly what code changes are needed, which
@@ -232,13 +257,16 @@ idea to implement first.
    - Which NCU metric you expect to improve and by how much
    - Which lines of code are changing and why
    - What could go wrong (register pressure, correctness, bank conflicts)
-3. **Implement** — make the code changes in `data/generated/{arch}/{kernel}/generated.cu`
-   (or the CuTe DSL reference code if `--impl reference`)
+3. **Implement** — make the code changes in the target impl's source file
+   (resolved via `resolve_impl(kernel, arch, slug)`)
 4. **Increment turn** — new code = new turn in cuda_exec
 
 ### Phase 5: Verify
 
-1. **Compile** the modified code via `/ik:exec`
+1. **Compile** the modified code via `/ik:exec` (increment `exec.turn`):
+   ```bash
+   .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel={kernel} exec.arch={arch} exec.impl={slug} exec.gpu={gpu} exec.run_tag={run_tag} exec.turn={new_turn}
+   ```
    - Check compile output: register count, spill bytes, shared memory
    - If compile fails, fix and retry (up to 3 compile attempts)
    - If register spills increased substantially, reconsider the approach
@@ -321,7 +349,10 @@ Include:
 
 #### 6b. Final bench and STOP
 
-**Run `/ik:bench` as the last step.** This is mandatory.
+**Run `/ik:bench` as the last step.** This is mandatory:
+```bash
+.venv/bin/python -m cuda_exec.formal bench.kernel={kernel} bench.arch={arch} bench.gpu={gpu}
+```
 The bench output is the authoritative record of performance and correctness.
 `ik:bench` handles snapshotting, gem creation, and committing automatically.
 If bench shows any ✗, go back and fix.
@@ -336,7 +367,8 @@ Do not continue optimizing. The user will decide whether to run another round.
 #### 7a. Revert to Baseline
 
 ```bash
-cp data/generated/{arch}/{kernel}/generated.cu.baseline data/generated/{arch}/{kernel}/generated.cu
+# Restore from the baseline snapshot created in Phase 4
+cp <impl_file>.baseline <impl_file>
 ```
 
 For no-improvement cases: profile the failed attempt BEFORE reverting to

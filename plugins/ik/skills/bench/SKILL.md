@@ -14,15 +14,40 @@ from `ik:exec` or `ik:optimize` trials are preliminary and never authoritative.
 Atomic compile + trial of ALL configs for a kernel. Not for iterative
 development — use `/ik:exec` for that.
 
+## Implementation Slug Resolution
+
+Implementations are discovered dynamically from the directory structure.
+A **slug** has the format `{source}-{name}`:
+
+| Source | Directory | Example slug | Example path |
+|--------|-----------|--------------|--------------|
+| `ref` | `data/ref/{kernel}/` | `ref-cublas` | `data/ref/matmul/cublas.py` |
+| `gen` | `data/gen/{arch}/{kernel}/` | `gen-cuda` | `data/gen/sm90/matmul/cuda.cu` |
+
+**Forward resolution** (slug → files): `resolve_impl(kernel, arch, slug)`
+- Tries `{name}.py` first, then `{name}.cu` in the source directory
+- Auto-includes helper files (`.py` helpers for `.py` entry points, `.h`/`.cuh` for `.cu`)
+
+**Reverse discovery** (directory → all slugs): `list_impls(kernel, arch)`
+- Scans `data/ref/{kernel}/` — every `.py` or `.cu` file becomes `ref-{stem}`
+- Scans `data/gen/{arch}/{kernel}/` — `.cu` files become `gen-{stem}`, `.py` files with `class Model` become `gen-{stem}`
+
+When `impls` is `all` (default), both directions are used: reverse discovery
+finds all slugs, then forward resolution loads their files.
+
+Both functions live in `cuda_exec/impls.py` and accept `data_root` to work
+against either original `data/` or a snapshot copy.
+
 ## What it does
 
 1. **Snapshot** sources + configs to `~/kernel_lab_kb` (before any compile/trial)
-2. Discovers all implementations via `cuda_exec.impls` from the snapshot
-3. Loads ALL configs from the snapshot
-4. Compiles + trials each `.cu` gen impl against the primary reference
-5. `.py` gen impls are measured on the reference side during `.cu` trials
-6. Writes per-impl `results.json` + `report.md` to `kernel_lab_kb`
-7. If any config beats the previous best, creates a **gem** (versioned record)
+2. **Discovers** all implementation slugs from the snapshot via `list_impls()`
+3. **Resolves** each slug to its source files via `resolve_impl()`
+4. Loads ALL configs from the snapshot
+5. Compiles + trials each `.cu` gen impl against the primary `ref-*` impl
+6. `.py` gen impls are measured on the reference side during `.cu` trials
+7. Writes per-impl `results.json` + `report.md` to `kernel_lab_kb`
+8. If any config beats the previous best, creates a **gem** (versioned record)
 
 All compile/trial runs against the snapshot copy — never the original files.
 
@@ -111,32 +136,31 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
 
 ```json
 {
-  "kernel": "matmul",
-  "arch": "sm90",
+  "kernel": "<kernel>",
+  "arch": "<arch>",
   "num_configs": 6,
-  "impls_requested": ["ref-cublas", "gen-cuda", "gen-cutedsl"],
-  "refs": ["ref-cublas"],
-  "gens": ["gen-cuda", "gen-cutedsl"],
+  "impls_requested": ["ref-<name>", "gen-<name1>", "gen-<name2>"],
+  "refs": ["ref-<name>"],
+  "gens": ["gen-<name1>", "gen-<name2>"],
   "improved": true,
   "gems": {
-    "gen-cuda": { "version": 2, "improved_configs": ["mat-8192x8192"], ... }
+    "gen-<name1>": { "version": 2, "improved_configs": ["<config_slug>"], ... }
   },
   "results": {
-    "gen-cuda": {
-      "impl": "gen-cuda",
+    "gen-<name1>": {
+      "impl": "gen-<name1>",
       "compile_ok": true,
       "trial_ok": true,
       "compile_result": { ... },
       "trial_result": {
         "all_ok": true,
         "configs": {
-          "mat-256x256": {
+          "<config_slug>": {
             "status": "ok",
             "correctness": { "passed": true, ... },
             "performance": { "latency_ms": { "median": 0.0108, ... } },
             "reference": { "performance": { "latency_ms": { "median": 0.033 } } },
-            "generated": { "performance": { "latency_ms": { "median": 0.011 } } },
-            "cudnn": { "performance": { "latency_ms": { "median": 0.031 } } }
+            "generated": { "performance": { "latency_ms": { "median": 0.011 } } }
           }
         }
       }
@@ -144,6 +168,10 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
   }
 }
 ```
+
+Slugs in the response (`impls_requested`, `refs`, `gens`, `results` keys, `gems` keys)
+are all dynamically discovered — they match whatever `ref-*` and `gen-*` files exist
+in the data directories.
 
 **Key fields for improvement detection:**
 - `improved` (bool): `true` if any impl set a new gem (beat previous best)
@@ -157,15 +185,15 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
 After the bench completes, **always output a performance comparison table** using
 box-drawing characters. This is mandatory — never skip it.
 
-**Columns are dynamic** — generated from the discovered implementations. Each
-`ref-*` and `gen-*` impl slug becomes a column. The table adapts to whatever
+**Columns are dynamic** — generated from the discovered implementation slugs.
+Each `ref-*` and `gen-*` slug becomes a column. The table adapts to whatever
 implementations exist for the kernel+arch combination.
 
-Example for `matmul/sm90` with `ref-cublas`, `gen-cutedsl`, `gen-cuda`:
+Example (slugs discovered: `ref-cublas`, `gen-cutedsl`, `gen-cuda`):
 
 ```
 ┌────────────────────────┬──────────────────┬──────────────────┬──────────────────┬──────────┬──────────┬───┐
-│ NVIDIA H100 SXM5       │  ref-cublas      │  gen-cutedsl     │  gen-cuda        │ cutedsl  │ gen-cuda │   │
+│ NVIDIA H100 SXM5       │  ref-cublas      │  gen-cutedsl     │  gen-cuda        │ cutedsl  │ cuda     │   │
 │ GPU4, torch 2.11+cu128 │  TFLOPS   (ms)   │  TFLOPS   (ms)   │  TFLOPS   (ms)   │ vs ref   │ vs ref   │   │
 ├────────────────────────┼──────────────────┼──────────────────┼──────────────────┼──────────┼──────────┼───┤
 │ mat-256x256            │    1.0  (0.033)  │    0.4  (0.091)  │    3.1  (0.011)  │  0.37×   │  3.07×   │ ✗ │
@@ -176,9 +204,9 @@ Example for `matmul/sm90` with `ref-cublas`, `gen-cutedsl`, `gen-cuda`:
 
 **How to build the table:**
 - **Discover columns** from `result["impls_requested"]` — each impl slug is a column
-- **First ref-* impl** is the baseline for speedup ratios
-- **TFLOPS + (ms)** for each impl: extract from `reference`, `generated`, `cudnn` fields in trial results
-- **Speedup columns**: each non-baseline impl vs the first ref-* baseline
+- **First ref-* slug** is the baseline for speedup ratios
+- **TFLOPS + (ms)** for each impl slug: extract from per-impl trial results
+- **Speedup columns**: each non-baseline slug vs the first ref-* baseline
 - **Correctness**: `✓` or `✗` per config row, from `correctness.passed`
 - **Header row 1**: GPU model, host name
 - **Header row 2**: GPU index, torch version

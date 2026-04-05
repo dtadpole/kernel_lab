@@ -1,0 +1,12 @@
+# Exec configuration (compile, trial, profile)
+action: ???         # required: compile, trial, profile
+kernel: ???         # required: matmul, fa4, vecadd
+arch: ???           # required: sm90, sm120 (or "auto" for auto-detect)
+impl: ???           # required: impl slug (e.g. gen-cuda, ref-cublas)
+gpu: null           # GPU index (sets CUDA_VISIBLE_DEVICES; null = use env)
+turn: 1             # turn number (increment for new source code)
+run_tag: ???        # required: workspace isolation tag (must be same across compile→trial→profile)
+configs: all        # "all" or list of config slugs for trial/profile
+side: generated     # for profile only: generated, reference, or cudnn
+timeout: 300        # per-action timeout in seconds
+data_root: null     # source data root (null = use project data/)

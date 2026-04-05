@@ -2,19 +2,30 @@
 name: exec
 description: Compile, trial, and profile CUDA kernels
 user-invocable: true
-argument-hint: <action> [--gpu N] [options]
+argument-hint: <action> [--kernel K] [--impl <slug>] [--gpu N] [options]
 ---
 
 # CUDA Kernel Execution
 
-Compile, trial, and profile CUDA kernels by calling `cuda_exec` handlers directly via Python CLI.
+Compile, trial, and profile CUDA kernels via Hydra CLI.
 
 ## GPU Selection
 
-When the user specifies `--gpu N`, set `CUDA_VISIBLE_DEVICES=N` on the command.
+When the user specifies `--gpu N`, pass `exec.gpu=N` on the command.
 If no GPU is specified, check `CLAUDE.md` or `AGENTS.md` for the assigned GPU indices for the current host.
 
 **GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
+
+## Implementation Slugs
+
+Implementations are discovered dynamically. A **slug** has the format `{source}-{name}`:
+
+| Source | Directory | Example |
+|--------|-----------|---------|
+| `ref` | `data/ref/{kernel}/` | `ref-cublas` |
+| `gen` | `data/gen/{arch}/{kernel}/` | `gen-cuda` |
+
+Use `list_impls(kernel, arch)` from `cuda_exec/impls.py` to discover all available slugs.
 
 ## Actions
 
@@ -27,38 +38,24 @@ cd /home/zhenc/kernel_lab
 ### Compile
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.tasks import compile_endpoint
-from cuda_exec.models import CompileRequest
-import json
-
-req = CompileRequest(
-    metadata={'run_tag': 'optim_001', 'version': 'v1', 'direction_id': 7, 'direction_slug': 'vector-add', 'turn': 1},
-    reference_files={'cutedsl.py': open('data/fixtures/sm90/vecadd/cutedsl.py').read()},
-    generated_files={'generated.cu': open('data/generated/sm90/vecadd/generated.cu').read()},
-)
-resp = compile_endpoint(req)
-print(json.dumps(resp.model_dump(), indent=2, default=str))
-"
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=optim_001
 ```
 
 Returns: `all_ok`, `artifacts` (ptx, sass, resource_usage), `tool_outputs` (nvcc/ptxas stderr).
 
+The compile step automatically:
+- Resolves the impl slug to source files via `resolve_impl()`
+- Finds the primary `ref-*` impl as the reference baseline
+- Includes `.py` gen impls as additional reference files
+
 ### Trial
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.tasks import trial_endpoint
-from cuda_exec.models import TrialRequest
-import json
+# Trial ALL configs (same run_tag as compile)
+.venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=optim_001
 
-req = TrialRequest(
-    metadata={'run_tag': 'optim_001', 'version': 'v1', 'direction_id': 7, 'direction_slug': 'vector-add', 'turn': 1},
-    configs=json.load(open('data/fixtures/sm90/vecadd/configs.json')),
-)
-resp = trial_endpoint(req)
-print(json.dumps(resp.model_dump(), indent=2, default=str))
-"
+# Trial specific configs
+.venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=optim_001 'exec.configs=[mat-256x256,mat-8192x8192]'
 ```
 
 Returns: `all_ok`, `configs` with per-config `status`, `correctness`, `performance`.
@@ -66,53 +63,52 @@ Returns: `all_ok`, `configs` with per-config `status`, `correctness`, `performan
 ### Profile
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 .venv/bin/python -c "
-from cuda_exec.tasks import profile_endpoint
-from cuda_exec.models import ProfileRequest
-import json
+# Profile the generated side (same run_tag as compile)
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=optim_001 'exec.configs=[mat-8192x8192]' exec.side=generated
 
-req = ProfileRequest(
-    metadata={'run_tag': 'optim_001', 'version': 'v1', 'direction_id': 7, 'direction_slug': 'vector-add', 'turn': 1},
-    configs={'vec1d-n65536': {'shape': [65536], 'rank': 1, 'input_size': 65536, 'shape_kind': '1d'}},
-    side='generated',
-)
-resp = profile_endpoint(req)
-print(json.dumps(resp.model_dump(), indent=2, default=str))
-"
+# Profile the reference side
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=optim_001 'exec.configs=[mat-8192x8192]' exec.side=reference
 ```
 
 Returns: `all_ok`, `configs` with per-config `status`, `summary` (NCU metrics).
 
+### Turn management
+
+```bash
+# Turn 1: first compile
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.run_tag=optim_001 exec.turn=1
+
+# After modifying source code, increment turn
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.run_tag=optim_001 exec.turn=2
+```
+
 ## Workflow
 
-1. **Compile** once per turn with reference + generated source files
+1. **Compile** once per turn — resolves impl slug, loads ref + gen files, compiles
 2. **Trial** against selected configs — check correctness and latency
 3. **Profile** selectively (1-2 configs) — NCU hardware metrics
 
 ## Rules
 
 - Compile exactly once per turn before trial or profile
-- New source code requires a new turn (increment `metadata.turn`)
+- New source code requires a new turn (increment `exec.turn`)
 - Old turns are immutable — never recompile on a previous turn number
 - One compile fans out to many trial/profile calls with different configs
 
-## Metadata
+## Hydra Config
 
-Every action requires a `metadata` dict:
-```json
-{
-  "run_tag": "optim_001",
-  "version": "v1",
-  "direction_id": 7,
-  "direction_slug": "vector-add",
-  "turn": 1
-}
-```
+All settings in `conf/exec/default.yaml`:
 
-## Available Fixtures
-
-| Fixture | Description | Path |
-|---------|-------------|------|
-| `vecadd` | BF16 vector addition | `data/fixtures/{arch}/vecadd/` |
-| `matmul` | Matrix multiplication | `data/fixtures/{arch}/matmul/` |
-| `fa4` | Flash Attention v4 | `data/fixtures/{arch}/fa4/` |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `action` | required | `compile`, `trial`, or `profile` |
+| `kernel` | required | Kernel name (matmul, fa4, vecadd) |
+| `arch` | required | GPU architecture (sm90, sm120) |
+| `impl` | required | Impl slug (e.g. `gen-cuda`, `ref-cublas`) |
+| `gpu` | `null` | GPU index (sets CUDA_VISIBLE_DEVICES; null = use env) |
+| `turn` | `1` | Turn number (increment for new source code) |
+| `run_tag` | required | Workspace isolation tag (must be same across compile→trial→profile) |
+| `configs` | `all` | "all" or list of config slugs |
+| `side` | `generated` | Profile only: `generated`, `reference`, or `cudnn` |
+| `timeout` | `300` | Per-action timeout in seconds |
+| `data_root` | `null` | Source data root (null = project data/) |

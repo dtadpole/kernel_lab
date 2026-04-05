@@ -1,6 +1,7 @@
 defaults:
   - agent: default
   - bench: default
+  - exec: default
   - mcp: default
   - service: default
   - doc_retrieval: default

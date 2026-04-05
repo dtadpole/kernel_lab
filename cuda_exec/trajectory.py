@@ -143,7 +143,7 @@ def _extract_compile_info(compile_result: dict) -> dict:
 def _copy_compile_text(compile_result: dict, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     tool_outputs = compile_result.get("tool_outputs", {})
-    for key in ("ptxas", "resource_usage"):
+    for key in ("nvcc_ptx", "ptxas", "resource_usage", "nvdisasm"):
         entry = tool_outputs.get(key, {})
         if not isinstance(entry, dict):
             continue

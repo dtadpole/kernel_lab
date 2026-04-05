@@ -9,14 +9,14 @@ Use any available python3 to run it — system, fbcode, or uv standalone.
 The script itself installs the standalone Python and creates .venv from it.
 
 Usage:
-    python3 scripts/env.py status
-    python3 scripts/env.py test
-    python3 scripts/env.py install kit=venv
-    python3 scripts/env.py install kit=venv python_version=3.12
-    python3 scripts/env.py nuke kit=venv
-    python3 scripts/env.py reinstall kit=venv
-    python3 scripts/env.py install kit=cuda-toolkit
-    python3 scripts/env.py install kit=cuda-toolkit version=13.0
+    python3 plugins/ik/scripts/env.py status
+    python3 plugins/ik/scripts/env.py test
+    python3 plugins/ik/scripts/env.py install kit=venv
+    python3 plugins/ik/scripts/env.py install kit=venv python_version=3.12
+    python3 plugins/ik/scripts/env.py nuke kit=venv
+    python3 plugins/ik/scripts/env.py reinstall kit=venv
+    python3 plugins/ik/scripts/env.py install kit=cuda-toolkit
+    python3 plugins/ik/scripts/env.py install kit=cuda-toolkit version=13.0
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = SCRIPT_DIR.parents[2]  # plugins/ik/scripts/ → repo root
 VENV_DIR = REPO_ROOT / ".venv"
 HOSTS_YAML = REPO_ROOT / "conf" / "hosts" / "default.yaml"
 REQUIREMENTS = REPO_ROOT / "plugins" / "ik" / "requirements.txt"
@@ -398,14 +398,14 @@ def cmd_install_venv(host_cfg: dict, python_version: str = "3.12", force: bool =
     print()
     print("=== Install complete ===")
     print(f"Venv: {VENV_DIR}")
-    print(f"Run: python3 scripts/env.py test")
+    print(f"Run: python3 plugins/ik/scripts/env.py test")
     return 0
 
 
 def cmd_test(host_cfg: dict) -> int:
     """Verify environment with GPU tests."""
     if not VENV_DIR.exists():
-        print("ERROR: .venv not found. Run: python3 scripts/env.py install kit=venv", file=sys.stderr)
+        print("ERROR: .venv not found. Run: python3 plugins/ik/scripts/env.py install kit=venv", file=sys.stderr)
         return 1
 
     python = str(VENV_DIR / "bin" / "python")
@@ -503,7 +503,7 @@ def cmd_install_cuda_toolkit(host_cfg: dict, version: str = "auto") -> int:
 def cmd_install_cuda_driver(host_cfg: dict, version: str = "auto") -> int:
     """Install CUDA driver."""
     print("ERROR: cuda-driver install requires root and is not automated.", file=sys.stderr)
-    print("Use: python3 scripts/env.py status  to check current driver.", file=sys.stderr)
+    print("Use: python3 plugins/ik/scripts/env.py status  to check current driver.", file=sys.stderr)
     return 1
 
 

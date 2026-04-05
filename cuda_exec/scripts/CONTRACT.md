@@ -38,6 +38,53 @@ eval_support.generate_inputs(config, device)
 4. **`get_inputs(config)` in reference files is DEPRECATED** — it exists for standalone
    testing but is NOT used during trial. The harness always uses `generate_inputs()`.
 
+## Input PRNG — Normalization
+
+The C harness and Python trial script must use **identical PRNG** to generate inputs.
+This was a real bug: mismatched formulas caused all correctness checks to fail.
+
+### The formula (single source of truth)
+
+```c
+// eval_harness.cu — fill_random_bf16
+unsigned int h = (unsigned int)idx ^ seed;
+h = (h ^ 61u) ^ (h >> 16);
+h += (h << 3);
+h ^= (h >> 4);
+h *= 0x27d4eb2du;
+h ^= (h >> 15);
+float val = (float)(h & 0xFFFFu) / 65536.0f - 0.5f;
+buf[idx] = __float2bfloat16(val);
+```
+
+```python
+# trial.py — _harness_fill_random_bf16
+f = (h & 0xFFFF).astype(np.float32) / 65536.0 - 0.5
+```
+
+### Key details
+
+- **Range: [-0.5, 0.5)** — kept small to avoid FP overflow in matmul accumulation
+- **Hash: Wang's 32-bit integer hash** — `idx ^ seed` then 5-step mixing
+- **Normalization: `(h & 0xFFFF) / 65536.0 - 0.5`** — NOT `2*(h & 0xFFFF)/65535 - 1`
+- **Seeds: 1, 2, 3, ...** per input tensor (simple, not 0xCAFE or 0xC0DE)
+
+### Correctness pass
+
+The harness runs the kernel once more after all timed trials with deterministic inputs:
+- Allocates **fresh** buffers (new pointers)
+- Fills with `fill_random_bf16(seed = j + 1)` for input tensor `j`
+- The Python `_verify_correctness` reproduces this exact PRNG
+- Both sides get identical inputs → outputs are comparable
+
+### If you change the PRNG
+
+Change it in **both** places simultaneously:
+1. `eval_harness.cu` → `fill_random_bf16()`
+2. `trial.py` → `_harness_fill_random_bf16()`
+
+Verify with a small n (e.g., 4) by printing values from both sides.
+
 ## Correctness Comparison
 
 The trial script (`trial.py`) compares outputs element-by-element:

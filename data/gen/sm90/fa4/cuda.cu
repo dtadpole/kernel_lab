@@ -435,10 +435,12 @@ void flash_attention_2wg(
         named_barrier_arrive(2, 256);  /* arrive on bar 2 (WG1's barrier) */
     }
 
+    /* ---- Prologue: wait for first K tile ---- */
+    mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
+
     /* ---- Main KV loop ---- */
     for (int kv_id = 0; kv_id < max_kv_iter; kv_id++) {
-        /* Wait for K[kv_id] */
-        mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
+        /* K is already loaded (prologue or previous iteration's PV overlap) */
 
         /* Scheduler: wait for other WG to signal us (except first iter for WG1) */
         named_barrier_sync(my_bar, 256);
@@ -469,10 +471,15 @@ void flash_attention_2wg(
         /* Signal other WG (wake them up to start their QK) */
         named_barrier_arrive(other_bar, 256);
 
+        /* Overlap: wait for V while QK tensor cores are still executing.
+         * V is in separate SMEM from K, so no conflict with QK reads. */
+        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
+
+        /* Now wait for QK to complete */
         wgmma_wait_group<0>();
         wgmma_fence();
 
-        /* Release K buffer */
+        /* Release K buffer (safe: QK WGMMA done, K SMEM no longer accessed) */
         if (lane_id == 0 && mywarp == 0) {
             mbarrier_arrive(&K_empty[k_stage]);
         }
@@ -542,9 +549,7 @@ void flash_attention_2wg(
             }
         }
 
-        /* == Wait for V, PV GEMM == */
-        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
-
+        /* == PV GEMM (V already loaded during QK overlap) == */
         const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
         const uint32_t cur_V_hi = (v_stage == 0) ? V0_hi : V1_hi;
         const uint64_t dv_lo = make_wgmma_desc(cur_V_lo, STRIDE);
@@ -563,6 +568,13 @@ void flash_attention_2wg(
             wgmma_m64n64k16_f32_bf16_RS(O_hi_acc, a0, a1, a2, a3, dvh, 1);
         }
         wgmma_commit_group();
+
+        /* Overlap: prefetch next K while PV tensor cores are still executing.
+         * K[n+1] uses the other double-buffer slot, no conflict with V reads. */
+        if (kv_id + 1 < max_kv_iter) {
+            mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
+        }
+
         wgmma_wait_group<0>();
 
         /* Release V buffer */

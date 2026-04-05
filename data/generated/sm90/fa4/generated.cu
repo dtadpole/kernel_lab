@@ -274,14 +274,13 @@ uint32_t pack_bf16(float a, float b) {
  *  Kernel
  * ====================================================================== */
 
-template<int BLOCK_Q, int BLOCK_KV, int DIM>
+template<int BLOCK_Q, int BLOCK_KV, int DIM, bool IS_CAUSAL>
 __launch_bounds__(384, 1)
 __global__
 void flash_attention_2wg(
     nv_bfloat16 *O_unused,
     int B, int S, int H,
-    int len_q, int len_kv,
-    int is_causal,
+    int len_q, int len_kv, /* IS_CAUSAL is template param */
     const __grid_constant__ CUtensorMap tma_Q,
     const __grid_constant__ CUtensorMap tma_K,
     const __grid_constant__ CUtensorMap tma_V,
@@ -334,7 +333,7 @@ void flash_attention_2wg(
     const int coord_head = head_id * DIM;
     const int batch_seq  = batch_id * S;
 
-    const int max_kv_iter = is_causal
+    const int max_kv_iter = IS_CAUSAL
         ? min(cdiv(len_kv, BLOCK_KV), cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
         : cdiv(len_kv, BLOCK_KV);
 
@@ -478,7 +477,7 @@ void flash_attention_2wg(
                 rv[p4*2+0] = S_acc[(p4<<2)|(half<<1)|0];
                 rv[p4*2+1] = S_acc[(p4<<2)|(half<<1)|1];
             }
-            if (is_causal) {
+            if (IS_CAUSAL) {
                 const int row = mywarp * 16 + half * 8 + (lane_id / 4);
                 const int q_pos = q_block_id * BLOCK_Q + cwg * 64 + row;
                 #pragma unroll
@@ -585,7 +584,7 @@ void flash_attention_2wg(
         if (k_stage == 0) k_full_phase ^= 1;
 
         /* Softmax (overlaps PV tensor core execution) */
-        const int needs_mask = is_causal &&
+        const int needs_mask = IS_CAUSAL &&
             ((kv_id + 1) * BLOCK_KV > q_block_id * BLOCK_Q + cwg * 64);
         float o_rescale[2];
         #pragma unroll
@@ -872,16 +871,27 @@ extern "C" int kernel_run(
         CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     if (res != CUDA_SUCCESS) return -6;
 
-    auto kernel = flash_attention_2wg<BLOCK_Q, BLOCK_KV, DIM_CONST>;
-    static bool smem_configured = false;
-    if (!smem_configured) {
-        cudaFuncSetAttribute(kernel,
+    /* Two template specializations: causal and non-causal.
+     * Eliminates all runtime is_causal branches — compiler optimizes
+     * away dead code for each specialization. */
+    auto kernel_c  = flash_attention_2wg<BLOCK_Q, BLOCK_KV, DIM_CONST, true>;
+    auto kernel_nc = flash_attention_2wg<BLOCK_Q, BLOCK_KV, DIM_CONST, false>;
+    auto kernel = causal ? kernel_c : kernel_nc;
+
+    static bool smem_c = false, smem_nc = false;
+    if (causal && !smem_c) {
+        cudaFuncSetAttribute(kernel_c,
             cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-        smem_configured = true;
+        smem_c = true;
+    }
+    if (!causal && !smem_nc) {
+        cudaFuncSetAttribute(kernel_nc,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+        smem_nc = true;
     }
 
     kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
-        nullptr, B, S, H, S, S, causal ? 1 : 0,
+        nullptr, B, S, H, S, S,
         tma_Q, tma_K, tma_V, tma_O);
 
     return 0;

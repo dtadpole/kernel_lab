@@ -1,12 +1,16 @@
-# Local development environment dependencies.
+# ik:env local venv dependencies.
 #
-# This is the single source of truth for the project .venv.
-# plugins/devenv/cli.py reads this file during `setup`.
+# Single source of truth for the project .venv.
+# scripts/env.py reads this file during `install kit=venv`.
 #
-# Note: torch is installed separately from a CUDA-specific index
-# (e.g. cu128, cu130). It is NOT listed here.
+# Note: torch is installed SEPARATELY from a CUDA-specific index
+# (e.g. cu128, cu130) — it is NOT listed here. The index is
+# determined by conf/hosts/default.yaml env.torch_cuda.
+#
+# Pinned to tested versions. Update pins after verifying with:
+#   python3 scripts/env.py test
 
-# Core service
+# --- Core service ---
 fastapi>=0.116,<1.0
 uvicorn[standard]>=0.35,<1.0
 pydantic>=2.0,<3.0
@@ -14,20 +18,27 @@ httpx>=0.28,<1.0
 psutil>=7.0,<8.0
 pyyaml>=6.0,<7.0
 
-# CUDA / GPU
-nvidia-cutlass-dsl>=4.0
-numpy>=2.0
+# --- CUDA / GPU ---
+nvidia-cutlass-dsl>=4.4
 cuda-python>=13.0
+numpy>=2.0,<3.0
 
-# FA4 CuTe DSL — pure Python JIT, no C++ compilation needed
+# --- FA4 CuTe DSL (pure Python JIT) ---
 flash-attn-4>=4.0.0b5
+
+# --- CuTe DSL transitive deps (explicit pins) ---
+# These are pulled by flash-attn-4 and nvidia-cutlass-dsl.
+# Pin them to avoid version conflicts.
+quack-kernels>=0.3.3
+apache-tvm-ffi>=0.1.5,<0.2
+torch-c-dlpack-ext>=0.1.5
 einops>=0.8
 
-# Build tools
+# --- Build tools ---
 ninja>=1.0
 packaging>=24.0
 wheel>=0.44
 
-# Configuration (for Hydra conf loading)
+# --- Configuration ---
 hydra-core>=1.3,<2.0
 omegaconf>=2.3,<3.0

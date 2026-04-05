@@ -123,13 +123,23 @@ def load_generated():
     gen_cu = REPO / "data/generated/sm90/fa4/generated.cu"
     if not gen_so.exists() or gen_so.stat().st_mtime < gen_cu.stat().st_mtime:
         print("Compiling generated.cu ...", flush=True)
-        subprocess.run([
-            "/usr/local/cuda-12.9/bin/nvcc",
-            "-gencode", "arch=compute_90a,code=sm_90a",
-            "-O2", "-Xcompiler", "-fPIC",
-            "--shared", "-o", str(gen_so), str(gen_cu),
-            "-I/usr/local/cuda-12.9/include", "-lcuda",
-        ], check=True)
+        compile_sh = REPO / "scripts" / "compile_fa4.sh"
+        if compile_sh.exists():
+            subprocess.run(["bash", str(compile_sh), str(gen_cu), str(gen_so)], check=True)
+        else:
+            # Fallback: find best available CUDA toolkit
+            cuda_home = os.environ.get("CUDA_HOME", "")
+            for try_path in [cuda_home, "/usr/local/cuda-13.0", "/usr/local/cuda-12.9"]:
+                if try_path and Path(f"{try_path}/include/cuda_runtime.h").exists():
+                    cuda_home = try_path
+                    break
+            subprocess.run([
+                f"{cuda_home}/bin/nvcc",
+                "-gencode", "arch=compute_90a,code=sm_90a",
+                "-O2", "-Xcompiler", "-fPIC",
+                "--shared", "-o", str(gen_so), str(gen_cu),
+                f"-I{cuda_home}/include", "-lcuda",
+            ], check=True)
         print("Compiled.", flush=True)
 
     lib = ctypes.CDLL(str(gen_so))

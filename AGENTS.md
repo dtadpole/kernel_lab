@@ -456,8 +456,6 @@ data/
 │           ├── cutedsl.py
 │           └── cuda.cu
 │
-├── fixtures/           # [DEPRECATED] old layout — will be removed
-├── generated/          # [DEPRECATED] old layout — will be removed
 └── nvidia-docs/        # Cached NVIDIA documentation
 
 .worktrees/             # Git worktrees for isolated development (git-ignored)
@@ -468,7 +466,7 @@ data/
 - `gen/` = arch-specific code we wrote. Contains arch instructions (WGMMA, mma.sync).
 - `configs/` = benchmark configs. Shape/size data, no arch dependency.
 - Harness auto-detects by extension: `.py` → Python harness, `.cu` → C harness.
-- `data/fixtures/` and `data/generated/` are deprecated — use `ref/`/`gen/`/`configs/`.
+- Old `data/fixtures/` and `data/generated/` directories have been removed.
 
 ### 12. Benchmarking rules
 

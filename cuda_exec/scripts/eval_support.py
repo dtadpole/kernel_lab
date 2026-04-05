@@ -285,32 +285,11 @@ def generate_inputs(
     from this function. Fixtures define only Model, not get_inputs().
     """
     shape = [int(v) for v in config["shape"]]
-    family = config.get("family", "")
+    num_inputs = int(config.get("harness_num_inputs", config.get("num_inputs", 2)))
 
-    if "matrix-multiplication" in family or len(shape) == 2:
-        M = shape[0]
-        K = shape[1] if len(shape) > 1 else shape[0]
-        N = shape[1] if len(shape) > 1 else shape[0]
-        A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
-        B = torch.randn(K, N, dtype=torch.bfloat16, device=device)
-        return [A, B]
-
-    if "fa4" in family or "mha" in family or len(shape) == 4:
-        batch, seq_len, num_heads, head_dim = shape
-        num_kv_heads = int(config.get("num_kv_heads", num_heads))
-        causal = bool(config.get("causal", False))
-        Q = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
-        K = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device)
-        V = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device)
-        return [Q, K, V, causal]
-
-    if len(shape) == 1:
-        # Vector ops (e.g., vecadd)
-        A = torch.randn(shape[0], dtype=torch.bfloat16, device=device)
-        B = torch.randn(shape[0], dtype=torch.bfloat16, device=device)
-        return [A, B]
-
-    raise ValueError(f"Cannot generate inputs for config: shape={shape}, family={family}")
+    # Generic: create num_inputs tensors, each with the given shape.
+    # shape product should equal input_size (validated but not enforced here).
+    return [torch.randn(shape, dtype=torch.bfloat16, device=device) for _ in range(num_inputs)]
 
 
 # ---------------------------------------------------------------------------

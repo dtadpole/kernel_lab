@@ -112,6 +112,26 @@ def _bf16_to_float(bf16_uint16: int) -> float:
 # Correctness verification (aligned with kbEvalCli verify_correctness)
 # ---------------------------------------------------------------------------
 
+def _harness_fill_random_bf16(count: int, seed: int) -> torch.Tensor:
+    """Reproduce eval_harness.cu fill_random_bf16 PRNG in Python.
+
+    Wang's 32-bit integer hash, matching the C code exactly:
+        h = idx ^ seed; h = (h^61)^(h>>16); h += h<<3;
+        h ^= h>>4; h *= 0x27d4eb2d; h ^= h>>15;
+        f = -1 + 2*(h&0xFFFF)/65535; buf[i] = __float2bfloat16(f);
+    """
+    import numpy as np
+    idx = np.arange(count, dtype=np.uint32)
+    h = idx ^ np.uint32(seed)
+    h = (h ^ np.uint32(61)) ^ (h >> np.uint32(16))
+    h = (h + (h << np.uint32(3))) & np.uint32(0xFFFFFFFF)
+    h = h ^ (h >> np.uint32(4))
+    h = (h * np.uint32(0x27d4eb2d)) & np.uint32(0xFFFFFFFF)
+    h = h ^ (h >> np.uint32(15))
+    f = -1.0 + 2.0 * (h & np.uint32(0xFFFF)).astype(np.float32) / 65535.0
+    return torch.from_numpy(f).to(torch.bfloat16)
+
+
 def _verify_correctness(
     module: Any,
     config: dict[str, Any],
@@ -137,10 +157,11 @@ def _verify_correctness(
         gen_output = gen_output_section.get("result", [])
         gen_values = flatten_numeric(gen_output) if gen_output else []
 
-    torch.manual_seed(seed)
-    trial_seeds = [
-        torch.randint(0, 2**32 - 1, (1,)).item() for _ in range(num_trials)
-    ]
+    # The harness correctness pass uses fill_random_bf16 with seed 0xC0DE0000+j.
+    # Reproduce this PRNG exactly in Python so the reference model gets identical inputs.
+    input_size = int(config.get("input_size", 0))
+    num_inputs = len(generate_inputs(config, device))  # determine input count
+    shape = [int(v) for v in config.get("shape", [input_size])]
 
     passed_trials = 0
     worst_max_diff = 0.0
@@ -148,48 +169,46 @@ def _verify_correctness(
     output_shape_str = ""
 
     with torch.no_grad(), torch.cuda.device(device):
-        for trial_seed in trial_seeds:
-            set_seed(trial_seed)
-            init_inputs = list(get_init_inputs()) if get_init_inputs else []
-            init_inputs = [
-                x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-                for x in init_inputs
-            ]
+        init_inputs = list(get_init_inputs()) if get_init_inputs else []
+        init_inputs = [
+            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
+            for x in init_inputs
+        ]
+        model = model_cls(*init_inputs)
+        model = model.cuda(device=device)
 
-            set_seed(trial_seed)
-            model = model_cls(*init_inputs)
-            model = model.cuda(device=device)
+        # Reproduce harness fill_random_bf16 PRNG for each input tensor
+        harness_inputs = []
+        for j in range(num_inputs):
+            correctness_seed = 0xC0DE0000 + j
+            t = _harness_fill_random_bf16(input_size, correctness_seed)
+            harness_inputs.append(t.to(device).reshape(shape))
 
-            # Harness generates inputs — not the fixture
-            set_seed(trial_seed)
-            inputs = generate_inputs(config, device)
+        ref_output = model(*harness_inputs)
+        torch.cuda.synchronize(device=device)
 
-            ref_output = model(*inputs)
-            torch.cuda.synchronize(device=device)
+        ref_json = tensor_to_jsonable(ref_output)
+        ref_shape = infer_shape(ref_json)
+        output_shape_str = "x".join(str(d) for d in ref_shape) if ref_shape else "scalar"
 
-            ref_json = tensor_to_jsonable(ref_output)
-            ref_shape = infer_shape(ref_json)
-            output_shape_str = "x".join(str(d) for d in ref_shape) if ref_shape else "scalar"
-
-            ref_values = flatten_numeric(ref_json)
-            if len(ref_values) != len(gen_values):
-                worst_max_diff = float("inf")
-                continue
-
+        ref_values = flatten_numeric(ref_json)
+        if len(ref_values) != len(gen_values):
+            worst_max_diff = float("inf")
+        else:
             passed, max_diff, avg_diff = allclose_check(ref_values, gen_values)
             if passed:
-                passed_trials += 1
+                passed_trials = 1
             worst_max_diff = max(worst_max_diff, max_diff)
             worst_avg_diff = max(worst_avg_diff, avg_diff)
 
-    all_passed = passed_trials == num_trials
+    all_passed = passed_trials == 1
     return {
         "passed": all_passed,
         "output_shape": output_shape_str,
         "max_abs_error": worst_max_diff,
         "mean_abs_error": worst_avg_diff,
-        "trials": f"{passed_trials}/{num_trials}",
-        "total_trials": num_trials,
+        "trials": f"{passed_trials}/1",
+        "total_trials": 1,
         "passed_trials": passed_trials,
     }
 

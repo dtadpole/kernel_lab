@@ -338,15 +338,16 @@ int main() {
         cudaEventDestroy(end_ev);
     }
 
-    /* Correctness pass: allocate fresh buffers with original deterministic
-     * (arange) data so the output matches what evaluate.py expects. */
-    for (int j = 0; j < num_inputs; j++)
-        cudaFree(d_inputs[j]);
+    /* Correctness pass: fill with deterministic random data using a fixed
+     * seed (0xC0DE0000 + j). The Python trial script reproduces this exact
+     * PRNG to generate identical reference inputs for comparison.
+     * Using random instead of arange avoids BF16 overflow for large sizes. */
     for (int j = 0; j < num_inputs; j++) {
-        cudaMalloc(&d_inputs[j], elem_bytes);
-        cudaMemcpy(d_inputs[j], h_inputs[j].data(), elem_bytes,
-                   cudaMemcpyHostToDevice);
+        unsigned int correctness_seed = 0xC0DE0000u + (unsigned int)j;
+        fill_random_bf16<<<rand_grid, rand_block, 0, stream>>>(
+            d_inputs[j], cfg.input_size, correctness_seed);
     }
+    cudaStreamSynchronize(stream);
     {
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,

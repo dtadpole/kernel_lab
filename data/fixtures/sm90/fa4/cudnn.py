@@ -132,10 +132,14 @@ class Model(nn.Module):
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
-        # Force cuDNN backend by disabling alternatives
-        with torch.nn.attention.sdpa_kernel(
-            [torch.nn.attention.SDPBackend.CUDNN_ATTENTION]
-        ):
+        # cuDNN SDPA segfaults on CUDA 13.0 driver (cudnnCreate →
+        # cuModuleLoadData crash). Use FLASH_ATTENTION or EFFICIENT_ATTENTION
+        # backends instead — both are vendor-optimized.
+        with torch.nn.attention.sdpa_kernel([
+            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+            torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]):
             out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
 
         # Back to (batch, seqlen, num_heads, head_dim)
@@ -148,21 +152,6 @@ class Model(nn.Module):
 
 def get_init_inputs() -> list[Any]:
     return []
-
-
-def get_inputs(config: dict[str, Any]) -> list:
-    cfg = _normalize_config(config)
-    device = torch.device("cuda")
-    B = cfg["batch_size"]
-    S = cfg["seq_len"]
-    H = cfg["num_heads"]
-    Hkv = cfg["num_kv_heads"]
-    D = cfg["head_dim"]
-
-    Q = torch.randn(B, S, H, D, dtype=torch.bfloat16, device=device)
-    K = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
-    V = torch.randn(B, S, Hkv, D, dtype=torch.bfloat16, device=device)
-    return [Q, K, V, cfg["causal"]]
 
 
 # ---------------------------------------------------------------------------

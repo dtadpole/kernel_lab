@@ -97,53 +97,107 @@ def formal_benchmark(
 
     results: Dict[str, dict] = {}
 
-    # --- Benchmark each ref-* implementation independently ---
-    for ref in refs:
-        logger.info("[%s] measure_py start (%d configs)", ref["slug"], len(configs))
-        ref_start = time.time()
+    # --- Helper: load and run a .py impl, return per-config performance + output ---
+    def _run_py_impl(impl: dict) -> dict:
+        import torch
+        from cuda_exec.scripts.eval_support import (
+            measure_reference, load_reference_module, set_seed, generate_inputs,
+            DEFAULT_SEED,
+        )
+        device = torch.device("cuda")
+        import tempfile as _tempfile, sys as _sys
+        tmp_dir = Path(_tempfile.mkdtemp(prefix=f"bench_{impl['slug']}_"))
+        for fname, content in impl["files"].items():
+            (tmp_dir / fname).write_text(content, encoding="utf-8")
+        entry_py = tmp_dir / f"{impl['name']}.py"
+        old_path = list(_sys.path)
+        _sys.path.insert(0, str(tmp_dir))
         try:
-            import torch
-            from cuda_exec.scripts.eval_support import measure_reference, load_reference_module
-            device = torch.device("cuda")
-            import tempfile, sys
-            tmp_dir = Path(tempfile.mkdtemp(prefix=f"bench_{ref['slug']}_"))
-            for fname, content in ref["files"].items():
-                (tmp_dir / fname).write_text(content, encoding="utf-8")
-            entry_py = tmp_dir / f"{ref['name']}.py"
-            old_path = list(sys.path)
-            sys.path.insert(0, str(tmp_dir))
-            try:
-                mod = load_reference_module(entry_py)
-                config_results = {}
-                for config_slug, config in configs.items():
-                    try:
-                        result = measure_reference(mod, config, device, num_trials=10)
-                        config_results[config_slug] = {
-                            "status": "ok",
-                            "performance": result["performance"],
-                        }
-                    except Exception as exc:
-                        config_results[config_slug] = {
-                            "status": "error",
-                            "error": str(exc),
-                        }
-            finally:
-                sys.path[:] = old_path
-            results[ref["slug"]] = {
-                "impl": ref["slug"],
-                "compile_ok": None,
-                "trial_ok": True,
-                "compile_result": None,
-                "trial_result": {"all_ok": True, "configs": config_results},
-            }
+            mod = load_reference_module(entry_py)
+            config_results = {}
+            for config_slug, config in configs.items():
+                try:
+                    result = measure_reference(mod, config, device, num_trials=10)
+                    config_results[config_slug] = {
+                        "status": "ok",
+                        "performance": result["performance"],
+                        "output_tensor": result.get("output_tensor"),
+                    }
+                except Exception as exc:
+                    config_results[config_slug] = {
+                        "status": "error",
+                        "error": str(exc),
+                    }
+            return {"ok": True, "configs": config_results}
         except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            _sys.path[:] = old_path
+
+    # --- Helper: compare two output tensors for correctness ---
+    def _check_correctness(ref_tensor, gen_tensor, atol=1e-2, rtol=1e-2) -> dict:
+        import torch
+        if ref_tensor is None or gen_tensor is None:
+            return {"passed": None, "reason": "missing output"}
+        try:
+            ref_f = ref_tensor.float()
+            gen_f = gen_tensor.float()
+            if ref_f.shape != gen_f.shape:
+                return {"passed": False, "reason": f"shape mismatch: {ref_f.shape} vs {gen_f.shape}"}
+            diff = (ref_f - gen_f).abs()
+            max_diff = diff.max().item()
+            mean_diff = diff.mean().item()
+            passed = bool(torch.allclose(ref_f, gen_f, atol=atol, rtol=rtol))
+            return {"passed": passed, "max_abs_error": max_diff, "mean_abs_error": mean_diff}
+        except Exception as exc:
+            return {"passed": False, "reason": str(exc)}
+
+    # --- Benchmark primary ref first (to get golden outputs) ---
+    golden_outputs: Dict[str, Any] = {}  # config_slug → output tensor
+    logger.info("[%s] measure_py start (%d configs) [primary ref]", primary_ref["slug"], len(configs))
+    ref_start = time.time()
+    primary_result = _run_py_impl(primary_ref)
+    if primary_result["ok"]:
+        config_results_clean = {}
+        for cs, cr in primary_result["configs"].items():
+            golden_outputs[cs] = cr.pop("output_tensor", None)
+            config_results_clean[cs] = cr
+        results[primary_ref["slug"]] = {
+            "impl": primary_ref["slug"],
+            "compile_ok": None,
+            "trial_ok": True,
+            "compile_result": None,
+            "trial_result": {"all_ok": True, "configs": config_results_clean},
+        }
+    else:
+        results[primary_ref["slug"]] = {
+            "impl": primary_ref["slug"],
+            "compile_ok": None,
+            "trial_ok": False,
+            "error": primary_result.get("error", ""),
+        }
+    logger.info("[%s] measure_py done (%.1fs)", primary_ref["slug"], time.time() - ref_start)
+
+    # --- Benchmark remaining ref-* impls ---
+    for ref in refs[1:]:
+        logger.info("[%s] measure_py start (%d configs)", ref["slug"], len(configs))
+        r_start = time.time()
+        r = _run_py_impl(ref)
+        if r["ok"]:
+            for cs, cr in r["configs"].items():
+                cr.pop("output_tensor", None)
             results[ref["slug"]] = {
                 "impl": ref["slug"],
-                "compile_ok": None,
-                "trial_ok": False,
-                "error": str(exc),
+                "compile_ok": None, "trial_ok": True,
+                "compile_result": None,
+                "trial_result": {"all_ok": True, "configs": r["configs"]},
             }
-        logger.info("[%s] measure_py done (%.1fs)", ref["slug"], time.time() - ref_start)
+        else:
+            results[ref["slug"]] = {
+                "impl": ref["slug"], "compile_ok": None, "trial_ok": False,
+                "error": r.get("error", ""),
+            }
+        logger.info("[%s] measure_py done (%.1fs)", ref["slug"], time.time() - r_start)
 
     # --- Trial each gen-* implementation ---
     for gen in gens:
@@ -190,54 +244,30 @@ def formal_benchmark(
                 }
                 continue
         else:
-            # .py impl: benchmark independently via measure_reference
+            # .py gen impl: benchmark independently + correctness vs primary ref
             logger.info("[%s] measure_py start (%d configs)", gen["slug"], len(configs))
             py_start = time.time()
-            try:
-                import torch
-                from cuda_exec.scripts.eval_support import measure_reference, load_reference_module
-                device = torch.device("cuda")
-                # Write impl files to a temp dir and load the module
-                import tempfile, sys
-                tmp_dir = Path(tempfile.mkdtemp(prefix=f"bench_{gen['slug']}_"))
-                for fname, content in gen["files"].items():
-                    (tmp_dir / fname).write_text(content, encoding="utf-8")
-                entry_py = tmp_dir / f"{gen['name']}.py"
-                # Add to sys.path for sibling imports
-                old_path = list(sys.path)
-                sys.path.insert(0, str(tmp_dir))
-                try:
-                    mod = load_reference_module(entry_py)
-                    config_results = {}
-                    for config_slug, config in configs.items():
-                        try:
-                            result = measure_reference(mod, config, device, num_trials=10)
-                            config_results[config_slug] = {
-                                "status": "ok",
-                                "performance": result["performance"],
-                            }
-                        except Exception as exc:
-                            config_results[config_slug] = {
-                                "status": "error",
-                                "error": str(exc),
-                            }
-                finally:
-                    sys.path[:] = old_path
+            r = _run_py_impl(gen)
+            if r["ok"]:
+                config_results_clean = {}
+                for cs, cr in r["configs"].items():
+                    gen_tensor = cr.pop("output_tensor", None)
+                    golden = golden_outputs.get(cs)
+                    cr["correctness"] = _check_correctness(golden, gen_tensor)
+                    config_results_clean[cs] = cr
                 results[gen["slug"]] = {
                     "impl": gen["slug"],
                     "compile_ok": None,
                     "trial_ok": True,
                     "compile_result": None,
-                    "trial_result": {"all_ok": True, "configs": config_results},
+                    "trial_result": {"all_ok": True, "configs": config_results_clean},
                 }
-            except Exception as exc:
+            else:
                 results[gen["slug"]] = {
                     "impl": gen["slug"],
                     "compile_ok": None,
                     "trial_ok": False,
-                    "compile_result": None,
-                    "trial_result": None,
-                    "error": str(exc),
+                    "error": r.get("error", ""),
                 }
             logger.info("[%s] measure_py done (%.1fs)", gen["slug"], time.time() - py_start)
             continue

@@ -397,6 +397,7 @@ def measure_reference(
 
     return {
         "output": [],  # binary file, not JSON (same as eval_harness.cu)
+        "output_tensor": last_output,  # raw tensor for correctness comparison
         "performance": {
             "metadata": {
                 "hardware": hardware,

@@ -1,4 +1,4 @@
-# FA4 Intra-WG QK/PV Overlap — 503–657 TFLOPS (+10%)
+# FA4 Intra-WG QK/PV Overlap + TMA S2G Store — 511–648 TFLOPS (+10%)
 
 ## Hardware
 
@@ -80,11 +80,29 @@ Key implementation details:
 
 All 6 configs: bit-identical output vs baseline (max_abs_error = 0.000000).
 
+## TMA S2G O Store (added on top of overlap)
+
+Replaced scalar packed BF16x2 stores with register→SMEM + TMA S2G:
+- Register → Q SMEM with SWIZZLE_128B address computation
+- 2-phase named barrier (256 SMEM writers + 32 TMA warp)
+- Warp 4 does TMA `cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group`
+
+| Config | Overlap only | + TMA S2G | Delta |
+|--------|-------------|-----------|-------|
+| causal-b8-s4096 | 503.3 | **510.9** | +1.5% |
+| causal-b4-s8192 | 555.5 | **559.4** | +0.7% |
+| causal-b2-s16384 | 584.7 | **585.1** | +0.1% |
+| nc-b8-s4096 | 612.0 | **615.3** | +0.5% |
+| nc-b4-s8192 | 643.7 | **648.2** | +0.7% |
+| nc-b2-s16384 | 656.6 | 637.4 | -2.9% |
+
+TMA S2G helps small configs where O store is a larger fraction of total time.
+Slight regression on nc-b2-s16384 due to the 2-phase barrier overhead.
+
 ## Remaining Gap Analysis
 
-The 7–9% gap on smaller configs (b8-s4096, b4-s8192) is likely due to:
-1. **O store overhead**: CuTe DSL uses TMA S2G for O store (async bulk copy),
-   we use packed BF16x2 scalar stores. With fewer KV iterations, the O store
-   is a larger fraction of total time.
-2. **GPU-to-GPU variation**: CuTe DSL reference was measured on GPU 7, our
+The 7–8% gap on smaller configs (b8-s4096, b4-s8192) is likely due to:
+1. **GPU-to-GPU variation**: CuTe DSL reference was measured on GPU 7, our
    numbers on GPU 4 (same host).
+2. **CuTe DSL's smem_copy_atom**: More efficient register → SMEM mapping
+   compared to our manual swizzle address computation.

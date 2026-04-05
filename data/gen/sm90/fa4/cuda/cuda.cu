@@ -107,7 +107,7 @@ void named_barrier_sync(int bar_id, int num_threads) {
     asm volatile("bar.sync %0, %1;" :: "r"(bar_id), "r"(num_threads));
 }
 
-/* --- TMA load ---------------------------------------------------------- */
+/* --- TMA load (G2S) --------------------------------------------------- */
 
 __device__ __forceinline__
 void tma_load_2d(void* smem_dst, const void* tma_desc,
@@ -121,6 +121,33 @@ void tma_load_2d(void* smem_dst, const void* tma_desc,
         :: "r"(smem_addr), "l"(tma_desc),
            "r"(coord0), "r"(coord1), "r"(mbar_addr)
         : "memory");
+}
+
+/* --- TMA store (S2G) -------------------------------------------------- */
+
+__device__ __forceinline__
+void tma_store_2d(const void* tma_desc, uint32_t smem_addr,
+                  int coord0, int coord1) {
+    asm volatile(
+        "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"
+        " [%0, {%1, %2}], [%3];\n"
+        :: "l"(tma_desc), "r"(coord0), "r"(coord1), "r"(smem_addr)
+        : "memory");
+}
+
+__device__ __forceinline__
+void cp_async_bulk_commit_group() {
+    asm volatile("cp.async.bulk.commit_group;\n" ::: "memory");
+}
+
+__device__ __forceinline__
+void cp_async_bulk_wait_group() {
+    asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory");
+}
+
+__device__ __forceinline__
+void fence_view_async_shared() {
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
 }
 
 /* --- WGMMA synchronization --------------------------------------------- */
@@ -264,7 +291,8 @@ void flash_attention_2wg(
     int is_causal,
     const CUtensorMap *tma_Q_arr,
     const CUtensorMap *tma_K_arr,
-    const CUtensorMap *tma_V_arr)
+    const CUtensorMap *tma_V_arr,
+    const CUtensorMap *tma_O_arr)
 {
     constexpr int WG_SIZE    = 128;
     constexpr int HALF_DIM   = DIM / 2;          /* 64 */
@@ -314,15 +342,14 @@ void flash_attention_2wg(
     const int q_block_id = bid % num_q_blocks;
     const int batch_id = bs_id / H;
     const int head_id  = bs_id % H;
-    const int seq_stride = H * DIM;
     const int bh_id = batch_id * H + head_id;
 
     const CUtensorMap *tma_Q = &tma_Q_arr[bh_id];
     const CUtensorMap *tma_K = &tma_K_arr[bh_id];
     const CUtensorMap *tma_V = &tma_V_arr[bh_id];
+    const CUtensorMap *tma_O = &tma_O_arr[bh_id];
 
-    nv_bfloat16 *O_base = O + batch_id * S * seq_stride + head_id * DIM
-                             + q_block_id * BLOCK_Q * seq_stride;
+    (void)O;  /* O is written via TMA S2G using tma_O descriptor */
 
     const int max_kv_iter = is_causal
         ? min(cdiv(len_kv, BLOCK_KV), cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
@@ -422,9 +449,6 @@ void flash_attention_2wg(
     const uint32_t my_Q_hi = Q_hi + cwg * 8 * STRIDE;
     const uint64_t desc_q_lo = make_wgmma_desc(my_Q_lo, STRIDE);
     const uint64_t desc_q_hi = make_wgmma_desc(my_Q_hi, STRIDE);
-
-    /* Output base for this WG (offset by cwg * 64 rows) */
-    nv_bfloat16 *my_O_base = O_base + cwg * 64 * seq_stride;
 
     /* Accumulators */
     float O_lo_acc[32], O_hi_acc[32];
@@ -764,9 +788,10 @@ void flash_attention_2wg(
         if (v_stage == 0) v_full_phase ^= 1;
     }
 
-    /* ---- Epilogue: finalize and store O ---- */
+    /* ---- Epilogue: finalize and store O via TMA S2G ---- */
     wgmma_fence();
 
+    /* Normalize by softmax sum */
     #pragma unroll
     for (int half = 0; half < 2; half++) {
         float inv = fast_rcp(rowsumexp[half]);
@@ -779,25 +804,52 @@ void flash_attention_2wg(
         }
     }
 
-    /* Store O to gmem with packed BF16x2 stores.
-     * s2=0,1 are adjacent columns → pack into 32-bit store. */
+    /* Step 1: Write O from registers → Q SMEM (reuse Q region, swizzled layout).
+     * Both consumer WGs write their 64 rows. WG1 → rows 0-63, WG2 → rows 64-127.
+     *
+     * SMEM address for each (row, col) with SWIZZLE_128B:
+     *   byte_off = full_row * 128 + col_base * 2
+     *   swizzled = byte_off ^ (((byte_off >> 7) & 7) << 4)
+     */
     #pragma unroll
     for (int half = 0; half < 2; half++) {
-        const int row = mywarp * 16 + half * 8 + (lane_id / 4);
-        if (row < 64 && (cwg * 64 + row) < len_q - q_block_id * BLOCK_Q) {
-            const int row_offset = row * seq_stride;
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                const int col_base = p4 * 8 + (lane_id % 4) * 2;
-                const int idx0 = (p4 << 2) | (half << 1) | 0;
-                const int idx1 = (p4 << 2) | (half << 1) | 1;
-                /* Pack two adjacent BF16 values (s2=0, s2=1) into one 32-bit store */
-                uint32_t lo_packed = pack_bf16(O_lo_acc[idx0], O_lo_acc[idx1]);
-                uint32_t hi_packed = pack_bf16(O_hi_acc[idx0], O_hi_acc[idx1]);
-                *(uint32_t*)&my_O_base[row_offset + col_base] = lo_packed;
-                *(uint32_t*)&my_O_base[row_offset + 64 + col_base] = hi_packed;
-            }
+        const int local_row = mywarp * 16 + half * 8 + (lane_id / 4);
+        const int full_row = cwg * 64 + local_row;
+        #pragma unroll
+        for (int p4 = 0; p4 < 8; p4++) {
+            const int col_base = p4 * 8 + (lane_id % 4) * 2;
+            const int idx0 = (p4 << 2) | (half << 1) | 0;
+            const int idx1 = (p4 << 2) | (half << 1) | 1;
+
+            uint32_t lo_packed = pack_bf16(O_lo_acc[idx0], O_lo_acc[idx1]);
+            uint32_t hi_packed = pack_bf16(O_hi_acc[idx0], O_hi_acc[idx1]);
+
+            /* Compute swizzled SMEM offset (SWIZZLE_128B: XOR bits[6:4] with bits[9:7]) */
+            uint32_t byte_off = full_row * 128 + col_base * 2;
+            uint32_t swz = byte_off ^ (((byte_off >> 7) & 7) << 4);
+            asm volatile("st.shared.u32 [%0], %1;" :: "r"(Q_lo + swz), "r"(lo_packed));
+            asm volatile("st.shared.u32 [%0], %1;" :: "r"(Q_hi + swz), "r"(hi_packed));
         }
+    }
+
+    /* Step 2: Fence + 2-phase barrier (CuTe DSL epilogue pattern).
+     * Phase 1: All 256 consumer threads ARRIVE (mark SMEM writes done).
+     * Phase 2: Warp 4 (32 threads) SYNC (waits for all 288 arrivals, then does TMA). */
+    constexpr int EPILOGUE_BAR = 1;
+    constexpr int EPILOGUE_THREADS = 256 + 32;  /* 256 consumers + 32 TMA warp */
+
+    fence_view_async_shared();
+    named_barrier_arrive(EPILOGUE_BAR, EPILOGUE_THREADS);
+
+    /* Step 3: Warp 4 does TMA S2G (one warp copies entire O tile from SMEM → GMEM). */
+    if (warp_id == 4) {
+        named_barrier_sync(EPILOGUE_BAR, EPILOGUE_THREADS);
+
+        /* TMA S2G: store Q_lo → O[0:63], Q_hi → O[64:127] */
+        tma_store_2d(tma_O, Q_lo, 0,  q_block_id * BLOCK_Q);
+        tma_store_2d(tma_O, Q_hi, 64, q_block_id * BLOCK_Q);
+        cp_async_bulk_commit_group();
+        cp_async_bulk_wait_group();
     }
 }
 
@@ -874,6 +926,7 @@ static bool init_tma_encoder() {
 static CUtensorMap* d_tma_Q = nullptr;
 static CUtensorMap* d_tma_K = nullptr;
 static CUtensorMap* d_tma_V = nullptr;
+static CUtensorMap* d_tma_O = nullptr;
 static int d_tma_bh_count = 0;
 
 extern "C" int kernel_run(
@@ -927,19 +980,23 @@ extern "C" int kernel_run(
             if (d_tma_Q) cudaFree(d_tma_Q);
             if (d_tma_K) cudaFree(d_tma_K);
             if (d_tma_V) cudaFree(d_tma_V);
+            if (d_tma_O) cudaFree(d_tma_O);
             cudaMalloc(&d_tma_Q, bh * sizeof(CUtensorMap));
             cudaMalloc(&d_tma_K, bh * sizeof(CUtensorMap));
             cudaMalloc(&d_tma_V, bh * sizeof(CUtensorMap));
+            cudaMalloc(&d_tma_O, bh * sizeof(CUtensorMap));
             d_tma_bh_count = bh;
         }
 
         CUtensorMap* h_tma_Q = (CUtensorMap*)malloc(bh * sizeof(CUtensorMap));
         CUtensorMap* h_tma_K = (CUtensorMap*)malloc(bh * sizeof(CUtensorMap));
         CUtensorMap* h_tma_V = (CUtensorMap*)malloc(bh * sizeof(CUtensorMap));
+        CUtensorMap* h_tma_O = (CUtensorMap*)malloc(bh * sizeof(CUtensorMap));
 
         const __nv_bfloat16 *Q_ptr = inputs[0];
         const __nv_bfloat16 *K_ptr = inputs[1];
         const __nv_bfloat16 *V_ptr = inputs[2];
+        __nv_bfloat16 *O_ptr = outputs[0];
         int seq_stride = H * D;
 
         for (int b = 0; b < B; b++) {
@@ -948,6 +1005,7 @@ extern "C" int kernel_run(
                 void* q_base = (void*)(Q_ptr + b * S * seq_stride + h * D);
                 void* k_base = (void*)(K_ptr + b * S * seq_stride + h * D);
                 void* v_base = (void*)(V_ptr + b * S * seq_stride + h * D);
+                void* o_base = (void*)(O_ptr + b * S * seq_stride + h * D);
 
                 cuuint64_t dims[2] = {(cuuint64_t)D, (cuuint64_t)S};
                 cuuint64_t strides[1] = {(cuuint64_t)(seq_stride * sizeof(nv_bfloat16))};
@@ -967,6 +1025,11 @@ extern "C" int kernel_run(
                     2, v_base, dims, strides, box_kv, elem,
                     CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
                     CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+                /* O uses same layout as Q (same dims, strides, box, swizzle) */
+                s_encodeTiled(&h_tma_O[idx], CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                    2, o_base, dims, strides, box_q, elem,
+                    CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+                    CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
             }
         }
 
@@ -976,6 +1039,8 @@ extern "C" int kernel_run(
                         cudaMemcpyHostToDevice, stream);
         cudaMemcpyAsync(d_tma_V, h_tma_V, bh * sizeof(CUtensorMap),
                         cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(d_tma_O, h_tma_O, bh * sizeof(CUtensorMap),
+                        cudaMemcpyHostToDevice, stream);
 
         auto kernel = flash_attention_2wg<BLOCK_Q, BLOCK_KV, DIM_CONST>;
         cudaFuncSetAttribute(kernel,
@@ -984,11 +1049,12 @@ extern "C" int kernel_run(
         kernel<<<num_blocks, TB_SIZE, smem_size, stream>>>(
             nullptr, nullptr, nullptr, outputs[0],
             B, S, H, S, S, causal ? 1 : 0,
-            d_tma_Q, d_tma_K, d_tma_V);
+            d_tma_Q, d_tma_K, d_tma_V, d_tma_O);
 
         free(h_tma_Q);
         free(h_tma_K);
         free(h_tma_V);
+        free(h_tma_O);
     }
 
     return 0;

@@ -181,6 +181,16 @@ uint64_t make_wgmma_desc(uint32_t smem_addr, int stride_bytes) {
 }
 
 __device__ __forceinline__
+uint64_t make_wgmma_desc_lbo(uint32_t smem_addr, int lbo_bytes, int stride_bytes) {
+    uint64_t desc = 0;
+    desc |= (uint64_t)((smem_addr >> 4) & 0x3FFF);
+    desc |= (uint64_t)(((lbo_bytes >> 4) & 0x3FFF)) << 16;     /* custom LBO */
+    desc |= (uint64_t)(((stride_bytes >> 4) & 0x3FFF)) << 32;
+    desc |= (uint64_t)(1) << 62;                                /* SWIZZLE_128B */
+    return desc;
+}
+
+__device__ __forceinline__
 uint64_t gmma_desc_advance(uint64_t desc, int offset_16B) {
     uint32_t lo = (uint32_t)desc + (uint32_t)offset_16B;
     uint32_t hi = (uint32_t)(desc >> 32);
@@ -254,6 +264,50 @@ void wgmma_m64n64k16_f32_bf16_RS(float acc[32],
       "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
       "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
       "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31])
+    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+      "l"(desc_b), "r"(scale_D));
+}
+
+/* --- WGMMA m64n128k16 RS mode (PV GEMM, full DIM=128) ------------------- */
+
+__device__ __forceinline__
+void wgmma_m64n128k16_f32_bf16_RS(float acc[64],
+                                   uint32_t a0, uint32_t a1,
+                                   uint32_t a2, uint32_t a3,
+                                   uint64_t desc_b,
+                                   int scale_D) {
+    asm volatile(
+    "{\n"
+    ".reg .pred p;\n"
+    "setp.ne.b32 p, %69, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+    "{%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+    " %8,  %9,  %10, %11, %12, %13, %14, %15, "
+    " %16, %17, %18, %19, %20, %21, %22, %23, "
+    " %24, %25, %26, %27, %28, %29, %30, %31, "
+    " %32, %33, %34, %35, %36, %37, %38, %39, "
+    " %40, %41, %42, %43, %44, %45, %46, %47, "
+    " %48, %49, %50, %51, %52, %53, %54, %55, "
+    " %56, %57, %58, %59, %60, %61, %62, %63},"
+    " {%64, %65, %66, %67},"
+    " %68, p, 1, 1, 1;\n"
+    "}\n"
+    : "+f"(acc[0]),  "+f"(acc[1]),  "+f"(acc[2]),  "+f"(acc[3]),
+      "+f"(acc[4]),  "+f"(acc[5]),  "+f"(acc[6]),  "+f"(acc[7]),
+      "+f"(acc[8]),  "+f"(acc[9]),  "+f"(acc[10]), "+f"(acc[11]),
+      "+f"(acc[12]), "+f"(acc[13]), "+f"(acc[14]), "+f"(acc[15]),
+      "+f"(acc[16]), "+f"(acc[17]), "+f"(acc[18]), "+f"(acc[19]),
+      "+f"(acc[20]), "+f"(acc[21]), "+f"(acc[22]), "+f"(acc[23]),
+      "+f"(acc[24]), "+f"(acc[25]), "+f"(acc[26]), "+f"(acc[27]),
+      "+f"(acc[28]), "+f"(acc[29]), "+f"(acc[30]), "+f"(acc[31]),
+      "+f"(acc[32]), "+f"(acc[33]), "+f"(acc[34]), "+f"(acc[35]),
+      "+f"(acc[36]), "+f"(acc[37]), "+f"(acc[38]), "+f"(acc[39]),
+      "+f"(acc[40]), "+f"(acc[41]), "+f"(acc[42]), "+f"(acc[43]),
+      "+f"(acc[44]), "+f"(acc[45]), "+f"(acc[46]), "+f"(acc[47]),
+      "+f"(acc[48]), "+f"(acc[49]), "+f"(acc[50]), "+f"(acc[51]),
+      "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]),
+      "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]),
+      "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])
     : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
       "l"(desc_b), "r"(scale_D));
 }
@@ -451,9 +505,9 @@ void flash_attention_2wg(
     const uint64_t desc_q_hi = make_wgmma_desc(my_Q_hi, STRIDE);
 
     /* Accumulators */
-    float O_lo_acc[32], O_hi_acc[32];
+    float O_acc[64];  /* unified: [0..31]=DIM lo, [32..63]=DIM hi */
     #pragma unroll
-    for (int i = 0; i < 32; i++) { O_lo_acc[i] = 0.0f; O_hi_acc[i] = 0.0f; }
+    for (int i = 0; i < 64; i++) O_acc[i] = 0.0f;
     float rowmax[2] = {-FLT_MAX, -FLT_MAX};
     float rowsumexp[2] = {0.0f, 0.0f};
 
@@ -635,22 +689,17 @@ void flash_attention_2wg(
         /* Wait for V[kv_id-1] while QK tensor cores are executing */
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
 
+        /* V descriptor: LBO spans V_lo→V_hi (16KB gap) for m64n128k16 */
         const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
-        const uint32_t cur_V_hi = (v_stage == 0) ? V0_hi : V1_hi;
-        const uint64_t dv_lo = make_wgmma_desc(cur_V_lo, STRIDE);
-        const uint64_t dv_hi = make_wgmma_desc(cur_V_hi, STRIDE);
+        const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
 
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint64_t dvl = gmma_desc_advance(dv_lo, ks * V_KS_ADVANCE);
-            wgmma_m64n64k16_f32_bf16_RS(O_lo_acc,
+            uint64_t dv_k = gmma_desc_advance(dv, ks * V_KS_ADVANCE);
+            wgmma_m64n128k16_f32_bf16_RS(O_acc,
                 P_packed[ks*4+0], P_packed[ks*4+1],
-                P_packed[ks*4+2], P_packed[ks*4+3], dvl, 1);
-            uint64_t dvh = gmma_desc_advance(dv_hi, ks * V_KS_ADVANCE);
-            wgmma_m64n64k16_f32_bf16_RS(O_hi_acc,
-                P_packed[ks*4+0], P_packed[ks*4+1],
-                P_packed[ks*4+2], P_packed[ks*4+3], dvh, 1);
+                P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
         }
         wgmma_commit_group();
         /* PV is now in flight — 2 WGMMA groups pending (QK + PV) */
@@ -760,10 +809,10 @@ void flash_attention_2wg(
         for (int half = 0; half < 2; half++) {
             #pragma unroll
             for (int p4 = 0; p4 < 8; p4++) {
-                O_lo_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];
-                O_lo_acc[(p4<<2)|(half<<1)|1] *= o_rescale[half];
-                O_hi_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];
-                O_hi_acc[(p4<<2)|(half<<1)|1] *= o_rescale[half];
+                O_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];
+                O_acc[(p4<<2)|(half<<1)|1] *= o_rescale[half];
+                O_acc[32+(p4<<2)|(half<<1)|0] *= o_rescale[half];
+                O_acc[32+(p4<<2)|(half<<1)|1] *= o_rescale[half];
             }
         }
 
@@ -792,21 +841,15 @@ void flash_attention_2wg(
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
 
         const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
-        const uint32_t cur_V_hi = (v_stage == 0) ? V0_hi : V1_hi;
-        const uint64_t dv_lo = make_wgmma_desc(cur_V_lo, STRIDE);
-        const uint64_t dv_hi = make_wgmma_desc(cur_V_hi, STRIDE);
+        const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
 
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint64_t dvl = gmma_desc_advance(dv_lo, ks * V_KS_ADVANCE);
-            wgmma_m64n64k16_f32_bf16_RS(O_lo_acc,
+            uint64_t dv_k = gmma_desc_advance(dv, ks * V_KS_ADVANCE);
+            wgmma_m64n128k16_f32_bf16_RS(O_acc,
                 P_packed[ks*4+0], P_packed[ks*4+1],
-                P_packed[ks*4+2], P_packed[ks*4+3], dvl, 1);
-            uint64_t dvh = gmma_desc_advance(dv_hi, ks * V_KS_ADVANCE);
-            wgmma_m64n64k16_f32_bf16_RS(O_hi_acc,
-                P_packed[ks*4+0], P_packed[ks*4+1],
-                P_packed[ks*4+2], P_packed[ks*4+3], dvh, 1);
+                P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
         }
         wgmma_commit_group();
         wgmma_wait_group<0>();
@@ -837,10 +880,10 @@ void flash_attention_2wg(
         float inv = fast_rcp(rowsumexp[half]);
         #pragma unroll
         for (int p4 = 0; p4 < 8; p4++) {
-            O_lo_acc[(p4<<2)|(half<<1)|0] *= inv;
-            O_lo_acc[(p4<<2)|(half<<1)|1] *= inv;
-            O_hi_acc[(p4<<2)|(half<<1)|0] *= inv;
-            O_hi_acc[(p4<<2)|(half<<1)|1] *= inv;
+            O_acc[(p4<<2)|(half<<1)|0] *= inv;
+            O_acc[(p4<<2)|(half<<1)|1] *= inv;
+            O_acc[32+(p4<<2)|(half<<1)|0] *= inv;
+            O_acc[32+(p4<<2)|(half<<1)|1] *= inv;
         }
     }
 
@@ -861,8 +904,8 @@ void flash_attention_2wg(
             const int idx0 = (p4 << 2) | (half << 1) | 0;
             const int idx1 = (p4 << 2) | (half << 1) | 1;
 
-            uint32_t lo_packed = pack_bf16(O_lo_acc[idx0], O_lo_acc[idx1]);
-            uint32_t hi_packed = pack_bf16(O_hi_acc[idx0], O_hi_acc[idx1]);
+            uint32_t lo_packed = pack_bf16(O_acc[idx0], O_acc[idx1]);
+            uint32_t hi_packed = pack_bf16(O_acc[32+idx0], O_acc[32+idx1]);
 
             /* Compute swizzled SMEM offset (SWIZZLE_128B: XOR bits[6:4] with bits[9:7]) */
             uint32_t byte_off = full_row * 128 + col_base * 2;

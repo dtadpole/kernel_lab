@@ -7,6 +7,7 @@
  * FP32 accumulation → BF16 output.
  */
 #include <cuda_bf16.h>
+#include <cuda_pipeline.h>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -161,35 +162,63 @@ matmul_wgmma(
 
     int numK = (K + TILE_K - 1) / TILE_K;
 
-    /* Helper: load tile into SMEM with 128B swizzle */
+    /* Helper: load tile into SMEM with 128B swizzle + cp.async 16B vectorized */
+    /* Each 128B line = 64 BF16. With TILE_K=64, each row = 1 line exactly.
+     * cp.async 16B loads: 8 BF16 per load, 8 loads per row.
+     * 128 threads, A has 128 rows × 8 loads = 1024 loads total → 8 per thread.
+     * Same for B: 128 rows × 8 loads = 1024 loads → 8 per thread. */
     auto load_tile = [&](int buf, int kOff) {
-        /* A: M×K row-major, swizzled */
-        for (int i = tid; i < TILE_M * TILE_K; i += THREADS) {
-            int r = i / TILE_K, c = i % TILE_K;
-            int gR = ctaRow + r, gC = kOff + c;
-            int byte_off = (r * TILE_K + c) * 2;
-            int sw_off = swizzle_128B(byte_off) / 2;
-            sA[buf][sw_off] = (gR < M && gC < K) ? A[gR * K + gC] : __float2bfloat16(0.0f);
+        /* A: row-major M×K, each row = TILE_K BF16 = 128B */
+        for (int i = tid; i < TILE_M * (TILE_K / 8); i += THREADS) {
+            int row = i / (TILE_K / 8);
+            int chunk = i % (TILE_K / 8);  /* 0..7, each chunk = 8 BF16 = 16B */
+            int gR = ctaRow + row;
+            int gC = kOff + chunk * 8;
+
+            int byte_off = row * TILE_K * 2 + chunk * 16;
+            int sw_byte = swizzle_128B(byte_off);
+
+            if (gR < M && gC + 7 < K) {
+                __pipeline_memcpy_async(
+                    (char*)sA[buf] + sw_byte,
+                    &A[gR * K + gC],
+                    16);
+            } else {
+                /* Boundary: scalar fallback */
+                for (int j = 0; j < 8; j++) {
+                    int elem_byte = sw_byte + j * 2;
+                    ((__nv_bfloat16*)((char*)sA[buf]))[elem_byte / 2] =
+                        (gR < M && gC + j < K) ? A[gR * K + gC + j] : __float2bfloat16(0.0f);
+                }
+            }
         }
-        /* B: stored as N×K (transposed), swizzled */
+        /* B: stored N×K transposed. Load B_orig[k][n] into sB[n][k].
+         * sB layout: 128 rows (N) × 64 cols (K), each row = 128B.
+         * But we read from B_orig which is K×N row-major.
+         * Cannot vectorize the transpose — each element goes to a different position.
+         * Scalar load with swizzle for now. */
         for (int i = tid; i < TILE_N * TILE_K; i += THREADS) {
-            int r = i / TILE_K, c = i % TILE_K;
-            int gR = ctaCol + r, gC = kOff + c;
-            int byte_off = (r * TILE_K + c) * 2;
+            int n = i / TILE_K, k = i % TILE_K;
+            int gN = ctaCol + n, gK = kOff + k;
+            int byte_off = (n * TILE_K + k) * 2;
             int sw_off = swizzle_128B(byte_off) / 2;
-            sB[buf][sw_off] = (gR < N && gC < K) ? B[gC * N + gR] : __float2bfloat16(0.0f);
+            sB[buf][sw_off] = (gN < N && gK < K) ? B[gK * N + gN] : __float2bfloat16(0.0f);
         }
     };
 
     load_tile(0, 0);
+    __pipeline_commit();
+    __pipeline_wait_prior(0);
     __syncthreads();
 
     for (int kt = 0; kt < numK; kt++) {
         int cur = kt & 1;
         int nxt = 1 - cur;
 
-        if (kt + 1 < numK)
+        if (kt + 1 < numK) {
             load_tile(nxt, (kt + 1) * TILE_K);
+            __pipeline_commit();
+        }
 
         /* WGMMA: 2 row groups × 4 k16 steps = 8 WGMMA calls per K-tile */
         /* A top half (rows 0-63) */
@@ -212,8 +241,10 @@ matmul_wgmma(
         wgmma_commit();
         wgmma_wait0();
 
-        if (kt + 1 < numK)
+        if (kt + 1 < numK) {
+            __pipeline_wait_prior(0);
             __syncthreads();
+        }
     }
 
     /* Epilogue: store both row groups */

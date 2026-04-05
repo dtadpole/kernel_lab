@@ -64,17 +64,20 @@ def formal_benchmark(
     # --- Phase 1: Snapshot ---
     run_dir = None
     snapshot_data = data_root_path  # fallback: use explicit data_root or None (= project data/)
+    logger.info("Snapshot start [%s]", datetime.now().strftime(_ts_fmt))
     try:
         from cuda_exec.trajectory import prepare_run
         run_dir = prepare_run(kernel, arch, impls, timeout_seconds, kb_repo=kb_repo_path)
         snapshot_data = run_dir / "data"
-        logger.info("Snapshot written to %s", run_dir)
+        logger.info("Snapshot done [%s] → %s", datetime.now().strftime(_ts_fmt), run_dir)
     except Exception as exc:
-        logger.warning("Failed to prepare snapshot: %s — falling back to original data/", exc)
+        logger.warning("Snapshot failed [%s]: %s — falling back to original data/", datetime.now().strftime(_ts_fmt), exc)
 
     # --- Phase 2: Resolve from snapshot (or original if snapshot failed) ---
+    logger.info("Resolve impls start [%s]", datetime.now().strftime(_ts_fmt))
     configs = load_configs(kernel, data_root=snapshot_data)
     resolved = resolve_impls(kernel, arch, impls, data_root=snapshot_data)
+    logger.info("Resolve impls done [%s] impls=%s", datetime.now().strftime(_ts_fmt), [r["slug"] for r in resolved])
 
     # --- Isolate runtime ---
     ts_str = run_dir.name if run_dir else f"{int(time.time())}"

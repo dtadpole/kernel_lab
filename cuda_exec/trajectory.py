@@ -58,9 +58,12 @@ def _git_branch() -> str:
 
 def _device_name() -> str:
     try:
-        import torch
-        if torch.cuda.is_available():
-            return torch.cuda.get_device_name(0)
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "--id=0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split("\n")[0]
     except Exception:
         pass
     return "unknown"

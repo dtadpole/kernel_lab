@@ -140,8 +140,27 @@ def _extract_compile_info(compile_result: dict) -> dict:
     return info
 
 
-def _copy_compile_text(compile_result: dict, dest: Path) -> None:
+def _copy_compile_logs(runtime_root: Path | None, compile_result: dict, dest: Path) -> None:
+    """Copy all compile log files to dest directory.
+
+    Strategy: if runtime_root is available, copy log files directly from the
+    runtime logs/ directory (complete). Otherwise fall back to extracting from
+    the Pydantic tool_outputs (partial — only what the response carries).
+    """
     dest.mkdir(parents=True, exist_ok=True)
+
+    # Try direct copy from runtime logs/
+    if runtime_root and runtime_root.exists():
+        # Find the compile logs directory (nested under run_tag/v1/.../turn_N/logs/)
+        log_files = list(runtime_root.rglob("logs/compile.attempt_001.*"))
+        for f in log_files:
+            if f.is_file() and f.stat().st_size > 0:
+                dest_name = f.name.replace("compile.attempt_001.", "")
+                shutil.copy2(f, dest / dest_name)
+        if log_files:
+            return
+
+    # Fallback: extract from tool_outputs in the Pydantic response
     tool_outputs = compile_result.get("tool_outputs", {})
     for key in ("nvcc_ptx", "ptxas", "resource_usage", "nvdisasm"):
         entry = tool_outputs.get(key, {})
@@ -417,7 +436,7 @@ def prepare_run(
 # Phase 2: finalize_run() — AFTER benchmark
 # ---------------------------------------------------------------------------
 
-def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = None) -> None:
+def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = None, runtime_root: Path | None = None) -> None:
     """Write per-impl results + check gems after bench completes."""
     repo = kb_repo or KB_REPO
     gems_dir = repo / "ik_bench" / "gems"
@@ -435,10 +454,10 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
         impl_dir = run_dir / "impls" / impl_slug
         impl_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write compile info
+        # Write compile logs
         compile_result = impl_data.get("compile_result")
         if compile_result:
-            _copy_compile_text(compile_result, impl_dir / "compile")
+            _copy_compile_logs(runtime_root, compile_result, impl_dir / "compile")
 
         # Build results.json
         compile_info = _extract_compile_info(compile_result) if compile_result else {"ok": False}
@@ -487,7 +506,7 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
 
             # Copy compile info to gem
             if compile_result:
-                _copy_compile_text(compile_result, gem_dir / "compile")
+                _copy_compile_logs(runtime_root, compile_result, gem_dir / "compile")
 
             # Write gem results.json with gem metadata
             gem_results = {**results, "gem": gem_info}

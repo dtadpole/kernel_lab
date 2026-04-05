@@ -123,13 +123,33 @@ def _run_cu_impl(
 # Correctness comparison
 # ---------------------------------------------------------------------------
 
+def _harness_fill_random_bf16(count: int, seed: int) -> torch.Tensor:
+    """Reproduce eval_harness.cu fill_random_bf16 PRNG in Python.
+
+    Must match the C code exactly:
+        h = idx ^ seed; h = (h^61)^(h>>16); h += h<<3;
+        h ^= h>>4; h *= 0x27d4eb2d; h ^= h>>15;
+        val = (float)(h & 0xFFFF) / 65536.0f - 0.5f;
+    """
+    import numpy as np
+    idx = np.arange(count, dtype=np.uint32)
+    h = idx ^ np.uint32(seed)
+    h = (h ^ np.uint32(61)) ^ (h >> np.uint32(16))
+    h = (h + (h << np.uint32(3))) & np.uint32(0xFFFFFFFF)
+    h = h ^ (h >> np.uint32(4))
+    h = (h * np.uint32(0x27d4eb2d)) & np.uint32(0xFFFFFFFF)
+    h = h ^ (h >> np.uint32(15))
+    f = (h & np.uint32(0xFFFF)).astype(np.float32) / 65536.0 - 0.5
+    return torch.from_numpy(f).to(torch.bfloat16)
+
+
 def _check_correctness(golden_tensor, impl_tensor, atol=1e-2, rtol=1e-2) -> dict:
     """Compare impl output against golden. Returns correctness summary."""
     if golden_tensor is None or impl_tensor is None:
         return {"passed": None, "reason": "missing output"}
     try:
-        g = golden_tensor.float().flatten()
-        t = impl_tensor.float().flatten()
+        g = golden_tensor.float().cpu().flatten()
+        t = impl_tensor.float().cpu().flatten()
         if g.shape != t.shape:
             return {"passed": False,
                     "reason": f"shape mismatch: {g.shape} vs {t.shape}"}
@@ -286,14 +306,57 @@ def main() -> int:
                 golden_tensor = impl_results[slug]["output_tensor"]
 
         # --- Correctness: compare all non-golden vs golden ---
+        # For .py impls: both used generate_inputs() with same seed → direct compare.
+        # For .cu impls: C harness used fill_random_bf16(seed=1,2,...) as inputs.
+        #   We must run the golden model with those SAME inputs to get a fair reference.
+        golden_impl = next((im for im in impls if im["slug"] == golden_slug), None)
+        golden_module = None
+        if golden_impl and golden_impl["type"] == "py":
+            old_path = list(sys.path)
+            sys.path.insert(0, str(golden_impl["dir"]))
+            try:
+                golden_module = load_reference_module(golden_impl["entry"])
+            finally:
+                sys.path[:] = old_path
+
         for slug, r in impl_results.items():
             if slug == golden_slug:
                 r["correctness"] = None  # golden = no comparison
             elif "error" in r:
                 r["correctness"] = {"passed": False, "reason": r["error"]}
             else:
+                impl_info = next((im for im in impls if im["slug"] == slug), None)
                 impl_tensor = r.get("output_tensor")
-                r["correctness"] = _check_correctness(golden_tensor, impl_tensor)
+
+                if impl_info and impl_info["type"] == "cu" and golden_module is not None:
+                    # .cu impl: reproduce C harness inputs, run golden model with them
+                    try:
+                        input_size = int(trial_config.get("input_size", 0))
+                        shape = [int(v) for v in trial_config.get("shape", [])]
+                        num_inputs = len(generate_inputs(trial_config, device))
+
+                        with torch.no_grad(), torch.cuda.device(device):
+                            harness_inputs = []
+                            for j in range(num_inputs):
+                                t = _harness_fill_random_bf16(input_size, j + 1)
+                                if isinstance(t, torch.Tensor):
+                                    harness_inputs.append(t.to(device).reshape(shape))
+                                else:
+                                    harness_inputs.append(t)
+                            model_cls = getattr(golden_module, "Model")
+                            get_init = getattr(golden_module, "get_init_inputs", None)
+                            init_args = list(get_init()) if get_init else []
+                            model = model_cls(*init_args).cuda(device)
+                            ref_out = model(*harness_inputs)
+                            torch.cuda.synchronize(device)
+
+                        ref_tensor = ref_out.float().cpu().flatten() if hasattr(ref_out, 'float') else None
+                        r["correctness"] = _check_correctness(ref_tensor, impl_tensor)
+                    except Exception as exc:
+                        r["correctness"] = {"passed": None, "reason": f"cu correctness error: {exc}"}
+                else:
+                    # .py impl: same inputs as golden → direct compare
+                    r["correctness"] = _check_correctness(golden_tensor, impl_tensor)
 
         # --- Build output (strip output_tensor, not JSON-serializable) ---
         output_impls = {}

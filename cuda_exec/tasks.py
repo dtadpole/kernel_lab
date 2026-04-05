@@ -501,12 +501,10 @@ def run_compile_task(
 
         if cudnn_files:
             copied_cudnn = _write_input_files(cudnn_files, workspace_path / "inputs" / "cudnn")
-            if not any(path.name == "cudnn.py" for path in copied_cudnn):
-                raise ValueError((
-                        "cudnn_files must include a file named cudnn.py as the entry point. "
-                        "Rename your vendor baseline module to cudnn.py and resubmit."
-                    ),
-                )
+            # Find the .py entry point dynamically — any Python file is accepted
+            cudnn_py_files = [p for p in copied_cudnn if p.suffix == ".py"]
+            if not cudnn_py_files:
+                raise ValueError("cudnn_files must include at least one .py entry point.")
 
         if not any(path.name == "cutedsl.py" for path in copied_reference):
             raise ValueError((
@@ -879,14 +877,15 @@ def run_profile_task(
                 "--kernel-name", 'regex:"cutlass|vector_add|flash_fwd"',
             ]
         else:  # side == "cudnn"
-            cudnn_py = Path(workspace["workspace_path"]) / "inputs" / "cudnn" / "cudnn.py"
-            if not cudnn_py.exists():
-                raise ValueError(f"cudnn.py not found at {cudnn_py} — include cudnn_files in compile request",
-                )
+            cudnn_dir = Path(workspace["workspace_path"]) / "inputs" / "cudnn"
+            cudnn_py_files = sorted(cudnn_dir.glob("*.py")) if cudnn_dir.exists() else []
+            if not cudnn_py_files:
+                raise ValueError(f"No .py entry point found in {cudnn_dir} — include cudnn_files in compile request")
+            cudnn_entry = cudnn_py_files[0]
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
-                "--target", sys.executable, str(cudnn_py),
+                "--target", sys.executable, str(cudnn_entry),
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
             ]

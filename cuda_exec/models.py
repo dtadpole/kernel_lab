@@ -71,7 +71,7 @@ class CompileRequest(RequestBase):
     )
     cudnn_files: Dict[str, str] = Field(
         default_factory=dict,
-        description="Optional map of vendor-baseline source inputs; must include cudnn.py as the entry point if non-empty. Follows the same Model/get_inputs/get_init_inputs contract as reference.",
+        description="Optional map of vendor-baseline source inputs; must include at least one .py entry point (e.g. cublas.py, cudnn.py). Follows the same Model/get_inputs/get_init_inputs contract as reference.",
     )
 
 

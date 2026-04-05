@@ -1,11 +1,12 @@
-"""Formal benchmark: atomic compile + trial ALL configs.
+"""Formal benchmark: atomic compile + trial ALL configs, ALL implementations.
 
 Used by the Formal Evaluator (Judge) agent via the ik:bench skill.
 Not for iterative development — use ik:exec for that.
 
 Key differences from ik:exec:
 - Compile + trial are bundled atomically (no separate steps)
-- ALL configs are trialed (loaded from fixture, no cherry-picking)
+- ALL configs are trialed (no cherry-picking)
+- ALL implementations are trialed (or a specified subset)
 - No profiling (that's ik:exec's job during iteration)
 - Simplified metadata (no turn management)
 """
@@ -17,8 +18,9 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
+from cuda_exec.impls import load_configs, resolve_impls
 from cuda_exec.models import (
     CompileRequest,
     TrialRequest,
@@ -28,136 +30,104 @@ from cuda_exec.main import compile_endpoint, trial_endpoint
 
 logger = logging.getLogger(__name__)
 
-# Project root for resolving fixture paths
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load_all_configs(kernel: str, arch: str) -> Dict[str, Dict[str, Any]]:
-    """Load ALL configs from the fixture. No selection, no filtering."""
-    configs_path = _PROJECT_ROOT / "data" / "configs" / f"{kernel}.json"
-    if not configs_path.exists():
-        raise FileNotFoundError(
-            f"Configs not found: {configs_path}. "
-            f"Available configs: {list((_PROJECT_ROOT / 'data' / 'configs').glob('*.json'))}"
-        )
-    with open(configs_path, encoding="utf-8") as f:
-        configs = json.load(f)
-    if not configs:
-        raise ValueError(f"Empty configs file: {configs_path}")
-    return configs
-
-
-def _load_source_files(kernel: str, arch: str) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str] | None]:
-    """Load reference, generated, and optional cuDNN source files from fixture/generated paths."""
-    ref_dir = _PROJECT_ROOT / "data" / "ref" / kernel
-    gen_dir = _PROJECT_ROOT / "data" / "gen" / arch / kernel
-
-    # Reference files (arch-agnostic library implementations)
-    reference_files: Dict[str, str] = {}
-    if gen_dir.exists():
-        for f in gen_dir.iterdir():
-            if f.is_file() and f.suffix in (".py", ".h", ".cuh"):
-                reference_files[f.name] = f.read_text(encoding="utf-8")
-
-    # Generated files (.cu from gen/)
-    generated_files: Dict[str, str] = {}
-    generated_cu = gen_dir / "cuda.cu"
-    if not generated_cu.exists():
-        raise FileNotFoundError(f"cuda.cu not found at {generated_cu}")
-    generated_files["generated.cu"] = generated_cu.read_text(encoding="utf-8")
-    for f in gen_dir.iterdir():
-        if f.is_file() and f.suffix in (".h", ".cuh"):
-            generated_files[f.name] = f.read_text(encoding="utf-8")
-
-    # Optional cuDNN files
-    # cuDNN/cuBLAS baseline from ref/ (arch-agnostic)
-    cudnn_files: Dict[str, str] | None = None
-    if ref_dir.exists():
-        for name in ("cublas.py", "cudnn.py"):
-            p = ref_dir / name
-            if p.exists():
-                cudnn_files = {name: p.read_text(encoding="utf-8")}
-                break
-
-    return reference_files, generated_files, cudnn_files
-
 
 def formal_benchmark(
     kernel: str,
     arch: str,
     *,
+    impls: str | List[str] = "all",
     run_tag: str = "bench",
     version: str = "v1",
     direction_id: int = 0,
     timeout_seconds: int = 300,
 ) -> dict:
-    """Atomic compile + trial ALL configs. Returns combined result.
+    """Atomic compile + trial ALL configs for specified implementations.
 
     Args:
         kernel: Kernel name (e.g., "fa4", "matmul", "vecadd")
         arch: GPU architecture (e.g., "sm90")
+        impls: "all" or list of impl slugs (e.g., ["ref-cublas", "gen-cuda"])
         run_tag: Namespace tag for workspace isolation
         version: Version tag
         direction_id: Direction ID for workspace isolation
         timeout_seconds: Timeout per config
 
     Returns:
-        Dict with compile_ok, trial_ok, compile_result, trial_result
+        Dict with per-implementation compile + trial results
     """
-    # Load everything from fixtures
-    configs = _load_all_configs(kernel, arch)
-    reference_files, generated_files, cudnn_files = _load_source_files(kernel, arch)
+    configs = load_configs(kernel)
+    resolved = resolve_impls(kernel, arch, impls)
 
-    # Each bench run gets a unique turn to avoid workspace conflicts
-    unique_turn = int(time.time()) % 100000
+    refs = [r for r in resolved if r["source"] == "ref"]
+    gens = [r for r in resolved if r["source"] == "gen"]
 
-    metadata = Metadata(
-        run_tag=run_tag,
-        version=version,
-        direction_id=direction_id,
-        direction_slug=kernel,
-        turn=unique_turn,
-    )
+    # Use the first reference as the primary reference for correctness comparison
+    primary_ref = refs[0]
 
-    # Step 1: Compile
-    compile_req = CompileRequest(
-        metadata=metadata,
-        timeout_seconds=timeout_seconds,
-        reference_files=reference_files,
-        generated_files=generated_files,
-        cudnn_files=cudnn_files or {},
-    )
-    compile_resp = compile_endpoint(compile_req)
-    compile_result = compile_resp.model_dump(mode="json")
+    results: Dict[str, dict] = {}
 
-    if not compile_resp.all_ok:
-        return {
-            "compile_ok": False,
-            "trial_ok": False,
-            "kernel": kernel,
-            "arch": arch,
-            "num_configs": len(configs),
+    # Trial each gen-* implementation
+    for gen in gens:
+        unique_turn = int(time.time()) % 100000
+
+        metadata = Metadata(
+            run_tag=run_tag,
+            version=version,
+            direction_id=direction_id,
+            direction_slug=f"{kernel}-{gen['slug']}",
+            turn=unique_turn,
+        )
+
+        if gen["file_type"] == "cu":
+            # .cu needs compile: reference = primary_ref, generated = this .cu
+            compile_req = CompileRequest(
+                metadata=metadata,
+                timeout_seconds=timeout_seconds,
+                reference_files=primary_ref["files"],
+                generated_files=gen["files"],
+                cudnn_files=refs[1]["files"] if len(refs) > 1 else {},
+            )
+            compile_resp = compile_endpoint(compile_req)
+            compile_result = compile_resp.model_dump(mode="json")
+
+            if not compile_resp.all_ok:
+                results[gen["slug"]] = {
+                    "impl": gen["slug"],
+                    "compile_ok": False,
+                    "trial_ok": False,
+                    "compile_result": compile_result,
+                    "trial_result": None,
+                }
+                continue
+        else:
+            # .py gen implementations don't need compile
+            compile_result = None
+
+        # Trial ALL configs
+        trial_req = TrialRequest(
+            metadata=metadata,
+            timeout_seconds=timeout_seconds,
+            configs=configs,
+        )
+        trial_resp = trial_endpoint(trial_req)
+        trial_result = trial_resp.model_dump(mode="json")
+
+        results[gen["slug"]] = {
+            "impl": gen["slug"],
+            "compile_ok": compile_result is None or compile_result.get("all_ok", False),
+            "trial_ok": trial_resp.all_ok,
             "compile_result": compile_result,
-            "trial_result": None,
+            "trial_result": trial_result,
         }
 
-    # Step 2: Trial ALL configs
-    trial_req = TrialRequest(
-        metadata=metadata,
-        timeout_seconds=timeout_seconds,
-        configs=configs,
-    )
-    trial_resp = trial_endpoint(trial_req)
-    trial_result = trial_resp.model_dump(mode="json")
-
     return {
-        "compile_ok": True,
-        "trial_ok": trial_resp.all_ok,
         "kernel": kernel,
         "arch": arch,
         "num_configs": len(configs),
-        "compile_result": compile_result,
-        "trial_result": trial_result,
+        "impls_requested": [r["slug"] for r in resolved],
+        "refs": [r["slug"] for r in refs],
+        "gens": [r["slug"] for r in gens],
+        "results": results,
     }
 
 
@@ -171,6 +141,10 @@ def cli_main() -> None:
     )
     parser.add_argument("kernel", help="Kernel name (e.g., fa4, matmul, vecadd)")
     parser.add_argument("arch", help="GPU architecture (e.g., sm90)")
+    parser.add_argument(
+        "--impls", nargs="*", default=None,
+        help="Implementation slugs (default: all). E.g., ref-cublas gen-cuda",
+    )
     parser.add_argument("--run-tag", default="bench", help="Workspace namespace (default: bench)")
     parser.add_argument("--version", default="v1", help="Version tag (default: v1)")
     parser.add_argument("--direction-id", type=int, default=0, help="Direction ID (default: 0)")
@@ -184,9 +158,12 @@ def cli_main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    impl_arg = args.impls if args.impls else "all"
+
     result = formal_benchmark(
         kernel=args.kernel,
         arch=args.arch,
+        impls=impl_arg,
         run_tag=args.run_tag,
         version=args.version,
         direction_id=args.direction_id,

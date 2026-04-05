@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Profile harness for CuTe DSL reference kernels under NCU.
+"""Profile harness for Python reference kernels under NCU.
 
-Wraps a cutedsl.py module with L2 cache flush and controlled
+Wraps a reference .py module with L2 cache flush and controlled
 warmup/trial counts.  Used by the Makefile's profile-ncu-reference
 target so that NCU profiling gets the same measurement environment
 as trial (L2 flush before each run).
 
 Usage:
-    python profile_reference.py /path/to/cutedsl.py
+    python profile_reference.py /path/to/reference.py
 
 Environment variables (same as eval_harness.cu):
     CUDA_EXEC_PARAM_SHAPE, CUDA_EXEC_PARAM_INPUT_SIZE, etc.

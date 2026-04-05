@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Any, Dict, List
@@ -42,6 +44,7 @@ NCU_REPORT_SCRIPT = SCRIPTS_DIR / "ncu_report.py"
 EVAL_HARNESS = SCRIPTS_DIR / "eval_harness.cu"
 DEFAULT_COMPILE_ARTIFACT_ID = "compile:primary_binary"
 SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+logger = logging.getLogger(__name__)
 WORKFLOW_RULES = {
     "compile_required_first": True,
     "compile_once_per_turn": True,
@@ -665,6 +668,7 @@ def run_trial_task(
     stage_files: List[dict] = []
     stage_artifacts: List[dict] = []
 
+    _ts_fmt = "%H:%M:%S"
     for config_slug, config in configs.items():
         config_rel = _write_config_record(workspace, "trial", attempt, config_slug, config)
         comparison_rel = _config_artifact_rel("trial", attempt, config_slug, "comparison.json")
@@ -688,6 +692,8 @@ def run_trial_task(
             "--timeout",
             str(timeout_seconds),
         ]
+        cfg_start = datetime.now()
+        logger.info("  trial config %s start [%s]", config_slug, cfg_start.strftime(_ts_fmt))
         run_result = run_generic_command(
             kind="trial",
             command=command,
@@ -697,6 +703,9 @@ def run_trial_task(
             return_files=[config_rel],
             log_file=_stage_log_rel("trial", attempt, config_slug),
         )
+        cfg_end = datetime.now()
+        cfg_dur = (cfg_end - cfg_start).total_seconds()
+        logger.info("  trial config %s done  [%s] (%.1fs)", config_slug, cfg_end.strftime(_ts_fmt), cfg_dur)
         payload_json = _parse_structured_stdout(run_result["output"]["stdout"]) or {}
         comparison_path = Path(workspace["root_path"]) / comparison_rel
         comparison_path.parent.mkdir(parents=True, exist_ok=True)

@@ -38,6 +38,9 @@ def formal_benchmark(
     *,
     impls: str | List[str] = "all",
     timeout_seconds: int = 300,
+    kb_repo: str | None = None,
+    runtime_root: str | None = None,
+    data_root: str | None = None,
 ) -> dict:
     """Atomic compile + trial ALL configs for specified implementations.
 
@@ -47,12 +50,18 @@ def formal_benchmark(
     3. Compile + trial using snapshot file contents
     4. Write results + check gems (finalize_run)
     """
+    # --- Resolve paths from config ---
+    import os
+    kb_repo_path = Path(kb_repo).expanduser() if kb_repo else Path.home() / "kernel_lab_kb"
+    runtime_root_path = Path(runtime_root).expanduser() if runtime_root else Path.home() / ".cuda_exec_bench"
+    data_root_path = Path(data_root).expanduser() if data_root else None
+
     # --- Phase 1: Snapshot ---
     run_dir = None
-    snapshot_data = None
+    snapshot_data = data_root_path  # fallback: use explicit data_root or None (= project data/)
     try:
         from cuda_exec.trajectory import prepare_run
-        run_dir = prepare_run(kernel, arch, impls, timeout_seconds)
+        run_dir = prepare_run(kernel, arch, impls, timeout_seconds, kb_repo=kb_repo_path)
         snapshot_data = run_dir / "data"
         logger.info("Snapshot written to %s", run_dir)
     except Exception as exc:
@@ -62,10 +71,9 @@ def formal_benchmark(
     configs = load_configs(kernel, data_root=snapshot_data)
     resolved = resolve_impls(kernel, arch, impls, data_root=snapshot_data)
 
-    # --- Isolate runtime: bench uses ~/.cuda_exec_bench/, not ~/.cuda_exec/ ---
-    import os
+    # --- Isolate runtime ---
     ts_str = run_dir.name if run_dir else f"{int(time.time())}"
-    bench_runtime = Path.home() / ".cuda_exec_bench" / kernel / arch / ts_str
+    bench_runtime = runtime_root_path / kernel / arch / ts_str
     bench_runtime.mkdir(parents=True, exist_ok=True)
     old_exec_root = os.environ.get("CUDA_EXEC_ROOT")
     os.environ["CUDA_EXEC_ROOT"] = str(bench_runtime)
@@ -169,7 +177,7 @@ def formal_benchmark(
     if run_dir is not None:
         try:
             from cuda_exec.trajectory import finalize_run
-            finalize_run(run_dir, bench_result)
+            finalize_run(run_dir, bench_result, kb_repo=kb_repo_path)
             logger.info("Results finalized in %s", run_dir)
         except Exception as exc:
             logger.warning("Failed to finalize run: %s", exc)
@@ -210,6 +218,9 @@ def cli_main() -> None:
         arch=bench_cfg.arch,
         impls=impls,
         timeout_seconds=bench_cfg.timeout,
+        kb_repo=bench_cfg.get("kb_repo"),
+        runtime_root=bench_cfg.get("runtime_root"),
+        data_root=bench_cfg.get("data_root"),
     )
 
     print(json.dumps(result, indent=2, default=str))

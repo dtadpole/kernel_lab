@@ -333,18 +333,22 @@ def prepare_run(
     arch: str,
     impls: str | list[str],
     timeout_seconds: int,
+    *,
+    kb_repo: Path | None = None,
 ) -> Path:
     """Create run dir, snapshot sources + configs. Returns run_dir path.
 
     Call this BEFORE compile/trial. The snapshot in run_dir/data/ is the
     canonical source for all subsequent resolve_impls/load_configs calls.
     """
-    if not KB_REPO.exists():
-        raise FileNotFoundError(f"kernel_lab_kb not found at {KB_REPO}")
+    repo = kb_repo or KB_REPO
+    if not repo.exists():
+        raise FileNotFoundError(f"kernel_lab_kb not found at {repo}")
 
+    runs_dir = repo / "ik_bench" / "runs"
     ts = datetime.now()
     ts_str = ts.strftime("%Y%m%d_%H%M%S")
-    run_dir = RUNS_DIR / kernel / arch / ts_str
+    run_dir = runs_dir / kernel / arch / ts_str
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Write command.json
@@ -387,8 +391,10 @@ def prepare_run(
 # Phase 2: finalize_run() — AFTER benchmark
 # ---------------------------------------------------------------------------
 
-def finalize_run(run_dir: Path, bench_result: dict) -> None:
+def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = None) -> None:
     """Write per-impl results + check gems after bench completes."""
+    repo = kb_repo or KB_REPO
+    gems_dir = repo / "ik_bench" / "gems"
     kernel = bench_result["kernel"]
     arch = bench_result["arch"]
     ts_str = run_dir.name
@@ -432,7 +438,7 @@ def finalize_run(run_dir: Path, bench_result: dict) -> None:
         (impl_dir / "report.md").write_text(report)
 
         # Check gem
-        gem_base = GEMS_DIR / kernel / arch / impl_slug
+        gem_base = gems_dir / kernel / arch / impl_slug
         gem_info = _check_gem(config_results, gem_base)
         if gem_info:
             ver = _next_gem_version(gem_base)
@@ -465,18 +471,18 @@ def finalize_run(run_dir: Path, bench_result: dict) -> None:
             gem_report = _generate_report(gem_results, gem_info)
             (gem_dir / "report.md").write_text(gem_report)
 
-    _auto_commit(kernel, arch, ts_str)
+    _auto_commit(repo, kernel, arch, ts_str)
 
 
-def _auto_commit(kernel: str, arch: str, ts_str: str) -> None:
+def _auto_commit(repo: Path, kernel: str, arch: str, ts_str: str) -> None:
     try:
         subprocess.run(
             ["git", "add", "-A"],
-            cwd=str(KB_REPO), capture_output=True, timeout=10,
+            cwd=str(repo), capture_output=True, timeout=10,
         )
         subprocess.run(
             ["git", "commit", "-m", f"bench: {kernel}/{arch} {ts_str}"],
-            cwd=str(KB_REPO), capture_output=True, timeout=10,
+            cwd=str(repo), capture_output=True, timeout=10,
         )
     except Exception:
         pass

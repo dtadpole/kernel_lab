@@ -1,4 +1,4 @@
-"""Shared utilities for cuda_exec evaluate scripts.
+"""Shared utilities for cuda_exec trial scripts.
 
 Provides device locking, watchdog timeout, GPU cleanup, reference module
 loading/measurement, and correctness helpers.

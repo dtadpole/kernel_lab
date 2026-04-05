@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format evaluate.py JSON output as a compact summary for terminal display."""
+"""Format trial.py JSON output as a compact summary for terminal display."""
 import json
 import sys
 
@@ -17,7 +17,7 @@ def main():
     status = d.get("status", "unknown")
     config = d.get("config_slug", "")
 
-    print(f"evaluate  config={config}  status={status}")
+    print(f"trial  config={config}  status={status}")
 
     if status != "ok":
         print(f"  error: {d.get('error', '')}")

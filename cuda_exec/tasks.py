@@ -8,7 +8,6 @@ from pathlib import Path
 import sys
 from typing import Any, Dict, List
 
-from fastapi import HTTPException
 
 from cuda_exec.runner import (
     capture_turn_file,
@@ -19,7 +18,7 @@ from cuda_exec.runner import (
 
 SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 COMPILE_SCRIPT = SCRIPTS_DIR / "compile.sh"
-EVALUATE_SCRIPT = SCRIPTS_DIR / "evaluate.py"
+TRIAL_SCRIPT = SCRIPTS_DIR / "trial.py"
 PROFILE_NCU_SCRIPT = SCRIPTS_DIR / "profile.sh"
 NCU_REPORT_SCRIPT = SCRIPTS_DIR / "ncu_report.py"
 EVAL_HARNESS = SCRIPTS_DIR / "eval_harness.cu"
@@ -36,11 +35,11 @@ WORKFLOW_RULES = {
 def _validate_relative_path(path_value: str) -> Path:
     path = Path(path_value)
     if not path_value:
-        raise HTTPException(status_code=400, detail="relative path must not be empty")
+        raise ValueError("relative path must not be empty")
     if path.is_absolute():
-        raise HTTPException(status_code=400, detail=f"path must be relative: {path_value}")
+        raise ValueError(f"path must be relative: {path_value}")
     if any(part in {"", ".", ".."} for part in path.parts):
-        raise HTTPException(status_code=400, detail=f"path contains invalid relative segments: {path_value}")
+        raise ValueError(f"path contains invalid relative segments: {path_value}")
     return path
 
 
@@ -58,17 +57,13 @@ def _write_input_files(files: Dict[str, str], destination_root: Path) -> List[Pa
 
 def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Path:
     if not reference:
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise ValueError((
                 "compile requires non-empty reference_files and generated_files. "
                 "Do not compile with only generated files; upload both file groups for the turn."
             ),
         )
     if not generated:
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise ValueError((
                 "compile requires non-empty reference_files and generated_files. "
                 "Do not compile with only reference files; upload both file groups for the turn."
             ),
@@ -78,9 +73,7 @@ def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Pa
 
     if len(generated_cu) == 1:
         if generated_cu[0].name != "generated.cu":
-            raise HTTPException(
-                status_code=400,
-                detail=(
+            raise ValueError((
                     "the .cu entry file in generated_files must be named generated.cu. "
                     "Rename your CUDA source to generated.cu and resubmit. "
                     "Additional header or helper files may use any name."
@@ -88,16 +81,12 @@ def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Pa
             )
         return generated_cu[0]
     if len(generated_cu) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise ValueError((
                 "generated_files must contain exactly one .cu file. We recommend a generator. "
                 "Include a single generated .cu file for the optimized kernel, plus any number of headers or inline helper files if needed."
             ),
         )
-    raise HTTPException(
-        status_code=400,
-        detail=(
+    raise ValueError((
             "generated_files must contain exactly one .cu file. We recommend a generator. "
             "Include one generated .cu file for compile; reference_files may include supporting sources, headers, or non-.cu inputs."
         ),
@@ -216,10 +205,8 @@ def _next_attempt(workspace: dict, stage: str, source: str = "state") -> int:
 def _load_compile_manifest(workspace: dict) -> dict:
     manifest_path = _compile_manifest_path(workspace)
     if not manifest_path.exists():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Workflow violation: compile must run first for this turn before evaluate/profile. "
+        raise ValueError((
+                "Workflow violation: compile must run first for this turn before trial/profile. "
                 f"Missing compile state: {manifest_path}. Start with /compile, or use a new turn."
             ),
         )
@@ -234,14 +221,10 @@ def _primary_artifact_from_manifest(workspace: dict) -> tuple[Path, dict]:
             rel_path = artifact["path"]
             abs_path = (Path(workspace["root_path"]) / rel_path).resolve()
             if not abs_path.exists():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"artifact path recorded in compile state does not exist: {abs_path}",
+                raise ValueError(f"artifact path recorded in compile state does not exist: {abs_path}",
                 )
             return abs_path, artifact
-    raise HTTPException(
-        status_code=400,
-        detail=f"compile state is missing its primary artifact entry: {requested_id}",
+    raise ValueError(f"compile state is missing its primary artifact entry: {requested_id}",
     )
 
 
@@ -326,7 +309,7 @@ def _fallback_performance_summary(run_result: dict, *, source: str, config: dict
     }
 
 
-def _evaluate_correctness_summary(run_result: dict, *, config: dict) -> dict:
+def _trial_correctness_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("comparison"), dict):
         comparison = payload["comparison"]
@@ -343,7 +326,7 @@ def _evaluate_correctness_summary(run_result: dict, *, config: dict) -> dict:
     return {"metadata": {"source": "not_provided", **_config_metadata(config)}}
 
 
-def _evaluate_performance_summary(run_result: dict, *, config: dict) -> dict:
+def _trial_performance_summary(run_result: dict, *, config: dict) -> dict:
     payload = _parse_structured_stdout(run_result["output"]["stdout"])
     if payload and isinstance(payload.get("generated"), dict):
         generated = payload["generated"]
@@ -494,9 +477,7 @@ def run_compile_task(
     manifest_path = _compile_manifest_path(workspace)
 
     if manifest_path.exists() or _existing_attempts(workspace, "compile"):
-        raise HTTPException(
-            status_code=409,
-            detail=(
+        raise ValueError((
                 "Workflow violation: compile may run only once per turn. "
                 "Do not reuse the same turn to upload another file set. If you have new files or want a different compile input set, start a new turn and compile there."
             ),
@@ -521,18 +502,14 @@ def run_compile_task(
         if cudnn_files:
             copied_cudnn = _write_input_files(cudnn_files, workspace_path / "inputs" / "cudnn")
             if not any(path.name == "cudnn.py" for path in copied_cudnn):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
+                raise ValueError((
                         "cudnn_files must include a file named cudnn.py as the entry point. "
                         "Rename your vendor baseline module to cudnn.py and resubmit."
                     ),
                 )
 
         if not any(path.name == "cutedsl.py" for path in copied_reference):
-            raise HTTPException(
-                status_code=400,
-                detail=(
+            raise ValueError((
                     "reference_files must include a file named cutedsl.py as the entry point. "
                     "Rename your CuTe DSL reference module to cutedsl.py and resubmit. "
                     "Additional helper files may use any name."
@@ -642,7 +619,7 @@ def run_compile_task(
             all_ok=run_result["ok"],
             output=run_result["output"],
         )
-    except HTTPException as exc:
+    except (ValueError, FileNotFoundError) as exc:
         _write_manifest(
             manifest_path,
             _workflow_payload(
@@ -650,7 +627,7 @@ def run_compile_task(
                 stage="compile",
                 attempt=attempt,
                 status="error",
-                detail=str(exc.detail),
+                detail=str(exc),
             ),
         )
         raise
@@ -668,7 +645,7 @@ def run_compile_task(
         raise
 
 
-def run_evaluate_task(
+def run_trial_task(
     *,
     metadata,
     timeout_seconds: int,
@@ -677,7 +654,7 @@ def run_evaluate_task(
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
     workspace_path = Path(workspace["workspace_path"])
-    attempt = _next_attempt(workspace, "evaluate")
+    attempt = _next_attempt(workspace, "trial")
     started = time.perf_counter()
 
     config_results: Dict[str, dict] = {}
@@ -685,11 +662,11 @@ def run_evaluate_task(
     stage_artifacts: List[dict] = []
 
     for config_slug, config in configs.items():
-        config_rel = _write_config_record(workspace, "evaluate", attempt, config_slug, config)
-        comparison_rel = _config_artifact_rel("evaluate", attempt, config_slug, "comparison.json")
+        config_rel = _write_config_record(workspace, "trial", attempt, config_slug, config)
+        comparison_rel = _config_artifact_rel("trial", attempt, config_slug, "comparison.json")
         command = [
             sys.executable,
-            str(EVALUATE_SCRIPT),
+            str(TRIAL_SCRIPT),
             "--run-tag",
             metadata.run_tag,
             "--version",
@@ -708,13 +685,13 @@ def run_evaluate_task(
             str(timeout_seconds),
         ]
         run_result = run_generic_command(
-            kind="evaluate",
+            kind="trial",
             command=command,
             workspace_path=str(workspace_path),
             env={},
             timeout_seconds=timeout_seconds,
             return_files=[config_rel],
-            log_file=_stage_log_rel("evaluate", attempt, config_slug),
+            log_file=_stage_log_rel("trial", attempt, config_slug),
         )
         payload_json = _parse_structured_stdout(run_result["output"]["stdout"]) or {}
         comparison_path = Path(workspace["root_path"]) / comparison_rel
@@ -726,14 +703,14 @@ def run_evaluate_task(
             run_result=run_result,
             artifacts=[
                 _build_artifact(
-                    artifact_id=f"evaluate:comparison:{config_slug}",
+                    artifact_id=f"trial:comparison:{config_slug}",
                     kind="comparison",
                     path=comparison_rel,
                     description=f"Reference/generated comparison payload for config {config_slug}",
                 )
             ],
-            correctness=_evaluate_correctness_summary(run_result, config=config),
-            performance=_evaluate_performance_summary(run_result, config=config),
+            correctness=_trial_correctness_summary(run_result, config=config),
+            performance=_trial_performance_summary(run_result, config=config),
         )
         payload["comparison"] = payload_json.get("comparison", {}) if isinstance(payload_json, dict) else {}
         payload["reference"] = payload_json.get("reference", {}) if isinstance(payload_json, dict) else {}
@@ -746,7 +723,7 @@ def run_evaluate_task(
 
     manifest = _workflow_payload(
         metadata,
-        stage="evaluate",
+        stage="trial",
         attempt=attempt,
         status="ok" if all(item["status"] == "ok" for item in config_results.values()) else "error",
     )
@@ -767,17 +744,17 @@ def run_evaluate_task(
             },
             "artifacts": [
                 _build_artifact(
-                    artifact_id="evaluate:state",
+                    artifact_id="trial:state",
                     kind="state",
-                    path=_stage_manifest_rel("evaluate", attempt),
-                    description="Evaluate manifest for this turn and attempt",
+                    path=_stage_manifest_rel("trial", attempt),
+                    description="Trial manifest for this turn and attempt",
                 )
             ],
         }
     )
-    manifest_path = _stage_manifest_path(workspace, "evaluate", attempt)
+    manifest_path = _stage_manifest_path(workspace, "trial", attempt)
     _write_manifest(manifest_path, manifest)
-    stage_files.append(capture_turn_file(_stage_manifest_rel("evaluate", attempt), str(workspace_path)))
+    stage_files.append(capture_turn_file(_stage_manifest_rel("trial", attempt), str(workspace_path)))
     stage_artifacts.extend(manifest["artifacts"])
 
     output = _summarize_config_outputs(config_results)
@@ -786,7 +763,7 @@ def run_evaluate_task(
     return _finalize_stage_result(
         metadata=metadata,
         workspace=workspace,
-        kind="evaluate",
+        kind="trial",
         attempt=attempt,
         command=[str(target_path)],
         stage_artifacts=stage_artifacts,
@@ -803,7 +780,7 @@ def _strip_output_result(run_result: dict, stdout_log_path: Path | None) -> None
     """Strip the large output.result array from the binary's JSON in stdout.
 
     The eval_harness binary prints all kernel result values to stdout.  For
-    profiling those values are irrelevant — correctness is evaluate's job.
+    profiling those values are irrelevant — correctness is trial's job.
     Removes ``output.result`` from the in-memory stdout and the on-disk log.
     """
     stdout = run_result.get("output", {}).get("stdout", "") or ""
@@ -867,7 +844,7 @@ def run_profile_task(
     started = time.perf_counter()
 
     if side not in {"generated", "reference", "cudnn"}:
-        raise HTTPException(status_code=400, detail=f"side must be 'generated', 'reference', or 'cudnn', got: {side}")
+        raise ValueError(f"side must be 'generated', 'reference', or 'cudnn', got: {side}")
 
     config_results: Dict[str, dict] = {}
     stage_files: List[dict] = []
@@ -891,9 +868,7 @@ def run_profile_task(
         elif side == "reference":
             reference_py = Path(workspace["workspace_path"]) / "inputs" / "reference" / "cutedsl.py"
             if not reference_py.exists():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"cutedsl.py not found at {reference_py} — compile first to stage inputs",
+                raise ValueError(f"cutedsl.py not found at {reference_py} — compile first to stage inputs",
                 )
             command = [
                 "bash",
@@ -906,9 +881,7 @@ def run_profile_task(
         else:  # side == "cudnn"
             cudnn_py = Path(workspace["workspace_path"]) / "inputs" / "cudnn" / "cudnn.py"
             if not cudnn_py.exists():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"cudnn.py not found at {cudnn_py} — include cudnn_files in compile request",
+                raise ValueError(f"cudnn.py not found at {cudnn_py} — include cudnn_files in compile request",
                 )
             command = [
                 "bash",

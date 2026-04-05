@@ -23,8 +23,7 @@ def load_config(overrides: tuple[str, ...] = ()) -> DictConfig:
     """Load the merged Hydra configuration from ``conf/``.
 
     Args:
-        overrides: Hydra override strings, e.g.
-            ``("doc_retrieval.embedding.provider=voyage",)``.
+        overrides: Hydra override strings.
             Must be a tuple (not list) for ``lru_cache`` hashability.
 
     Returns:

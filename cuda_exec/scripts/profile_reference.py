@@ -4,7 +4,7 @@
 Wraps a cutedsl.py module with L2 cache flush and controlled
 warmup/trial counts.  Used by the Makefile's profile-ncu-reference
 target so that NCU profiling gets the same measurement environment
-as evaluate (L2 flush before each trial).
+as trial (L2 flush before each run).
 
 Usage:
     python profile_reference.py /path/to/cutedsl.py

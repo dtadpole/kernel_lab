@@ -6,7 +6,7 @@ user-invocable: true
 
 # KB Index Management
 
-Download NVIDIA HTML docs, parse into chunks, and build search indices.
+Download NVIDIA HTML docs, parse into chunks, and build BM25 search index.
 
 ## Commands
 
@@ -40,15 +40,13 @@ Raw docs are saved to `data/nvidia-docs/html/` (in-repo, single source of truth)
 
 Parses HTML (via BeautifulSoup) into search chunks, TOC trees, and full sections. Output: `~/.doc_retrieval/chunks/`.
 
-### Build search indices
+### Build BM25 index
 
 ```bash
-.venv/bin/python -m doc_retrieval index               # both BM25 + FAISS
-.venv/bin/python -m doc_retrieval index --only bm25   # BM25 only (no embeddings needed)
-.venv/bin/python -m doc_retrieval index --only dense  # FAISS only (requires embedding service)
+.venv/bin/python -m doc_retrieval index
 ```
 
-Output: `~/.doc_retrieval/index/`.
+Output: `~/.doc_retrieval/index/bm25.pkl`.
 
 ### Nuke derived artifacts
 
@@ -56,7 +54,7 @@ Output: `~/.doc_retrieval/index/`.
 rm -rf ~/.doc_retrieval/chunks ~/.doc_retrieval/index
 ```
 
-This removes parsed chunks and search indices. Raw docs in `data/nvidia-docs/` are untouched. Re-run `parse && index` to rebuild.
+This removes parsed chunks and search index. Raw docs in `data/nvidia-docs/` are untouched. Re-run `parse && index` to rebuild.
 
 ## Storage Layout
 
@@ -67,5 +65,5 @@ data/nvidia-docs/                # in-repo, committed
 
 ~/.doc_retrieval/                # runtime, derived (safe to delete)
   chunks/                        # all_chunks.jsonl, toc.jsonl, sections.jsonl
-  index/                         # bm25.pkl, faiss.index, chunk_ids.json
+  index/                         # bm25.pkl
 ```

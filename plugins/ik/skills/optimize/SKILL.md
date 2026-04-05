@@ -66,11 +66,11 @@ most recent.
 Then run a fresh evaluation to get ground-truth numbers for this session:
 
 1. Use `/ik:exec` to **compile** the current generated code
-2. Use `/ik:exec` to **evaluate** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
+2. Use `/ik:exec` to **trial** across **ALL** configs in `data/fixtures/{arch}/{kernel}/configs.json`
 3. Record latency for generated code vs reference (CuTe DSL) vs cuDNN/cuBLAS
 
 **After every full evaluation, output a performance comparison table** like the
-example below. This table is mandatory after evaluate-all in both Phase 1 and
+example below. This table is mandatory after trial-all in both Phase 1 and
 Phase 5. Use box-drawing characters for the table border.
 
 ```
@@ -114,7 +114,7 @@ Collect key NCU metrics:
 
 #### 1c. Examine Assembly
 
-Use `/ik:inspect` to review:
+Review from the compile output:
 - **SASS** — actual GPU instructions, look for inefficiencies
 - **PTX** — compiler input, check for unnecessary barriers or redundant ops
 - **Resource usage** — registers per thread, shared memory, spill bytes
@@ -251,11 +251,11 @@ idea to implement first.
    - Check compile output: register count, spill bytes, shared memory
    - If compile fails, fix and retry (up to 3 compile attempts)
    - If register spills increased substantially, reconsider the approach
-2. **Evaluate** across **ALL** configs (every config, no exceptions)
+2. **Trial** across **ALL** configs (every config, no exceptions)
    - Check correctness first — all configs must pass
    - If correctness fails, fix and retry (up to 3 correctness attempts)
    - **Output the performance comparison table** (same format as Phase 1a)
-     after evaluate-all completes — this is mandatory
+     after trial-all completes — this is mandatory
 3. **Profile selectively** — NCU profiling is expensive. Only profile the
    **same 1-2 config(s)** profiled in Phase 1b, to compare the specific NCU
    metrics targeted by this optimization. Do NOT profile all configs.
@@ -265,7 +265,7 @@ idea to implement first.
 
 ```
                     ┌─────────────────────┐
-                    │ Evaluate & Profile  │
+                    │ Trial & Profile  │
                     └────────┬────────────┘
                              │
               ┌──────────────┼──────────────┐

@@ -7,7 +7,7 @@ Documentation placement rule:
 
 Important public conventions captured in this file:
 - Compile inputs are inline file maps: Dict[relative_path, content].
-- Evaluate/profile configs are slug-keyed maps: Dict[config_slug, Dict[str, Any]].
+- Trial/profile configs are slug-keyed maps: Dict[config_slug, Dict[str, Any]].
 - Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
 - `reference` means the reference side of a comparison.
@@ -75,8 +75,8 @@ class CompileRequest(RequestBase):
     )
 
 
-class EvaluateRequest(RequestBase):
-    """Evaluate request over slug-keyed runtime configs.
+class TrialRequest(RequestBase):
+    """Trial request over slug-keyed runtime configs.
 
     `configs` is intentionally flexible:
         config_slug -> arbitrary kernel-specific config payload
@@ -93,7 +93,7 @@ class EvaluateRequest(RequestBase):
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,
         min_length=1,
-        description="Slug-keyed kernel-specific runtime config payloads for evaluate",
+        description="Slug-keyed kernel-specific runtime config payloads for trial",
     )
 
 
@@ -137,10 +137,6 @@ class FileReadRequest(BaseModel):
     path: str = Field(..., min_length=1, description="Relative path under the turn root to read")
     max_bytes: int | None = Field(default=None, ge=1, description="Optional maximum number of bytes to inline from the requested file")
 
-
-class HealthResponse(BaseModel):
-    ok: bool
-    service: str
 
 
 class FilePayload(BaseModel):
@@ -208,7 +204,7 @@ class LatencySummary(BaseModel):
 
 
 class CorrectnessSummary(BaseModel):
-    """Structured correctness summary for evaluate.
+    """Structured correctness summary for trial.
 
     This is intentionally more structured than raw logs so agents do not need
     to parse log text to understand numerical quality.
@@ -229,7 +225,7 @@ class CorrectnessSummary(BaseModel):
 
 
 class PerformanceSummary(BaseModel):
-    """Structured performance summary used by evaluate/profile."""
+    """Structured performance summary used by trial/profile."""
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
     latency_ms: LatencySummary = Field(default_factory=LatencySummary)
@@ -272,15 +268,15 @@ class FileReadResponse(BaseModel):
     file: FilePayload = Field(..., description="Inline payload for the requested turn-relative file")
 
 
-class EvaluateConfigOutput(BaseModel):
-    """Public evaluate output for one config slug.
+class TrialConfigOutput(BaseModel):
+    """Public trial output for one config slug.
 
     `status` is the per-config result, while the top-level response uses
     `all_ok` as the aggregate stage result.
 
     `reference` / `generated` expose the side-specific structured payloads,
     while `correctness` and `performance` provide the compact comparison-facing
-    summaries used by the public evaluate contract.
+    summaries used by the public trial contract.
     """
 
     status: Literal["ok", "error", "timeout", "skipped"]
@@ -291,16 +287,16 @@ class EvaluateConfigOutput(BaseModel):
     performance: PerformanceSummary = Field(default_factory=PerformanceSummary)
     artifacts: Dict[str, FilePayload] = Field(
         default_factory=dict,
-        description="Relative-path keyed kept evaluate comparison artifacts for this config",
+        description="Relative-path keyed kept trial comparison artifacts for this config",
     )
     logs: Dict[str, FilePayload] = Field(
         default_factory=dict,
-        description="Relative-path keyed per-config evaluate log/stdout/stderr files",
+        description="Relative-path keyed per-config trial log/stdout/stderr files",
     )
 
 
-class EvaluateResponse(ResponseBase):
-    """Minimal evaluate response keyed by config slug.
+class TrialResponse(ResponseBase):
+    """Minimal trial response keyed by config slug.
 
     Example:
         {
@@ -323,7 +319,7 @@ class EvaluateResponse(ResponseBase):
         }
     """
 
-    configs: Dict[str, EvaluateConfigOutput] = Field(default_factory=dict)
+    configs: Dict[str, TrialConfigOutput] = Field(default_factory=dict)
 
 
 class ProfileConfigOutput(BaseModel):

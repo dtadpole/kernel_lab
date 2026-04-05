@@ -19,9 +19,9 @@ def cmd_parse(args: argparse.Namespace) -> None:
 
 
 def cmd_index(args: argparse.Namespace) -> None:
-    from doc_retrieval.indexer import build_indices
+    from doc_retrieval.indexer import build_index
 
-    build_indices(only=args.only)
+    build_index()
 
 
 def cmd_find(args: argparse.Namespace) -> None:
@@ -29,7 +29,6 @@ def cmd_find(args: argparse.Namespace) -> None:
 
     cli_find(
         query=args.query,
-        mode=args.mode,
         top_k=args.top_k,
     )
 
@@ -78,24 +77,12 @@ def main() -> None:
     pa.set_defaults(func=cmd_parse)
 
     # --- index ---
-    ix = sub.add_parser("index", help="Build search indices from parsed chunks")
-    ix.add_argument(
-        "--only",
-        choices=["bm25", "dense"],
-        default=None,
-        help="Build only one index type (default: both)",
-    )
+    ix = sub.add_parser("index", help="Build BM25 search index from parsed chunks")
     ix.set_defaults(func=cmd_index)
 
     # --- find ---
     sr = sub.add_parser("find", help="Search CUDA documentation")
     sr.add_argument("query", help="Search query")
-    sr.add_argument(
-        "--mode",
-        choices=["bm25", "dense", "hybrid"],
-        default="hybrid",
-        help="Search mode (default: hybrid)",
-    )
     sr.add_argument(
         "--top-k",
         type=int,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comparison runner for cuda_exec evaluate stage.
+"""Comparison runner for cuda_exec trial stage.
 
 Aligned with kbEvalCli.py patterns:
 - CUDA event timing (matching time_execution_with_cuda_event)
@@ -234,7 +234,7 @@ def _comparison_payload(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Comparison runner for cuda_exec evaluate. Runs reference and generated for one config.",
+        description="Comparison runner for cuda_exec trial. Runs reference and generated for one config.",
     )
     add_metadata_args(parser)
     parser.add_argument("--config-slug", required=True, help="Stable runtime config slug")
@@ -271,8 +271,8 @@ def main() -> int:
         target_path, _ = _primary_artifact_from_manifest(workspace)
         reference_root = Path(workspace_path) / "inputs" / "reference"
         reference_path = load_reference_entry(reference_root)
-        config_rel = f"state/evaluate.inline.{_slugify(args.config_slug)}.json"
-        env = _config_env(workspace, "evaluate", 1, args.config_slug, config, config_rel)
+        config_rel = f"state/trial.inline.{_slugify(args.config_slug)}.json"
+        env = _config_env(workspace, "trial", 1, args.config_slug, config, config_rel)
 
         reference_module = load_reference_module(reference_path)
         reference_config = extract_config_payload(env["CUDA_EXEC_CONFIG_JSON"])
@@ -387,7 +387,7 @@ def main() -> int:
             "metadata": metadata.model_dump(),
             "config_slug": args.config_slug,
             "status": "timeout",
-            "error": "evaluate watchdog timeout expired",
+            "error": "trial watchdog timeout expired",
         }
         print(json.dumps(error_result, indent=2))
         return 1

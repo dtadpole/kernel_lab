@@ -21,10 +21,8 @@ cd /home/zhenc/kernel_lab
 
 ```bash
 .venv/bin/python -m doc_retrieval find "shared memory bank conflicts"
-.venv/bin/python -m doc_retrieval find "TMA descriptor" --mode bm25 --top-k 10
+.venv/bin/python -m doc_retrieval find "TMA descriptor" --top-k 10
 ```
-
-Modes: `hybrid` (default, best quality), `bm25` (keyword), `dense` (semantic).
 
 Each result includes `doc_id` and `section_id` for follow-up with `read` or `browse`.
 

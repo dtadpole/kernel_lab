@@ -28,7 +28,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import HTTPException
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
 CUDA_TOOLKIT_BIN = CUDA_TOOLKIT_ROOT / "bin"
@@ -39,13 +38,11 @@ SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 def _validate_component(label: str, value: str) -> str:
     if not value:
-        raise HTTPException(status_code=400, detail=f"{label} must not be empty")
+        raise ValueError(f"{label} must not be empty")
     if value in {".", ".."} or "/" in value:
-        raise HTTPException(status_code=400, detail=f"{label} contains an invalid path component")
+        raise ValueError(f"{label} contains an invalid path component")
     if not SAFE_COMPONENT_RE.fullmatch(value):
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise ValueError((
                 f"{label} must match {SAFE_COMPONENT_RE.pattern} "
                 f"and only contain safe path characters"
             ),
@@ -90,9 +87,9 @@ def resolve_workspace_bundle(
     safe_version = _validate_component("version", version)
     safe_direction_slug = _validate_component("direction_slug", direction_slug)
     if direction_id < 0:
-        raise HTTPException(status_code=400, detail="direction_id must be >= 0")
+        raise ValueError("direction_id must be >= 0")
     if turn < 0:
-        raise HTTPException(status_code=400, detail="turn must be >= 0")
+        raise ValueError("turn must be >= 0")
 
     turn_root = (
         _runtime_root()
@@ -122,9 +119,9 @@ def _merge_env(extra_env: Dict[str, str]) -> Dict[str, str]:
 def _resolve_existing_directory(path_value: str) -> Path:
     path = Path(path_value).expanduser().resolve()
     if not path.exists():
-        raise HTTPException(status_code=400, detail=f"workspace path does not exist: {path}")
+        raise ValueError(f"workspace path does not exist: {path}")
     if not path.is_dir():
-        raise HTTPException(status_code=400, detail=f"workspace path is not a directory: {path}")
+        raise ValueError(f"workspace path is not a directory: {path}")
     return path
 
 
@@ -234,12 +231,9 @@ def _run_command(
             check=False,
         )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ValueError(str(exc)) from exc
     except subprocess.TimeoutExpired as exc:
-        raise HTTPException(
-            status_code=408,
-            detail=f"{kind} timed out after {timeout_seconds}s",
-        ) from exc
+        raise TimeoutError(f"{kind} timed out after {timeout_seconds}s") from exc
 
     extra_files = list(return_files or [])
     if log_file:
@@ -318,21 +312,19 @@ def run_cuda_command(
     log_file: Optional[str] = None,
 ) -> dict:
     if not command:
-        raise HTTPException(status_code=400, detail="command must not be empty")
+        raise ValueError("command must not be empty")
     executable = Path(command[0]).expanduser().resolve()
     toolkit_bin = CUDA_TOOLKIT_BIN.resolve()
     if toolkit_bin not in executable.parents and executable != toolkit_bin:
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise ValueError((
                 "command[0] must point to a CUDA Toolkit binary under "
                 f"{toolkit_bin}"
             ),
         )
     if not executable.exists():
-        raise HTTPException(status_code=400, detail=f"binary does not exist: {executable}")
+        raise ValueError(f"binary does not exist: {executable}")
     if not os.access(executable, os.X_OK):
-        raise HTTPException(status_code=400, detail=f"binary is not executable: {executable}")
+        raise ValueError(f"binary is not executable: {executable}")
 
     normalized_command = [str(executable), *command[1:]]
     return _run_command(

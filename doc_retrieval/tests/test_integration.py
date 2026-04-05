@@ -1,7 +1,6 @@
 """Integration tests for the full doc retrieval pipeline.
 
 Tests HTML parsing → BM25 indexing → search → navigation on real CUDA docs.
-Dense search tests require the embedding service and are skipped if unavailable.
 """
 
 from __future__ import annotations
@@ -104,10 +103,6 @@ def runtime_dir(tmp_path_factory, small_doc_parsed, large_doc_parsed):
     with open(index_dir / "bm25.pkl", "wb") as f:
         pickle.dump(bm25, f)
 
-    # Write chunk_ids.json (needed by FAISS path, even if we don't build FAISS)
-    with open(index_dir / "chunk_ids.json", "w") as f:
-        json.dump([c["chunk_id"] for c in all_chunks], f)
-
     return tmpdir
 
 
@@ -203,34 +198,34 @@ class TestBM25Search:
     """BM25 keyword search on real parsed data."""
 
     def test_shared_memory_query(self, searcher):
-        results = searcher.search_bm25("shared memory bank conflicts", top_k=5)
+        results = searcher.search("shared memory bank conflicts", top_k=5)
         assert len(results) >= 3
         assert results[0].score > 0
         texts = " ".join(r.text.lower() for r in results)
         assert "shared memory" in texts or "bank" in texts
 
     def test_thread_hierarchy_query(self, searcher):
-        results = searcher.search_bm25("thread block cluster hierarchy", top_k=5)
+        results = searcher.search("thread block cluster hierarchy", top_k=5)
         assert len(results) >= 1
         texts = " ".join(r.text.lower() for r in results)
         assert "thread" in texts
 
     def test_cuda_keyword_exact_match(self, searcher):
-        results = searcher.search_bm25("__syncthreads", top_k=5)
+        results = searcher.search("__syncthreads", top_k=5)
         assert len(results) >= 1
         texts = " ".join(r.text.lower() for r in results)
         assert "__syncthreads" in texts or "syncthreads" in texts
 
     def test_blackwell_tuning(self, searcher):
-        results = searcher.search_bm25("Blackwell tuning guide", top_k=5)
+        results = searcher.search("Blackwell tuning guide", top_k=5)
         assert len(results) >= 1
         doc_ids = [r.doc_id for r in results]
         assert SMALL_SLUG in doc_ids, \
             f"Expected {SMALL_SLUG} in results, got {doc_ids}"
 
     def test_results_have_section_id(self, searcher):
-        """Every BM25 result should carry a section_id for navigation."""
-        results = searcher.search_bm25("memory hierarchy", top_k=5)
+        """Every result should carry a section_id for navigation."""
+        results = searcher.search("memory hierarchy", top_k=5)
         assert len(results) >= 1
         # Load chunks to check section_id exists
         chunks = searcher._load_chunks()
@@ -242,7 +237,7 @@ class TestBM25Search:
                 f"Chunk {r.chunk_id} missing section_id"
 
     def test_empty_query_returns_empty(self, searcher):
-        results = searcher.search_bm25("", top_k=5)
+        results = searcher.search("", top_k=5)
         assert len(results) == 0
 
 
@@ -337,7 +332,7 @@ class TestSearchThenNavigate:
 
     def test_search_then_read_section(self, searcher):
         """Search for a term, then use section_id to read full section."""
-        results = searcher.search_bm25("memory hierarchy", top_k=3)
+        results = searcher.search("memory hierarchy", top_k=3)
         assert len(results) >= 1
 
         # Get section_id from the chunk
@@ -355,7 +350,7 @@ class TestSearchThenNavigate:
 
     def test_search_then_browse_parent(self, searcher):
         """Search, find section, go up to parent chapter via nav."""
-        results = searcher.search_bm25("thread block", top_k=3)
+        results = searcher.search("thread block", top_k=3)
         assert len(results) >= 1
 
         chunks = searcher._load_chunks()
@@ -371,7 +366,7 @@ class TestSearchThenNavigate:
 
     def test_search_then_read_sibling(self, searcher):
         """Search, find section, navigate to next sibling."""
-        results = searcher.search_bm25("performance guidelines", top_k=3)
+        results = searcher.search("performance guidelines", top_k=3)
         assert len(results) >= 1
 
         chunks = searcher._load_chunks()
@@ -386,68 +381,3 @@ class TestSearchThenNavigate:
             assert next_sec is not None
             assert next_sec["title"] != section["title"]
 
-
-# ===========================================================================
-# Dense Search Tests (require embedding service)
-# ===========================================================================
-
-def _embedding_service_available() -> bool:
-    """Check if the local embedding service is running."""
-    try:
-        import httpx
-        resp = httpx.get("http://localhost:46982/info", timeout=2.0)
-        return resp.status_code == 200
-    except Exception:
-        return False
-
-
-@pytest.mark.skipif(
-    not _embedding_service_available(),
-    reason="Embedding service not available at localhost:46982",
-)
-@_needs_html(LARGE_SLUG)
-class TestDenseSearch:
-    """Dense vector search — requires the embedding service."""
-
-    @pytest.fixture(scope="class")
-    def dense_searcher(self, runtime_dir):
-        """DocSearcher with FAISS index built from embeddings."""
-        import faiss
-        import numpy as np
-        from doc_retrieval.embeddings import create_client
-        from doc_retrieval.searcher import DocSearcher
-
-        s = DocSearcher(index_dir=runtime_dir / "index")
-        s._runtime_root = runtime_dir
-
-        # Build FAISS index if not already built
-        faiss_path = runtime_dir / "index" / "faiss.index"
-        if not faiss_path.exists():
-            chunks = s._load_chunks()
-            client = create_client()
-            texts = [c["text"][:500] for c in chunks]  # truncate for speed
-
-            matrix = client.embed_texts(texts)
-            # Normalize for cosine similarity
-            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-            norms[norms == 0] = 1
-            matrix = matrix / norms
-
-            index = faiss.IndexFlatIP(matrix.shape[1])
-            index.add(matrix)
-            faiss.write_index(index, str(faiss_path))
-
-        return s
-
-    def test_semantic_search(self, dense_searcher):
-        results = dense_searcher.search_dense(
-            "how to optimize GPU memory access patterns", top_k=5
-        )
-        assert len(results) >= 3
-        assert results[0].score > 0.3
-
-    def test_hybrid_search(self, dense_searcher):
-        results = dense_searcher.search_hybrid(
-            "shared memory bank conflicts", top_k=5
-        )
-        assert len(results) >= 3

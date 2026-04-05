@@ -70,22 +70,10 @@ html_parsing:
     - "header"
     - "footer"
 
-# --- Embedding settings ---
-# TEI (Text Embeddings Inference) on remote GPU host via SSH tunnel.
-# See: kb:service skill for deploying/managing the service.
-embedding:
-  base_url: "http://localhost:46982/v1"
-  model: "Qwen/Qwen3-Embedding-4B"
-  batch_size: 32  # TEI max_client_batch_size is 32
-  dimensions: 2560
-
 # --- Search defaults ---
 search:
-  default_mode: "hybrid"
   default_top_k: 5
   max_top_k: 20
-  bm25_weight: 0.3
-  rrf_k: 60
 
 # --- Storage paths ---
 # Raw HTML docs live in the repo (data/nvidia-docs/) — single source of truth.

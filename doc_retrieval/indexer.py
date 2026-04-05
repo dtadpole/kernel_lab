@@ -1,4 +1,4 @@
-"""Build BM25 and FAISS indices from parsed document chunks."""
+"""Build BM25 index from parsed document chunks."""
 
 from __future__ import annotations
 
@@ -7,8 +7,6 @@ import logging
 import pickle
 import re
 from pathlib import Path
-
-import numpy as np
 
 from doc_retrieval.config import load_config
 
@@ -52,9 +50,17 @@ def _tokenize_for_bm25(text: str) -> list[str]:
     return tokens
 
 
-def _build_bm25(chunks: list[dict]) -> None:
-    """Build and save a BM25 index."""
+def build_index() -> None:
+    """Build BM25 search index from parsed chunks."""
     from rank_bm25 import BM25Okapi
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    chunks = _load_chunks()
 
     index_dir = _runtime_root() / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -69,101 +75,3 @@ def _build_bm25(chunks: list[dict]) -> None:
     with open(out_path, "wb") as f:
         pickle.dump(bm25, f)
     logger.info("BM25 index saved to %s", out_path)
-
-
-def _build_dense(chunks: list[dict]) -> None:
-    """Build and save a FAISS dense index with API embeddings."""
-    import faiss
-
-    from doc_retrieval.embeddings import EmbeddingCache, create_client
-
-    index_dir = _runtime_root() / "index"
-    index_dir.mkdir(parents=True, exist_ok=True)
-
-    client = create_client()
-    cache = EmbeddingCache(index_dir / "embedding_cache.npz")
-
-    # Determine which chunks need embedding
-    texts_to_embed: list[str] = []
-    indices_to_embed: list[int] = []
-
-    for i, chunk in enumerate(chunks):
-        cached = cache.get(chunk["text"])
-        if cached is None:
-            texts_to_embed.append(chunk["text"])
-            indices_to_embed.append(i)
-
-    logger.info(
-        "Need to embed %d/%d chunks (%d cached)",
-        len(texts_to_embed),
-        len(chunks),
-        len(chunks) - len(texts_to_embed),
-    )
-
-    # Embed uncached chunks
-    if texts_to_embed:
-        new_embeddings = client.embed_texts(texts_to_embed)
-        for idx, emb in zip(indices_to_embed, new_embeddings):
-            cache.put(chunks[idx]["text"], emb)
-        cache.save()
-
-    # Collect all embeddings in order
-    all_embeddings = np.zeros(
-        (len(chunks), client.dimensions), dtype=np.float32
-    )
-    for i, chunk in enumerate(chunks):
-        emb = cache.get(chunk["text"])
-        if emb is not None:
-            all_embeddings[i] = emb
-
-    # Normalize for cosine similarity via inner product
-    norms = np.linalg.norm(all_embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    all_embeddings = all_embeddings / norms
-
-    # Build FAISS flat index
-    logger.info("Building FAISS IndexFlatIP (dim=%d)...", client.dimensions)
-    index = faiss.IndexFlatIP(client.dimensions)
-    index.add(all_embeddings)
-
-    # Save
-    faiss.write_index(index, str(index_dir / "faiss.index"))
-    chunk_ids = [c["chunk_id"] for c in chunks]
-    with open(index_dir / "chunk_ids.json", "w") as f:
-        json.dump(chunk_ids, f)
-
-    metadata = {
-        "num_chunks": len(chunks),
-        "embedding_base_url": client.base_url,
-        "embedding_model": client.model,
-        "dimensions": client.dimensions,
-    }
-    with open(index_dir / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    logger.info(
-        "FAISS index saved: %d vectors, dim=%d",
-        index.ntotal,
-        client.dimensions,
-    )
-
-
-def build_indices(only: str | None = None) -> None:
-    """Build search indices from parsed chunks.
-
-    Args:
-        only: If "bm25" or "dense", build only that index. None = both.
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    chunks = _load_chunks()
-
-    if only is None or only == "bm25":
-        _build_bm25(chunks)
-
-    if only is None or only == "dense":
-        _build_dense(chunks)

@@ -1,4 +1,4 @@
-"""FastAPI entrypoints for cuda_exec.
+"""Local entry points for cuda_exec.
 
 Keep this module thin.
 - models.py documents the public request/response contract.
@@ -10,24 +10,19 @@ from __future__ import annotations
 
 import re
 
-from fastapi import Depends, FastAPI, HTTPException
-
-from cuda_exec.auth import verify_bearer_token
-
 from cuda_exec.models import (
     CompileArtifacts,
     CompileRequest,
     CompileResponse,
     CompileSassArtifacts,
     CompileToolOutputs,
-    EvaluateConfigOutput,
-    EvaluateRequest,
-    EvaluateResponse,
+    TrialConfigOutput,
+    TrialRequest,
+    TrialResponse,
     ExecuteRequest,
     ExecuteResponse,
     FileReadRequest,
     FileReadResponse,
-    HealthResponse,
     ProfileConfigOutput,
     ProfileRequest,
     ProfileResponse,
@@ -37,20 +32,12 @@ from cuda_exec.runner import capture_turn_file, resolve_workspace_bundle
 from cuda_exec.tasks import (
     _validate_relative_path,
     run_compile_task,
-    run_evaluate_task,
+    run_trial_task,
     run_execute_task,
     run_profile_task,
 )
 
-app = FastAPI(title="cuda_exec", version="0.1.0")
 SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-@app.get("/healthz", response_model=HealthResponse)
-def healthz() -> HealthResponse:
-    """Lightweight service health check."""
-
-    return HealthResponse(ok=True, service="cuda_exec")
 
 
 def _attempt_tag(attempt: int) -> str:
@@ -98,16 +85,6 @@ def _capture_public_file(workspace_path: str, rel_path: str, *, inline: bool, ma
     return _capture_public_files(workspace_path, [rel_path], inline=inline, max_bytes=max_bytes).get(rel_path)
 
 
-def _validate_file_read_scope(rel_path: str) -> None:
-    _validate_relative_path(rel_path)
-    allowed_prefixes = ("artifacts/", "logs/", "state/")
-    if not rel_path.startswith(allowed_prefixes):
-        raise HTTPException(
-            status_code=400,
-            detail="file reads are limited to artifacts/, logs/, and state/ paths under the resolved turn root",
-        )
-
-
 def _capture_public_files(workspace_path: str, rel_paths: list[str], *, inline: bool, max_bytes: int | None = None) -> dict[str, dict]:
     """Materialize public response files as relative_path -> FilePayload."""
 
@@ -128,8 +105,7 @@ def _capture_public_files(workspace_path: str, rel_paths: list[str], *, inline: 
     return payload
 
 
-@app.post("/compile", response_model=CompileResponse)
-def compile_endpoint(request: CompileRequest, _auth: None = Depends(verify_bearer_token)) -> CompileResponse:
+def compile_endpoint(request: CompileRequest) -> CompileResponse:
     """Compile inline code inputs into kept compile artifacts plus logs."""
 
     result = run_compile_task(
@@ -176,30 +152,31 @@ def compile_endpoint(request: CompileRequest, _auth: None = Depends(verify_beare
     )
 
 
-@app.post("/files/read", response_model=FileReadResponse)
-def file_read_endpoint(request: FileReadRequest, _auth: None = Depends(verify_bearer_token)) -> FileReadResponse:
+def file_read_endpoint(request: FileReadRequest) -> FileReadResponse:
     """Read one turn-relative file from artifacts/, logs/, or state/."""
 
-    _validate_file_read_scope(request.path)
+    _validate_relative_path(request.path)
+    allowed_prefixes = ("artifacts/", "logs/", "state/")
+    if not request.path.startswith(allowed_prefixes):
+        raise ValueError("file reads are limited to artifacts/, logs/, and state/ paths under the resolved turn root")
     workspace = resolve_workspace_bundle(**request.metadata.model_dump())
     file_payload = _capture_public_file(workspace["workspace_path"], request.path, inline=True, max_bytes=request.max_bytes)
     if file_payload is None:
-        raise HTTPException(status_code=404, detail=f"file not found for this turn/path: {request.path}")
+        raise FileNotFoundError(f"file not found for this turn/path: {request.path}")
     return FileReadResponse(metadata=request.metadata, file=file_payload)
 
 
-@app.post("/evaluate", response_model=EvaluateResponse)
-def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bearer_token)) -> EvaluateResponse:
-    """Evaluate one compiled artifact against slug-keyed runtime configs."""
+def trial_endpoint(request: TrialRequest) -> TrialResponse:
+    """Trial one compiled artifact against slug-keyed runtime configs."""
 
-    result = run_evaluate_task(
+    result = run_trial_task(
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
     )
     attempt = result["attempt"]
     items = {
-        config_slug: EvaluateConfigOutput(
+        config_slug: TrialConfigOutput(
             status=item["status"],
             reference=item.get("reference") or {},
             generated=item.get("generated") or {},
@@ -213,13 +190,13 @@ def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bea
             ),
             logs=_capture_public_files(
                 result["workspace_path"],
-                _stage_log_paths("evaluate", attempt, config_slug),
+                _stage_log_paths("trial", attempt, config_slug),
                 inline=True,
             ),
         )
         for config_slug, item in result.get("configs", {}).items()
     }
-    return EvaluateResponse(
+    return TrialResponse(
         metadata=request.metadata,
         all_ok=result["all_ok"],
         attempt=attempt,
@@ -227,8 +204,7 @@ def evaluate_endpoint(request: EvaluateRequest, _auth: None = Depends(verify_bea
     )
 
 
-@app.post("/profile", response_model=ProfileResponse, response_model_exclude_none=True)
-def profile_endpoint(request: ProfileRequest, _auth: None = Depends(verify_bearer_token)) -> ProfileResponse:
+def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
     """NCU-profile a compiled artifact or reference kernel against slug-keyed runtime configs."""
 
     result = run_profile_task(
@@ -263,8 +239,7 @@ def profile_endpoint(request: ProfileRequest, _auth: None = Depends(verify_beare
     )
 
 
-@app.post("/execute", response_model=ExecuteResponse)
-def execute_endpoint(request: ExecuteRequest, _auth: None = Depends(verify_bearer_token)) -> ExecuteResponse:
+def execute_endpoint(request: ExecuteRequest) -> ExecuteResponse:
     """Run a generic CUDA-tool command and return logs only."""
 
     result = run_execute_task(

@@ -329,7 +329,9 @@ def run_cuda_command(
     if not command:
         raise ValueError("command must not be empty")
     executable = Path(command[0]).expanduser().resolve()
-    toolkit_bin = CUDA_TOOLKIT_BIN.resolve()
+    from cuda_exec.host_env import resolve_host_env
+    cuda_home = resolve_host_env().get("CUDA_HOME", str(CUDA_TOOLKIT_ROOT))
+    toolkit_bin = (Path(cuda_home) / "bin").resolve()
     if toolkit_bin not in executable.parents and executable != toolkit_bin:
         raise ValueError((
                 "command[0] must point to a CUDA Toolkit binary under "

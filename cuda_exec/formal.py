@@ -38,7 +38,7 @@ def formal_benchmark(
     arch: str,
     *,
     impls: str | List[str] = "all",
-    timeout_seconds: int = 300,
+    timeout_seconds: int = 120,
     kb_repo: str | None = None,
     runtime_root: str | None = None,
     data_root: str | None = None,

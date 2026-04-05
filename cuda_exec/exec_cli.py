@@ -47,7 +47,7 @@ def do_compile(
     *,
     run_tag: str = "auto",
     turn: int = 1,
-    timeout: int = 300,
+    timeout: int = 120,
     data_root: Path | None = None,
 ) -> dict:
     """Compile an implementation against its reference."""
@@ -80,7 +80,7 @@ def do_trial(
     configs: str | list[str] = "all",
     run_tag: str = "auto",
     turn: int = 1,
-    timeout: int = 300,
+    timeout: int = 120,
     data_root: Path | None = None,
 ) -> dict:
     """Trial an implementation across configs."""
@@ -111,7 +111,7 @@ def do_profile(
     configs: str | list[str] = "all",
     run_tag: str = "auto",
     turn: int = 1,
-    timeout: int = 300,
+    timeout: int = 120,
     data_root: Path | None = None,
 ) -> dict:
     """Profile an implementation with NCU."""
@@ -156,18 +156,28 @@ def cli_main() -> None:
 
     exec_cfg = cfg.exec
 
-    # Set CUDA_VISIBLE_DEVICES from config if specified
+    # Set CUDA_VISIBLE_DEVICES: explicit gpu= > host config > env
     gpu = exec_cfg.get("gpu")
     if gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    elif "CUDA_VISIBLE_DEVICES" not in os.environ:
+        from cuda_exec.host_env import resolve_benchmark_gpus
+        bench_gpus = resolve_benchmark_gpus()
+        if bench_gpus:
+            os.environ["CUDA_VISIBLE_DEVICES"] = bench_gpus
 
     action = exec_cfg.action
     kernel = exec_cfg.kernel
     arch = exec_cfg.arch
+
+    # Resolve "auto" arch from host config / nvidia-smi
+    if arch == "auto":
+        from cuda_exec.host_env import resolve_arch
+        arch = resolve_arch()
     impl_slug = exec_cfg.impl
     run_tag = exec_cfg.get("run_tag", "auto")
     turn = exec_cfg.get("turn", 1)
-    timeout = exec_cfg.get("timeout", 300)
+    timeout = exec_cfg.get("timeout", 120)
     data_root_str = exec_cfg.get("data_root")
     data_root = Path(data_root_str).expanduser() if data_root_str else None
 

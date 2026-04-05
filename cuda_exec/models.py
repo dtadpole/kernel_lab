@@ -36,7 +36,7 @@ class Metadata(BaseModel):
 
 class RequestBase(BaseModel):
     metadata: Metadata = Field(..., description="Required agent metadata")
-    timeout_seconds: int = Field(default=180, ge=1, le=900)
+    timeout_seconds: int = Field(default=120, ge=1, le=900)
 
 
 class CompileRequest(RequestBase):

@@ -178,7 +178,7 @@ def main() -> int:
     parser.add_argument("--impls", required=True,
                         help="Comma-separated impl slugs in order. First ref-* is golden. "
                              "Example: ref-cublas,gen-cutedsl,gen-cuda")
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--num-warmups", type=int, default=NUM_WARMUP_RUNS)
     parser.add_argument("--num-perf-trials", type=int, default=NUM_PERF_TRIALS)

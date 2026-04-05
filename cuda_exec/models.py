@@ -100,9 +100,10 @@ class ProfileRequest(RequestBase):
       ``NCU_KERNEL_FILTER`` regex to skip PyTorch JIT overhead kernels)
     """
 
-    side: Literal["generated", "reference", "cudnn"] = Field(
+    impl: str = Field(
         ...,
-        description="Which side to NCU-profile: 'generated' (compiled CUDA binary), 'reference' (Python/CuTe DSL kernel), or 'cudnn' (vendor baseline)",
+        description="Impl slug to NCU-profile (e.g. 'gen-cuda', 'ref-cublas', 'gen-cutedsl'). "
+                    "Resolved from inputs/{slug}/ in the workspace.",
     )
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,

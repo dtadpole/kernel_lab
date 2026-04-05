@@ -77,33 +77,6 @@ def _write_input_files(files: Dict[str, str], destination_root: Path) -> List[Pa
     return written
 
 
-def _pick_single_cuda_source(generated: List[Path], reference: List[Path]) -> Path:
-    if not reference:
-        raise ValueError((
-                "compile requires non-empty reference_files and generated_files. "
-                "Do not compile with only generated files; upload both file groups for the turn."
-            ),
-        )
-    if not generated:
-        raise ValueError((
-                "compile requires non-empty reference_files and generated_files. "
-                "Do not compile with only reference files; upload both file groups for the turn."
-            ),
-        )
-
-    generated_cu = [path for path in generated if path.suffix == ".cu"]
-
-    if len(generated_cu) == 1:
-        return generated_cu[0]
-    if len(generated_cu) > 1:
-        raise ValueError(
-            "generated_files must contain exactly one .cu file. "
-            f"Found {len(generated_cu)}: {[p.name for p in generated_cu]}"
-        )
-    raise ValueError(
-        "generated_files must contain at least one .cu file."
-    )
-
 
 def _unique_paths(values: List[str]) -> List[str]:
     seen: set[str] = set()
@@ -480,10 +453,6 @@ def run_compile_task(
     metadata,
     timeout_seconds: int,
     impls: Dict[str, Dict[str, str]],
-    # Legacy compat — ignored if impls is provided
-    reference_files: Dict[str, str] | None = None,
-    generated_files: Dict[str, str] | None = None,
-    cudnn_files: Dict[str, str] | None = None,
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     workspace_path = Path(workspace["workspace_path"])
@@ -902,17 +871,20 @@ def run_profile_task(
     metadata,
     timeout_seconds: int,
     configs: Dict[str, dict],
-    side: str = "generated",
+    impl: str = "gen-cuda",
+    # Legacy compat
+    side: str | None = None,
 ) -> dict:
-    """Run Nsight Compute profiling on the generated binary or reference Python kernel."""
+    """Run Nsight Compute profiling on any impl (by slug)."""
+    # Legacy compat: map old side names to slugs
+    if side is not None and impl == "gen-cuda":
+        _side_map = {"generated": "gen-cuda", "reference": "gen-cutedsl", "cudnn": "ref-cublas"}
+        impl = _side_map.get(side, side)
+
     workspace = resolve_workspace_bundle(**metadata.model_dump())
-    target_path, target_artifact = _primary_artifact_from_manifest(workspace)
     workspace_path = Path(workspace["workspace_path"])
     attempt = _next_attempt(workspace, "profile")
     started = time.perf_counter()
-
-    if side not in {"generated", "reference", "cudnn"}:
-        raise ValueError(f"side must be 'generated', 'reference', or 'cudnn', got: {side}")
 
     config_results: Dict[str, dict] = {}
     stage_files: List[dict] = []
@@ -925,7 +897,16 @@ def run_profile_task(
         export_prefix_abs = str((Path(workspace["root_path"]) / export_prefix_rel).resolve())
         ncu_report_rel = f"{export_prefix_rel}.ncu-rep"
 
-        if side == "generated":
+        # Resolve impl from inputs/{slug}/
+        impl_dir = Path(workspace["workspace_path"]) / "inputs" / impl
+        if not impl_dir.is_dir():
+            raise ValueError(f"Impl directory not found: {impl_dir} — compile first to stage inputs")
+
+        # Detect type: .cu → profile compiled binary, .py → profile via Python
+        cu_files = list(impl_dir.glob("*.cu"))
+        if cu_files:
+            # .cu impl: profile the compiled binary
+            target_path, _ = _primary_artifact_from_manifest(workspace)
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
@@ -933,34 +914,19 @@ def run_profile_task(
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
             ]
-        elif side == "reference":
-            ref_dir = Path(workspace["workspace_path"]) / "inputs" / "reference"
-            # Dynamically find reference entry point
-            ref_py_files = sorted(ref_dir.glob("*.py")) if ref_dir.exists() else []
-            reference_py = None
-            for p in ref_py_files:
+        else:
+            # .py impl: profile via Python interpreter
+            py_entry = None
+            for p in sorted(impl_dir.glob("*.py")):
                 if "class Model" in p.read_text(errors="ignore"):
-                    reference_py = p
+                    py_entry = p
                     break
-            if reference_py is None:
-                raise ValueError(f"No reference .py entry point found in {ref_dir} — compile first to stage inputs")
+            if py_entry is None:
+                raise ValueError(f"No .py entry point in {impl_dir}")
             command = [
                 "bash",
                 str(PROFILE_NCU_SCRIPT),
-                "--target", sys.executable, str(reference_py),
-                "--export-prefix", export_prefix_abs,
-                "--set", "detailed",
-            ]
-        else:  # side == "cudnn"
-            cudnn_dir = Path(workspace["workspace_path"]) / "inputs" / "cudnn"
-            cudnn_py_files = sorted(cudnn_dir.glob("*.py")) if cudnn_dir.exists() else []
-            if not cudnn_py_files:
-                raise ValueError(f"No .py entry point found in {cudnn_dir} — include cudnn_files in compile request")
-            cudnn_entry = cudnn_py_files[0]
-            command = [
-                "bash",
-                str(PROFILE_NCU_SCRIPT),
-                "--target", sys.executable, str(cudnn_entry),
+                "--target", sys.executable, str(py_entry),
                 "--export-prefix", export_prefix_abs,
                 "--set", "detailed",
             ]
@@ -1317,7 +1283,7 @@ def profile_endpoint(request: ProfileRequest) -> ProfileResponse:
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
-        side=request.side,
+        impl=request.impl,
     )
     attempt = result["attempt"]
     items = {

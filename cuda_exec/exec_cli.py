@@ -3,7 +3,7 @@
 Usage:
     .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda
     .venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda
-    .venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.side=generated
+    .venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda
 """
 
 from __future__ import annotations
@@ -54,28 +54,19 @@ def do_compile(
     impl = resolve_impl(kernel, arch, impl_slug, data_root=data_root)
     metadata = _build_metadata(kernel, impl_slug, run_tag, turn)
 
-    # Find the primary reference
+    # Build impl-keyed file maps: all impls that need to be staged
     all_impls = resolve_impls(kernel, arch, "all", data_root=data_root)
-    refs = [r for r in all_impls if r["source"] == "ref"]
-    if not refs:
-        raise ValueError(f"No reference implementations found for {kernel}/{arch}")
-    primary_ref = refs[0]
-
-    # Build file maps
-    ref_files = dict(primary_ref["files"])
-    # Include .py gen impls as additional reference files
-    py_gens = [r for r in all_impls if r["source"] == "gen" and r["file_type"] == "py"]
-    for pg in py_gens:
-        ref_files.update(pg["files"])
-    # cudnn = second ref if available
-    cudnn_files = refs[1]["files"] if len(refs) > 1 else {}
+    compile_impls = {}
+    for r in all_impls:
+        compile_impls[r["slug"]] = dict(r["files"])
+    # Ensure the target impl is included
+    if impl_slug not in compile_impls:
+        compile_impls[impl_slug] = dict(impl["files"])
 
     compile_req = CompileRequest(
         metadata=metadata,
         timeout_seconds=timeout,
-        reference_files=ref_files,
-        generated_files=impl["files"],
-        cudnn_files=cudnn_files,
+        impls=compile_impls,
     )
     resp = compile_endpoint(compile_req)
     return resp.model_dump(mode="json")
@@ -118,7 +109,6 @@ def do_profile(
     impl_slug: str,
     *,
     configs: str | list[str] = "all",
-    side: str = "generated",
     run_tag: str = "auto",
     turn: int = 1,
     timeout: int = 300,
@@ -139,7 +129,7 @@ def do_profile(
         metadata=metadata,
         timeout_seconds=timeout,
         configs=profile_configs,
-        side=side,
+        impl=impl_slug,
     )
     resp = profile_endpoint(profile_req)
     return resp.model_dump(mode="json")
@@ -199,10 +189,9 @@ def cli_main() -> None:
             configs=configs_val, run_tag=run_tag, turn=turn, timeout=timeout, data_root=data_root,
         )
     elif action == "profile":
-        side = exec_cfg.get("side", "generated")
         result = do_profile(
             kernel, arch, impl_slug,
-            configs=configs_val, side=side, run_tag=run_tag, turn=turn, timeout=timeout, data_root=data_root,
+            configs=configs_val, run_tag=run_tag, turn=turn, timeout=timeout, data_root=data_root,
         )
     else:
         print(f"Unknown action: {action}. Must be compile, trial, or profile.", file=sys.stderr)

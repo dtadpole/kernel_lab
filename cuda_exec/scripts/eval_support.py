@@ -277,18 +277,46 @@ def allclose_check(
 def generate_inputs(
     config: dict[str, Any],
     device: torch.device,
-) -> list[torch.Tensor]:
+) -> list:
     """Generate input tensors from config. Called by the harness, not fixtures.
 
     This is the single source of truth for input generation — all three
     implementations (cuBLAS, CuTe DSL, Generated CUDA) receive inputs
     from this function. Fixtures define only Model, not get_inputs().
+
+    Returns a list of tensors (and possibly non-tensor args like causal bool).
+    The list is unpacked as model(*inputs) by the harness.
     """
     shape = [int(v) for v in config["shape"]]
-    num_inputs = int(config.get("harness_num_inputs", config.get("num_inputs", 2)))
+    family = config.get("family", "")
 
-    # Generic: create num_inputs tensors, each with the given shape.
-    # shape product should equal input_size (validated but not enforced here).
+    # --- Matrix multiplication: A=[M,K], B=[K,N] ---
+    if "matrix-multiplication" in family or (len(shape) == 2 and "mha" not in family):
+        M = shape[0]
+        K = shape[1] if len(shape) > 1 else shape[0]
+        N = shape[1] if len(shape) > 1 else shape[0]
+        A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+        B = torch.randn(K, N, dtype=torch.bfloat16, device=device)
+        return [A, B]
+
+    # --- Flash Attention (FA4/MHA): Q, K, V + causal flag ---
+    if "fa4" in family or "mha" in family or len(shape) == 4:
+        batch, seq_len, num_heads, head_dim = shape
+        num_kv_heads = int(config.get("num_kv_heads", num_heads))
+        causal = bool(config.get("causal", False))
+        Q = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
+        K = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device)
+        V = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device)
+        return [Q, K, V, causal]
+
+    # --- Vector ops (1D): two same-shape tensors ---
+    if len(shape) == 1:
+        A = torch.randn(shape[0], dtype=torch.bfloat16, device=device)
+        B = torch.randn(shape[0], dtype=torch.bfloat16, device=device)
+        return [A, B]
+
+    # --- Fallback: N identical tensors ---
+    num_inputs = int(config.get("harness_num_inputs", config.get("num_inputs", 2)))
     return [torch.randn(shape, dtype=torch.bfloat16, device=device) for _ in range(num_inputs)]
 
 

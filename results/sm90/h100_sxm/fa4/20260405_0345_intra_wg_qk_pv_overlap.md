@@ -1,4 +1,4 @@
-# FA4 Intra-WG QK/PV Overlap + TMA S2G Store — 511–648 TFLOPS (+10%)
+# FA4 Intra-WG QK/PV Overlap + TMA S2G + Tree Reductions — 511–657 TFLOPS (+10-12%)
 
 ## Hardware
 
@@ -99,10 +99,43 @@ Replaced scalar packed BF16x2 stores with register→SMEM + TMA S2G:
 TMA S2G helps small configs where O store is a larger fraction of total time.
 Slight regression on nc-b2-s16384 due to the 2-phase barrier overhead.
 
-## Remaining Gap Analysis
+## Tree Max/Sum Reductions (commit a1c275a)
 
-The 7–8% gap on smaller configs (b8-s4096, b4-s8192) is likely due to:
-1. **GPU-to-GPU variation**: CuTe DSL reference was measured on GPU 7, our
-   numbers on GPU 4 (same host).
-2. **CuTe DSL's smem_copy_atom**: More efficient register → SMEM mapping
-   compared to our manual swizzle address computation.
+Replaced sequential 31-deep FMNMX chain with 5-level tree reduction
+using separate `tmax[16]`/`tsum[16]` temp arrays. Same instruction count
+but breaks dependency chain: critical path ~124 → ~20 cycles.
+
+## GPU 7 Benchmark (apples-to-apples with CuTe DSL reference)
+
+| Config | Gen CUDA | CuTe DSL | Ratio |
+|--------|----------|----------|-------|
+| causal-b8-s4096 | 511 | 549 | 0.93× |
+| causal-b4-s8192 | 562 | 612 | 0.92× |
+| causal-b2-s16384 | 588 | 584 | **1.01×** |
+| nc-b8-s4096 | 627 | 660 | 0.95× |
+| nc-b4-s8192 | 657 | 693 | 0.95× |
+| nc-b2-s16384 | 640 | 622 | **1.03×** |
+
+## NCU Analysis (GPU 7, causal-b8-s4096)
+
+- Tensor core (HMMA) utilization: 61.5%
+- FMA pipe: 19.7%
+- IPC: 0.50 inst/cycle
+- SASS: 1,117 instructions per mainloop iteration (24 HGMMA, 1,093 scalar)
+
+## Remaining Gap Analysis (SM90-fundamental)
+
+The 5-8% gap on small/medium configs is **softmax-limited**:
+- Softmax: ~1,093 scalar instructions per mainloop iteration
+- PV WGMMA: ~512 cycles (16 m64n64k16 RS × 32 cycles each)
+- Even with perfect overlap, softmax exceeds PV by ~580 cycles
+- 35% of each mainloop iteration is tensor-core-idle waiting for softmax
+
+SM90 lacks the following SM100+ features that would help:
+- `redux.sync.max.f32` — hardware quad max reduction (saves 2 shuffles)
+- `f32x2` packed arithmetic — process 2 softmax elements per instruction
+- `fma.rn.ftz.f32x2` — fused multiply-add on pairs
+
+CuTe DSL has the same algorithmic constraint but may benefit from:
+- `stmatrix.sync.aligned.m8n8.x4` for O → SMEM (we use manual swizzled stores)
+- LLVM backend instruction scheduling (vs nvcc)

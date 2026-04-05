@@ -2,7 +2,7 @@
 name: exec
 description: Compile, trial, and profile CUDA kernels
 user-invocable: true
-argument-hint: <action> [--kernel K] [--impl <slug>] [--gpu N] [options]
+argument-hint: <action> [kernel=K] [impl=<slug>] [gpu=N]
 ---
 
 # CUDA Kernel Execution
@@ -11,10 +11,10 @@ Compile, trial, and profile CUDA kernels via Hydra CLI.
 
 ## GPU Selection
 
-When the user specifies `--gpu N`, pass `exec.gpu=N` on the command.
+When the user specifies `gpu=N`, pass `exec.gpu=N` on the command.
 If no GPU is specified, check `CLAUDE.md` or `AGENTS.md` for the assigned GPU indices for the current host.
 
-**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
+**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `gpu=` value to override it.
 
 ## Implementation Slugs
 

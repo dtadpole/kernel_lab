@@ -3,7 +3,7 @@ name: optimize
 description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify
 user-invocable: true
 disable-model-invocation: true
-argument-hint: <kernel> [--impl <slug>] [--target smXX] [--gpu N]
+argument-hint: <kernel> [impl=<slug>] [arch=smXX] [gpu=N]
 ---
 
 # Optimize Kernel
@@ -17,25 +17,25 @@ one, verifies improvement, and commits if successful.
 | Position | Name | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
-| `--impl` | impl slug | no | first `gen-*` | Which impl to optimize, e.g. `gen-cuda`, `ref-cublas`. Uses dynamic slug format `{source}-{name}` |
-| `--target` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
-| `--gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
+| `impl` | impl slug | no | first `gen-*` | Which impl to optimize, e.g. `gen-cuda`, `ref-cublas`. Uses dynamic slug format `{source}-{name}` |
+| `arch` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
+| `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
 ```
 /ik:optimize fa4
-/ik:optimize matmul --impl gen-cuda
-/ik:optimize fa4 --target sm90
-/ik:optimize fa4 --gpu 4
+/ik:optimize matmul impl=gen-cuda
+/ik:optimize fa4 arch=sm90
+/ik:optimize fa4 gpu=4
 ```
 
-When `--gpu N` is provided, set `CUDA_VISIBLE_DEVICES=N` on all `/ik:exec` and `/ik:bench` commands.
+When `gpu=N` is provided, set `CUDA_VISIBLE_DEVICES=N` on all `/ik:exec` and `/ik:bench` commands.
 
-**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
+**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `gpu=` value to override it.
 
 ## Auto-Detection
 
-If `--target` is not provided, detect from GPU:
+If `arch` is not provided, detect from GPU:
 ```bash
 nvidia-smi --query-gpu=compute_cap --format=csv,noheader
 ```

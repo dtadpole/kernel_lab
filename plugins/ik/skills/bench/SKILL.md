@@ -2,7 +2,7 @@
 name: bench
 description: Formal benchmark — atomic compile + trial ALL configs for comprehensive kernel assessment
 user-invocable: true
-argument-hint: <kernel> [--arch smXX] [--gpu N] [--impls impl1 impl2 ...]
+argument-hint: <kernel> [arch=smXX] [gpu=N] [impls=impl1,impl2]
 ---
 
 # Formal Benchmark
@@ -237,7 +237,7 @@ Example (slugs discovered: `ref-cublas`, `gen-cutedsl`, `gen-cuda`):
 - **Snapshot-first** — sources are snapshotted before compile, never evaluate original files
 - **Read-only intent** — bench does not modify source files
 
-**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
+**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `gpu=` value to override it.
 
 ## Hydra Config
 

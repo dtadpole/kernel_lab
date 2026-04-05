@@ -28,17 +28,33 @@ code is modified during optimization.
 | `arch` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 
-The `gen=` and `ref=` values are short names (not full slugs). They map
-directly to file stems in `data/gen/{arch}/{kernel}/` and `data/ref/{kernel}/`:
-- `gen=cuda` → `gen-cuda` → `data/gen/sm90/matmul/cuda.cu`
-- `ref=cublas` → `ref-cublas` → `data/ref/matmul/cublas.py`
+The `gen=` and `ref=` values are short names (file stems, not full slugs).
+They map to files in `data/gen/{arch}/{kernel}/` and `data/ref/{kernel}/`:
+
+**Directory layout and available names:**
+```
+data/ref/                          data/gen/sm90/
+  matmul/                            matmul/
+    cublas.py      → ref=cublas        cuda.cu       → gen=cuda
+  fa4/                                 cutedsl.py    → gen=cutedsl
+    cudnn.py       → ref=cudnn       fa4/
+    cutedsl.py     → ref=cutedsl       cuda.cu       → gen=cuda
+  vecadd/                            vecadd/
+    cublas.py      → ref=cublas        cuda.cu       → gen=cuda
+```
+
+**Slug mapping**: `gen=cuda` → slug `gen-cuda`, `ref=cublas` → slug `ref-cublas`
+
+**Default ref discovery**: when `ref=` is omitted, all `.py`/`.cu` files in
+`data/ref/{kernel}/` are used. For example, `/ik:optimize fa4` defaults to
+`ref=cudnn,cutedsl` (both files found in `data/ref/fa4/`).
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
 ```
-/ik:optimize fa4
-/ik:optimize matmul gen=cuda
-/ik:optimize matmul gen=cuda ref=cublas
-/ik:optimize fa4 gen=cuda ref=cudnn,cutedsl
+/ik:optimize fa4                            # gen=cuda, ref=cudnn,cutedsl (all in data/ref/fa4/)
+/ik:optimize matmul gen=cuda                # gen=cuda, ref=cublas (only one in data/ref/matmul/)
+/ik:optimize matmul gen=cuda ref=cublas     # explicit
+/ik:optimize fa4 gen=cuda ref=cudnn         # only compare against cudnn
 /ik:optimize fa4 arch=sm90 gpu=4
 ```
 

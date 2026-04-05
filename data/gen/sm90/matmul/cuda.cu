@@ -129,12 +129,39 @@ void store_acc(__nv_bfloat16* C, float (&acc)[64],
 }
 
 /* =========================================================================
- * Kernel
+ * B transpose kernel — run once before main matmul
+ * ========================================================================= */
+__global__ void transpose_bf16(
+    const __nv_bfloat16* __restrict__ src,  /* K×N row-major */
+    __nv_bfloat16* __restrict__ dst,         /* N×K row-major */
+    int K, int N)
+{
+    /* Simple coalesced transpose using shared memory tile */
+    __shared__ __nv_bfloat16 tile[32][33]; /* +1 padding to avoid bank conflicts */
+    int x = blockIdx.x * 32 + threadIdx.x;
+    int y = blockIdx.y * 32 + threadIdx.y;
+
+    /* Read K×N → shared (coalesced) */
+    if (y < K && x < N)
+        tile[threadIdx.y][threadIdx.x] = src[y * N + x];
+    else
+        tile[threadIdx.y][threadIdx.x] = __float2bfloat16(0.0f);
+    __syncthreads();
+
+    /* Write N×K from shared (coalesced) */
+    int ox = blockIdx.y * 32 + threadIdx.x;  /* swapped */
+    int oy = blockIdx.x * 32 + threadIdx.y;
+    if (oy < N && ox < K)
+        dst[oy * K + ox] = tile[threadIdx.x][threadIdx.y];
+}
+
+/* =========================================================================
+ * Main WGMMA kernel — A and Bt both in row-major, vectorized loads
  * ========================================================================= */
 __global__ void __launch_bounds__(THREADS, 1)
 matmul_wgmma(
     const __nv_bfloat16* __restrict__ A,
-    const __nv_bfloat16* __restrict__ B,
+    const __nv_bfloat16* __restrict__ Bt,   /* N×K row-major (pre-transposed) */
     __nv_bfloat16* __restrict__ C,
     int M, int N, int K)
 {
@@ -192,17 +219,30 @@ matmul_wgmma(
                 }
             }
         }
-        /* B: stored N×K transposed. Load B_orig[k][n] into sB[n][k].
-         * sB layout: 128 rows (N) × 64 cols (K), each row = 128B.
-         * But we read from B_orig which is K×N row-major.
-         * Cannot vectorize the transpose — each element goes to a different position.
-         * Scalar load with swizzle for now. */
-        for (int i = tid; i < TILE_N * TILE_K; i += THREADS) {
-            int n = i / TILE_K, k = i % TILE_K;
-            int gN = ctaCol + n, gK = kOff + k;
-            int byte_off = (n * TILE_K + k) * 2;
-            int sw_off = swizzle_128B(byte_off) / 2;
-            sB[buf][sw_off] = (gN < N && gK < K) ? B[gK * N + gN] : __float2bfloat16(0.0f);
+        /* B: Bt is N×K row-major (pre-transposed), same layout as A.
+         * sB: 128 rows (N) × 64 cols (K), each row = 128B = 1 swizzle line.
+         * Vectorized 16B cp.async loads. */
+        for (int i = tid; i < TILE_N * (TILE_K / 8); i += THREADS) {
+            int row = i / (TILE_K / 8);
+            int chunk = i % (TILE_K / 8);
+            int gR = ctaCol + row;
+            int gC = kOff + chunk * 8;
+
+            int byte_off = row * TILE_K * 2 + chunk * 16;
+            int sw_byte = swizzle_128B(byte_off);
+
+            if (gR < N && gC + 7 < K) {
+                __pipeline_memcpy_async(
+                    (char*)sB[buf] + sw_byte,
+                    &Bt[gR * K + gC],
+                    16);
+            } else {
+                for (int j = 0; j < 8; j++) {
+                    int elem_byte = sw_byte + j * 2;
+                    ((__nv_bfloat16*)((char*)sB[buf]))[elem_byte / 2] =
+                        (gR < N && gC + j < K) ? Bt[gR * K + gC + j] : __float2bfloat16(0.0f);
+                }
+            }
         }
     };
 
@@ -260,11 +300,26 @@ extern "C" int kernel_run(
     int dim = (int)sqrtf((float)n);
     if (dim * dim != n) return 1;
 
+    const __nv_bfloat16* A = inputs[0];  /* M×K = dim×dim */
+    const __nv_bfloat16* B = inputs[1];  /* K×N = dim×dim */
+    __nv_bfloat16* C = outputs[0];
+
+    /* Pre-transpose B: K×N → Bt: N×K */
+    __nv_bfloat16* Bt;
+    cudaMalloc(&Bt, (size_t)dim * dim * sizeof(__nv_bfloat16));
+    {
+        dim3 tblock(32, 32);
+        dim3 tgrid((dim + 31) / 32, (dim + 31) / 32);
+        transpose_bf16<<<tgrid, tblock, 0, stream>>>(B, Bt, dim, dim);
+    }
+
+    /* Main GEMM */
     dim3 block(THREADS);
     dim3 grid((dim + TILE_N - 1) / TILE_N, (dim + TILE_M - 1) / TILE_M);
     size_t smem = STAGES * STAGE_BYTES;
     cudaFuncSetAttribute(matmul_wgmma, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-    matmul_wgmma<<<grid, block, smem, stream>>>(
-        inputs[0], inputs[1], outputs[0], dim, dim, dim);
+    matmul_wgmma<<<grid, block, smem, stream>>>(A, Bt, C, dim, dim, dim);
+
+    cudaFree(Bt);
     return 0;
 }

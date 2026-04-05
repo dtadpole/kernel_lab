@@ -538,23 +538,38 @@ void flash_attention_2wg(
                 }
             }
 
-            float lmax = rv[0];
+            /* Tree max reduction — breaks 31-deep dependency chain into
+             * 5-level tree. Uses separate temp array to preserve rv[]. */
+            float tmax[16];
             #pragma unroll
-            for (int c = 1; c < 32; c++) lmax = fmaxf(lmax, rv[c]);
+            for (int i = 0; i < 16; i++) tmax[i] = fmaxf(rv[i], rv[i + 16]);
+            #pragma unroll
+            for (int i = 0; i < 8; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 8]);
+            #pragma unroll
+            for (int i = 0; i < 4; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 4]);
+            tmax[0] = fmaxf(tmax[0], tmax[2]); tmax[1] = fmaxf(tmax[1], tmax[3]);
+            float lmax = fmaxf(tmax[0], tmax[1]);
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 1));
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
 
             rowmax[half] = lmax;
 
-            float lsum = 0.0f;
+            /* Exp2 + tree sum — compute exp2 then reduce with temp array.
+             * rv[] is preserved for the write-back to S_acc. */
+            float tsum[16];
             #pragma unroll
             for (int c = 0; c < 32; c++) {
                 rv[c] = fast_exp2f(rv[c] - lmax);
-                lsum += rv[c];
             }
-            /* Defer quad sum reduction to finalize (CuTe DSL pattern).
-             * Each thread keeps its partial sum; warp shuffle happens once
-             * at the end, saving 4 shuffles per mainloop iteration. */
+            #pragma unroll
+            for (int i = 0; i < 16; i++) tsum[i] = rv[i] + rv[i + 16];
+            #pragma unroll
+            for (int i = 0; i < 8; i++) tsum[i] += tsum[i + 8];
+            #pragma unroll
+            for (int i = 0; i < 4; i++) tsum[i] += tsum[i + 4];
+            tsum[0] += tsum[2]; tsum[1] += tsum[3];
+            float lsum = tsum[0] + tsum[1];
+            /* Deferred quad shuffle to finalize (CuTe DSL pattern) */
             rowsumexp[half] = lsum;
 
             #pragma unroll
@@ -684,9 +699,17 @@ void flash_attention_2wg(
                 }
             }
 
-            float lmax = rv[0];
+            /* Tree max reduction — breaks 31-deep dependency chain into
+             * 5-level tree. Uses separate temp array to preserve rv[]. */
+            float tmax[16];
             #pragma unroll
-            for (int c = 1; c < 32; c++) lmax = fmaxf(lmax, rv[c]);
+            for (int i = 0; i < 16; i++) tmax[i] = fmaxf(rv[i], rv[i + 16]);
+            #pragma unroll
+            for (int i = 0; i < 8; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 8]);
+            #pragma unroll
+            for (int i = 0; i < 4; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 4]);
+            tmax[0] = fmaxf(tmax[0], tmax[2]); tmax[1] = fmaxf(tmax[1], tmax[3]);
+            float lmax = fmaxf(tmax[0], tmax[1]);
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 1));
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
 
@@ -695,13 +718,21 @@ void flash_attention_2wg(
             rowmax[half] = new_max;
             o_rescale[half] = rescale;
 
-            float lsum = 0.0f;
+            /* Exp2 + tree sum — same pattern as prologue */
+            float tsum[16];
             #pragma unroll
             for (int c = 0; c < 32; c++) {
                 rv[c] = fast_exp2f(rv[c] - new_max);
-                lsum += rv[c];
             }
-            /* Deferred: no quad sum shuffle here (CuTe DSL pattern) */
+            #pragma unroll
+            for (int i = 0; i < 16; i++) tsum[i] = rv[i] + rv[i + 16];
+            #pragma unroll
+            for (int i = 0; i < 8; i++) tsum[i] += tsum[i + 8];
+            #pragma unroll
+            for (int i = 0; i < 4; i++) tsum[i] += tsum[i + 4];
+            tsum[0] += tsum[2]; tsum[1] += tsum[3];
+            float lsum = tsum[0] + tsum[1];
+            /* Deferred: no quad sum shuffle here */
             rowsumexp[half] = rowsumexp[half] * rescale + lsum;
 
             #pragma unroll

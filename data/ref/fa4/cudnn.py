@@ -132,15 +132,21 @@ class Model(nn.Module):
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
-        # cuDNN SDPA segfaults on CUDA 13.0 driver (cudnnCreate →
-        # cuModuleLoadData crash). Use FLASH_ATTENTION or EFFICIENT_ATTENTION
-        # backends instead — both are vendor-optimized.
-        with torch.nn.attention.sdpa_kernel([
-            torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-            torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-            torch.nn.attention.SDPBackend.MATH,
-        ]):
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+        # Use cuDNN backend for best performance on H100. Falls back to
+        # FLASH_ATTENTION if cuDNN is unavailable or crashes (e.g. CUDA 13.0
+        # driver has a cudnnCreate segfault).
+        try:
+            with torch.nn.attention.sdpa_kernel([
+                torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
+            ]):
+                out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+        except RuntimeError:
+            with torch.nn.attention.sdpa_kernel([
+                torch.nn.attention.SDPBackend.FLASH_ATTENTION,
+                torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+                torch.nn.attention.SDPBackend.MATH,
+            ]):
+                out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
 
         # Back to (batch, seqlen, num_heads, head_dim)
         return out.transpose(1, 2)

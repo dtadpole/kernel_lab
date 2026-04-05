@@ -115,10 +115,13 @@ def _bf16_to_float(bf16_uint16: int) -> float:
 def _harness_fill_random_bf16(count: int, seed: int) -> torch.Tensor:
     """Reproduce eval_harness.cu fill_random_bf16 PRNG in Python.
 
-    Wang's 32-bit integer hash, matching the C code exactly:
+    Must match the C code EXACTLY (eval_harness.cu line ~112):
         h = idx ^ seed; h = (h^61)^(h>>16); h += h<<3;
         h ^= h>>4; h *= 0x27d4eb2d; h ^= h>>15;
-        f = -1 + 2*(h&0xFFFF)/65535; buf[i] = __float2bfloat16(f);
+        val = (float)(h & 0xFFFF) / 65536.0f - 0.5f;
+        buf[idx] = __float2bfloat16(val);
+
+    Range: [-0.5, 0.5) — kept small to avoid fp overflow in matmul.
     """
     import numpy as np
     idx = np.arange(count, dtype=np.uint32)
@@ -128,7 +131,7 @@ def _harness_fill_random_bf16(count: int, seed: int) -> torch.Tensor:
     h = h ^ (h >> np.uint32(4))
     h = (h * np.uint32(0x27d4eb2d)) & np.uint32(0xFFFFFFFF)
     h = h ^ (h >> np.uint32(15))
-    f = -1.0 + 2.0 * (h & np.uint32(0xFFFF)).astype(np.float32) / 65535.0
+    f = (h & np.uint32(0xFFFF)).astype(np.float32) / 65536.0 - 0.5
     return torch.from_numpy(f).to(torch.bfloat16)
 
 
@@ -178,9 +181,10 @@ def _verify_correctness(
         model = model.cuda(device=device)
 
         # Reproduce harness fill_random_bf16 PRNG for each input tensor
+        # Seeds are 1, 2, 3, ... matching eval_harness.cu correctness pass
         harness_inputs = []
         for j in range(num_inputs):
-            correctness_seed = 0xC0DE0000 + j
+            correctness_seed = j + 1
             t = _harness_fill_random_bf16(input_size, correctness_seed)
             harness_inputs.append(t.to(device).reshape(shape))
 

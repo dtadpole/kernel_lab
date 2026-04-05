@@ -338,16 +338,20 @@ int main() {
         cudaEventDestroy(end_ev);
     }
 
-    /* Correctness pass: fill with deterministic random data using a fixed
-     * seed (0xC0DE0000 + j). The Python trial script reproduces this exact
-     * PRNG to generate identical reference inputs for comparison.
+    /* Correctness pass: allocate fresh buffers and fill with deterministic
+     * random data. Seeds are simply 1, 2, 3, ... per input tensor.
+     * The Python trial script reproduces this exact PRNG for comparison.
      * Using random instead of arange avoids BF16 overflow for large sizes. */
+    for (int j = 0; j < num_inputs; j++)
+        cudaFree(d_inputs[j]);
     for (int j = 0; j < num_inputs; j++) {
-        unsigned int correctness_seed = 0xC0DE0000u + (unsigned int)j;
+        cudaMalloc(&d_inputs[j], elem_bytes);
+        unsigned int correctness_seed = (unsigned int)(j + 1);  /* seed 1, 2, 3, ... */
         fill_random_bf16<<<rand_grid, rand_block, 0, stream>>>(
             d_inputs[j], cfg.input_size, correctness_seed);
     }
     cudaStreamSynchronize(stream);
+
     {
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,

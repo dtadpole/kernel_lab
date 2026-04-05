@@ -270,6 +270,27 @@ Each arch folder contains kernels optimized for that SM version — **do not cop
 - Performance at 8192×8192: **668 TFLOPS (95% of cuBLAS 715)**
 - Remaining 5% gap: ptxas `wgmma pipeline crossing function boundary` — CUTLASS template generates cross-function wgmma ops that nvcc can't fully pipeline. cuBLAS is NVIDIA-internal compiled with better instruction scheduling.
 
+**CUDA toolkit on devvms (h8_3, h8_4):**
+- CUDA 12.8 is installed but **missing development headers** (`cuda_runtime.h`). Only runtime libs are present.
+- CUDA 12.9 has full headers at `/usr/local/cuda-12.9/include/`.
+- For compiling CUDA kernels on devvms, set `CUDA_HOME=/usr/local/cuda-12.9`.
+- The default `CUDA_HOME=/usr/local/cuda` resolves to 12.8 (no headers) — compilation will fail.
+- `PTXAS_ARCH` must be set to `sm_90` for H100 (default in compile.sh is `sm_120`).
+
+**flash-attn dependency (two-part install):**
+- **Part 1 — FA2/3 CUDA kernels:** `pip install packaging wheel && pip install flash-attn==2.7.4.post1 --no-build-isolation`
+  - flash-attn 2.8.x has ABI issues with PyTorch 2.6.0 — use 2.7.x
+  - Needs `CUDA_HOME=/usr/local/cuda-12.9` on devvms
+- **Part 2 — FA4 CuTe DSL (pure Python JIT):** copy `flash_attn/cute/` from flash-attention main branch:
+  ```bash
+  git clone --depth 1 --sparse https://github.com/Dao-AILab/flash-attention.git /tmp/fa4
+  cd /tmp/fa4 && git sparse-checkout set flash_attn/cute
+  cp -r /tmp/fa4/flash_attn/cute $VENV/lib/python3.12/site-packages/flash_attn/cute
+  pip install 'quack-kernels>=0.3.3' 'apache-tvm-ffi>=0.1.5,<0.2' 'torch-c-dlpack-ext'
+  ```
+  - **Required env var:** `TVM_FFI_DISABLE_TORCH_C_DLPACK=1` (ABI mismatch with PyTorch 2.6.0)
+  - FA4 performance on H100: **549-679 TFLOPS** (~2x faster than FA2's 325-360 TFLOPS)
+
 **CuTe DSL venv compatibility:**
 - The service venv (`~/.cuda_exec_service/.venv`) has `cuda-python==13.2.0` → requires CUDA 13.x driver.
 - h8_3 has driver 550.90.07 (CUDA 12.4) → CuTe DSL **fails** with `cudaErrorInsufficientDriver`.
@@ -404,6 +425,8 @@ data/
 ├── fixtures/           # Reference implementations and configs, by arch
 │   ├── sm80/
 │   ├── sm90/
+│   │   ├── matmul/               # cute_gemm_sm90.py, cudnn.py, configs.json
+│   │   └── fa4/                  # cutedsl.py, cudnn.py, configs.json
 │   ├── sm100/
 │   └── sm120/
 │       ├── devices.json          # SM120 device registry (RTX 5090 vs RTX PRO 6000)
@@ -411,6 +434,9 @@ data/
 │       ├── matmul/               # cutedsl.py, cute_gemm.py, cudnn.py, configs*.json
 │       └── fa4/                  # cutedsl.py, cudnn.py, configs*.json
 ├── generated/          # Generated CUDA kernels, by arch
+│   ├── sm90/
+│   │   ├── matmul/generated.cu
+│   │   └── fa4/generated.cu
 │   └── sm120/
 │       ├── vecadd/generated.cu
 │       ├── matmul/generated.cu

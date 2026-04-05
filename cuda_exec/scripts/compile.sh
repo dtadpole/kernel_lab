@@ -89,7 +89,11 @@ NVDISASM_STDERR_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.nvdisasm.stderr"
 
 mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"
 
-COMMON_NVCC_ARGS=("-arch=${ARCH}" "-std=${CPP_STD}" "-O${OPT_LEVEL}")
+# Use -gencode to ensure both PTX and SASS targets carry the 'a' suffix
+# when needed (e.g., sm_90a for WGMMA). Plain -arch=sm_90a generates PTX
+# with .target sm_90 (no 'a') which ptxas rejects for WGMMA instructions.
+_COMPUTE_ARCH="${ARCH/sm_/compute_}"  # sm_90a -> compute_90a
+COMMON_NVCC_ARGS=("-gencode" "arch=${_COMPUTE_ARCH},code=${ARCH}" "-std=${CPP_STD}" "-O${OPT_LEVEL}")
 if [[ "$LINEINFO" == "1" ]]; then
   COMMON_NVCC_ARGS+=("-lineinfo")
 fi

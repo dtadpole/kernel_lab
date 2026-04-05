@@ -28,7 +28,7 @@ SHELL := /bin/bash
 REPO_ROOT     := $(shell git -C $(dir $(abspath $(lastword $(MAKEFILE_LIST)))) rev-parse --show-toplevel)
 SCRIPTS       := $(REPO_ROOT)/cuda_exec/scripts
 TESTS         := $(REPO_ROOT)/cuda_exec/tests
-VENV_DIR      := $(REPO_ROOT)/cuda_exec/.venv
+VENV_DIR      := $(REPO_ROOT)/.venv
 VENV_PYTHON   := $(VENV_DIR)/bin/python
 COMPILE_SH    := $(SCRIPTS)/compile.sh
 EVALUATE_PY   := $(SCRIPTS)/evaluate.py
@@ -81,7 +81,7 @@ endif
 #   make evaluate KERNEL=fa4 CONFIG=mha-causal-b2-s16384
 # If CONFIG is not set, uses the per-kernel default from _KERNEL_CONFIG_SLUG.
 # ---------------------------------------------------------------------------
-_CONFIG_FILE = $(REPO_ROOT)/conf/fixtures/$(KERNEL)/configs.json
+_CONFIG_FILE = $(REPO_ROOT)/data/fixtures/$(ARCH)/$(KERNEL)/configs.json
 
 # ---------------------------------------------------------------------------
 # Metadata — derived from KERNEL, overridable on command line
@@ -96,13 +96,36 @@ CONFIG_SLUG    ?= $(if $(CONFIG),$(CONFIG),$(_KERNEL_CONFIG_SLUG))
 CONFIG_JSON    ?= $(if $(CONFIG),$(shell $(VENV_PYTHON) -c "import json,sys;d=json.load(open('$(_CONFIG_FILE)'));print(json.dumps(d['$(CONFIG)']))" 2>/dev/null),$(_KERNEL_CONFIG_JSON))
 
 # ---------------------------------------------------------------------------
-# Input files — derived from KERNEL and ARCH
+# Host-specific settings — auto-detected from conf/hosts/default.yaml
 # ---------------------------------------------------------------------------
-# SM architecture: auto-detect from GPU, override with ARCH=sm120
-ARCH          ?= sm$(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '.' | head -1)
-FIXTURE_DIR   ?= $(REPO_ROOT)/conf/fixtures/$(KERNEL)
-REFERENCE_PY  ?= $(FIXTURE_DIR)/reference.py
+# All build env vars come from the host config. Never hardcode them.
+_HOST_CFG    := $(REPO_ROOT)/conf/hosts/default.yaml
+_HOST_SCRIPT := import yaml,socket,sys;\
+c=yaml.safe_load(open('$(_HOST_CFG)'));\
+f=socket.getfqdn();s=socket.gethostname();\
+h=[v for _,v in c.get('hosts',{}).items() if f.startswith(v.get('ssh_host','').rstrip('.')) or s in v.get('ssh_host','')];\
+e=h[0].get('env',{}) if h else {};\
+print(e.get(sys.argv[1],''))
+
+override CUDA_HOME  := $(or $(shell $(VENV_PYTHON) -c "$(_HOST_SCRIPT)" cuda_home 2>/dev/null),/usr/local/cuda)
+override LD_PRELOAD := $(shell $(VENV_PYTHON) -c "$(_HOST_SCRIPT)" ld_preload 2>/dev/null)
+export CUDA_HOME
+export LD_PRELOAD
+
+# ---------------------------------------------------------------------------
+# Input files — derived from KERNEL and host config
+# ---------------------------------------------------------------------------
+# ARCH: directory-style arch name (e.g. sm90) — from host config torch_cuda_arch
+# COMPILE_ARCH: nvcc/ptxas -arch flag (e.g. sm_90a) — always accelerated variant
+_HOST_ARCH    := $(shell $(VENV_PYTHON) -c "$(_HOST_SCRIPT)" torch_cuda_arch 2>/dev/null)
+ARCH          ?= sm$(subst .,,$(or $(_HOST_ARCH),$(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)))
+COMPILE_ARCH  ?= $(subst sm,sm_,$(ARCH))a
+FIXTURE_DIR   ?= $(REPO_ROOT)/data/fixtures/$(ARCH)/$(KERNEL)
+REFERENCE_PY  ?= $(FIXTURE_DIR)/cutedsl.py
 GENERATED_CU  ?= $(REPO_ROOT)/data/generated/$(ARCH)/$(KERNEL)/generated.cu
+
+# Pass COMPILE_ARCH to compile.sh
+export PTXAS_ARCH ?= $(COMPILE_ARCH)
 
 # ---------------------------------------------------------------------------
 # Tuning parameters
@@ -191,6 +214,10 @@ help: ## Show available targets
 .PHONY: show
 show: ## Print resolved turn-root path and key variables
 	@echo "KERNEL         : $(KERNEL)"
+	@echo "ARCH           : $(ARCH)"
+	@echo "COMPILE_ARCH   : $(COMPILE_ARCH)"
+	@echo "CUDA_HOME      : $(CUDA_HOME)"
+	@echo "LD_PRELOAD     : $(LD_PRELOAD)"
 	@echo "CUDA_EXEC_ROOT : $(CUDA_EXEC_ROOT)"
 	@echo "RUN_TAG        : $(RUN_TAG)"
 	@echo "VERSION        : $(VERSION)"
@@ -244,7 +271,7 @@ compile: ensure-venv ## Stage reference + generated files and run the 5-step com
 	bash "$(COMPILE_SH)" \
 		--source "$(WORKSPACE)/inputs/generated/generated.cu" \
 		--output "$(ARTIFACTS)/compile.attempt_001.generated.bin" \
-		--arch "$(ARCH)" \
+		--arch "$(COMPILE_ARCH)" \
 		$$HARNESS_FLAG
 	# Write the compile manifest so evaluate/profile can find the binary
 	cat > "$(STATE)/compile.attempt_001.json" <<'MANIFEST_EOF'

@@ -49,6 +49,7 @@ from cuda_exec.scripts.eval_support import (  # noqa: E402
     load_reference_module,
     normalize_reference_contract,
     extract_config_payload,
+    generate_inputs,
     tensor_to_jsonable,
     flatten_numeric,
     infer_shape,
@@ -119,7 +120,10 @@ def _verify_correctness(
     num_trials: int = NUM_CORRECTNESS_TRIALS,
     seed: int = DEFAULT_SEED,
 ) -> dict[str, Any]:
-    model_cls, get_inputs, get_init_inputs = normalize_reference_contract(module)
+    model_cls = getattr(module, "Model", None)
+    get_init_inputs = getattr(module, "get_init_inputs", None)
+    if model_cls is None:
+        raise RuntimeError("reference module must export Model(nn.Module)")
 
     # Load generated output from binary file if available, otherwise from JSON
     gen_output_section = generated_payload.get("output", {})
@@ -146,7 +150,7 @@ def _verify_correctness(
     with torch.no_grad(), torch.cuda.device(device):
         for trial_seed in trial_seeds:
             set_seed(trial_seed)
-            init_inputs = list(get_init_inputs())
+            init_inputs = list(get_init_inputs()) if get_init_inputs else []
             init_inputs = [
                 x.cuda(device=device) if isinstance(x, torch.Tensor) else x
                 for x in init_inputs
@@ -156,12 +160,9 @@ def _verify_correctness(
             model = model_cls(*init_inputs)
             model = model.cuda(device=device)
 
+            # Harness generates inputs — not the fixture
             set_seed(trial_seed)
-            inputs = list(get_inputs(config))
-            inputs = [
-                x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-                for x in inputs
-            ]
+            inputs = generate_inputs(config, device)
 
             ref_output = model(*inputs)
             torch.cuda.synchronize(device=device)

@@ -13,7 +13,9 @@ RestartSec=5
 Environment=PYTHONPATH=%h/.cuda_exec_service
 Environment=CUDA_EXEC_ROOT=%h/.cuda_exec
 Environment=CUDA_VISIBLE_DEVICES=__CUDA_VISIBLE_DEVICES__
-Environment=PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CUDA_HOME=__CUDA_HOME__
+Environment=LD_PRELOAD=__LD_PRELOAD__
+Environment=PATH=__CUDA_HOME__/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Hardening directives that imply NoNewPrivileges=true are intentionally
 # omitted — NCU profiling requires sudo for GPU performance counters.

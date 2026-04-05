@@ -67,10 +67,13 @@ def _resolve_host(cfg: dict[str, Any], name: str) -> dict[str, Any]:
         sys.exit(1)
 
     hw = host.get("hardware") or {}
+    env = host.get("env") or {}
     return {
         **_HOST_DEFAULTS,
         "ssh_host": host["ssh_host"],
         "description": f"{hw.get('gpu', 'GPU')} ({hw.get('gpu_count', '?')}x)",
+        "cuda_home": env.get("cuda_home", "/usr/local/cuda"),
+        "ld_preload": env.get("ld_preload"),
         **svc,
     }
 
@@ -212,6 +215,17 @@ def cmd_deploy(host_cfg: dict[str, Any], rebuild: bool = False) -> bool:
         service_content = "\n".join(
             line for line in service_content.split("\n")
             if "__CUDA_VISIBLE_DEVICES__" not in line
+        )
+    # CUDA_HOME and LD_PRELOAD from host env config
+    cuda_home = host_cfg.get("cuda_home", "/usr/local/cuda")
+    service_content = service_content.replace("__CUDA_HOME__", cuda_home)
+    ld_preload = host_cfg.get("ld_preload")
+    if ld_preload:
+        service_content = service_content.replace("__LD_PRELOAD__", ld_preload)
+    else:
+        service_content = "\n".join(
+            line for line in service_content.split("\n")
+            if "__LD_PRELOAD__" not in line
         )
     _ssh(ssh_host, f"""
         mkdir -p $HOME/.config/systemd/user

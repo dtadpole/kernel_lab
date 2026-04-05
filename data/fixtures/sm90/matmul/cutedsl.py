@@ -54,10 +54,3 @@ class Model(nn.Module):
         return self._C
 
 def get_init_inputs(): return []
-def get_inputs(config):
-    cfg = _normalize_config(config)
-    shape = cfg["shape"]; device = torch.device("cuda")
-    M, K, N = shape[0], shape[1] if len(shape)>1 else shape[0], shape[1] if len(shape)>1 else shape[0]
-    A = torch.arange(M*K, dtype=torch.bfloat16, device=device).reshape(M, K).contiguous()
-    B = torch.arange(K*N, dtype=torch.bfloat16, device=device).reshape(K, N).contiguous()
-    return [A, B]

@@ -1,13 +1,17 @@
-# GPU host inventory and service deployment map.
+# GPU host inventory, environment, and service deployment map.
 #
 # This is the single source of truth for:
 #   1. Hardware — SSH targets, GPU specs, network topology
-#   2. Deployment map — which service runs on which host:GPU
+#   2. Environment — CUDA toolkit, driver, Python, runtime workarounds
+#   3. Deployment map — which service runs on which host:GPU
 #
-# Each host has a `hardware` section (immutable facts about the machine)
-# and a `services` section (what's deployed where, including GPU pin).
+# Each host has:
+#   hardware  — immutable facts about the machine (GPU, network)
+#   env       — CUDA/Python/runtime settings for venv creation and kernel compilation
+#   network   — connectivity constraints (proxy, pip reachability)
+#   services  — what's deployed where, including GPU pin
 #
-# Network topology:
+# --- Network topology ---
 #   _one/_two are behind 1and1 (66.179.249.233) with port forwarding.
 #     _one: internet-visible port range 41000-41999
 #     _two: internet-visible port range 42000-42999
@@ -15,19 +19,26 @@
 #     Service ports must be within the host's internet-visible range.
 #   h8_3/h8_4 are directly accessible Meta devvms (no gateway).
 #
-# Internet access:
+# --- Internet access ---
 #   _one/_two: full internet (direct)
 #   h8_3: full internet via fwdproxy
 #   h8_4: NO internet — fwdproxy blocks CONNECT tunnels.
 #         Deploy via rsync from h8_3 (venvs + HF model cache).
 #         kb_embed systemd unit must set HF_HUB_OFFLINE=1.
 #
-# SSH alias availability:
+# --- SSH alias availability ---
 #   _one/_two SSH aliases are in personal ~/.ssh/config only,
 #   not resolvable from Meta devvms.
 #
-# Shared-devvm port conflicts:
+# --- Shared-devvm port conflicts ---
 #   Check port availability before deploying: sudo ss -tlnp | grep <port>
+#
+# --- fbcode libcuda workaround ---
+#   Meta devvms ship /usr/local/fbcode/platform010/lib/libcuda.so which
+#   may shadow the real system driver. When the fbcode version is older
+#   than the system driver, set env.ld_preload to force the correct one.
+#   Symptom: PyTorch reports "driver too old" despite nvidia-smi showing
+#   the correct version.
 
 hosts:
   _one:
@@ -35,8 +46,21 @@ hosts:
     hardware:
       gpu: "RTX PRO 6000 Blackwell"
       gpu_count: 1
+      driver_version: null          # TODO: verify from personal machine
+      driver_cuda_version: null     # TODO: verify
       internet_host: "66.179.249.233"
       internet_port_range: "41000-41999"
+    env:
+      cuda_home: null               # TODO: verify
+      cuda_available: []            # TODO: verify
+      torch_cuda: null              # TODO: e.g. "cu130"
+      torch_cuda_arch: "10.0"      # Blackwell = sm_100
+      ld_preload: null              # likely not needed (non-Meta host)
+      python: null                  # TODO: verify
+    network:
+      internet: true
+      proxy_bypass_method: null     # direct internet
+      pypi_nvidia_blocked: false
     services:
       cuda_exec:
         port: 41980
@@ -48,8 +72,21 @@ hosts:
     hardware:
       gpu: "RTX PRO 6000 Blackwell"
       gpu_count: 1
+      driver_version: null          # TODO: verify from personal machine
+      driver_cuda_version: null     # TODO: verify
       internet_host: "66.179.249.233"
       internet_port_range: "42000-42999"
+    env:
+      cuda_home: null               # TODO: verify
+      cuda_available: []            # TODO: verify
+      torch_cuda: null              # TODO: e.g. "cu130"
+      torch_cuda_arch: "10.0"      # Blackwell = sm_100
+      ld_preload: null              # likely not needed (non-Meta host)
+      python: null                  # TODO: verify
+    network:
+      internet: true
+      proxy_bypass_method: null     # direct internet
+      pypi_nvidia_blocked: false
     services:
       cuda_exec:
         port: 42980
@@ -59,6 +96,19 @@ hosts:
     hardware:
       gpu: "NVIDIA H100"
       gpu_count: 8
+      driver_version: "570.86.15"
+      driver_cuda_version: "12.8"   # max CUDA version this driver supports
+    env:
+      cuda_home: /usr/local/cuda-12.8
+      cuda_available: ["12.8", "12.9", "13.0"]  # toolkits installed (but 13.0 unusable with this driver)
+      torch_cuda: "cu128"
+      torch_cuda_arch: "9.0"       # Hopper = sm_90
+      ld_preload: null              # not needed — fbcode libcuda matches system driver (both 570.86.15)
+      python: /usr/local/bin/python3  # 3.12.13+meta
+    network:
+      internet: true
+      proxy_bypass_method: "fwdproxy"
+      pypi_nvidia_blocked: false
     services:
       cuda_exec:
         port: 8980
@@ -67,19 +117,35 @@ hosts:
         port: 46983
         cuda_visible_devices: "6"
     benchmark:
-      cuda_visible_devices: "4,5"   # GPUs reserved for local benchmarks
+      cuda_visible_devices: "4,5"
 
   h8_4:
     ssh_host: "devvm8491.cco0.facebook.com"
     hardware:
       gpu: "NVIDIA H100"
       gpu_count: 8
+      driver_version: "580.65.06"
+      driver_cuda_version: "13.0"   # max CUDA version this driver supports
+    env:
+      cuda_home: /usr/local/cuda-13.0
+      cuda_available: ["12.8", "12.9", "13.0"]
+      torch_cuda: "cu130"
+      torch_cuda_arch: "9.0"       # Hopper = sm_90
+      # fbcode ships libcuda.so.550.90.07 (CUDA 12.4) which shadows the
+      # system driver 580.65.06 (CUDA 13.0). Without this, PyTorch fails
+      # with "driver too old (found version 12040)".
+      ld_preload: /usr/lib64/libcuda.so.580.65.06
+      python: /usr/local/bin/python3  # 3.12.13+meta
+    network:
+      internet: false               # fwdproxy blocks CONNECT tunnels
+      proxy_bypass_method: "ssh_localhost"  # for Claude Code sandbox
+      pypi_nvidia_blocked: true
     services:
       cuda_exec:
         port: 8980
         cuda_visible_devices: "7"
       kb_embed:
-        port: 46984          # was 46982, changed due to port conflict (aarontao's MCP server)
+        port: 46984
         cuda_visible_devices: "6"
     benchmark:
-      cuda_visible_devices: "4,5"   # GPUs reserved for local benchmarks
+      cuda_visible_devices: "4,5"

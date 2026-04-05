@@ -17,5 +17,11 @@ nvidia-cutlass-dsl>=4.0
 numpy>=2.0
 cuda-python>=13.0
 
+# FA4 CuTe DSL — pure Python JIT, no C++ compilation needed
+flash-attn-4>=4.0.0b5
+einops>=0.8
+
 # Build tools
 ninja>=1.0
+packaging>=24.0
+wheel>=0.44

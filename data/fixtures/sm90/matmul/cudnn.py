@@ -112,26 +112,5 @@ class Model(nn.Module):
         return torch.mm(A, B)
 
 
-# ---------------------------------------------------------------------------
-#  Contract functions
-# ---------------------------------------------------------------------------
-
 def get_init_inputs() -> list[Any]:
     return []
-
-
-def get_inputs(config: dict[str, Any]) -> list[torch.Tensor]:
-    cfg = _normalize_config(config)
-    shape = tuple(int(v) for v in cfg["shape"])
-    device = torch.device("cuda")
-    M = shape[0]
-    K = shape[1] if len(shape) > 1 else shape[0]
-    N = shape[1] if len(shape) > 1 else shape[0]
-    A = torch.arange(M * K, dtype=torch.bfloat16, device=device).reshape(M, K).contiguous()
-    B = torch.arange(K * N, dtype=torch.bfloat16, device=device).reshape(K, N).contiguous()
-    return [A, B]
-
-
-# No self-execution code. All timing must go through the unified eval harness
-# (measure_reference in eval_support.py) which provides L2 flush, fresh buffer
-# allocation, and standardized CUDA event timing.

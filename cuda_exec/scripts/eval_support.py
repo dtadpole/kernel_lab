@@ -175,17 +175,21 @@ def load_reference_module(reference_path: Path):
     return module
 
 
-def normalize_reference_contract(module: Any) -> tuple[Any, Any, Any]:
+def normalize_reference_contract(module: Any) -> tuple[Any, Any]:
+    """Validate fixture module contract: Model(nn.Module) + get_init_inputs().
+
+    Fixtures define only the kernel logic (Model) and initialization args.
+    Input generation is the harness's responsibility via generate_inputs().
+    """
     model_cls = getattr(module, "Model", None)
-    get_inputs = getattr(module, "get_inputs", None)
     get_init_inputs = getattr(module, "get_init_inputs", None)
-    if model_cls is None or not callable(get_inputs) or not callable(get_init_inputs):
+    if model_cls is None:
         raise RuntimeError(
-            "reference module contract requires Model, get_inputs(config), and get_init_inputs()"
+            "reference module contract requires Model(nn.Module) and get_init_inputs()"
         )
     if not isinstance(model_cls, type) or not issubclass(model_cls, nn.Module):
         raise RuntimeError("reference module Model must be a subclass of torch.nn.Module")
-    return model_cls, get_inputs, get_init_inputs
+    return model_cls, get_init_inputs
 
 
 def extract_config_payload(env_json: str) -> dict[str, Any]:
@@ -254,6 +258,47 @@ def allclose_check(
 
 
 # ---------------------------------------------------------------------------
+# Harness input generation — single source of truth
+# ---------------------------------------------------------------------------
+
+def generate_inputs(
+    config: dict[str, Any],
+    device: torch.device,
+) -> list[torch.Tensor]:
+    """Generate input tensors from config. Called by the harness, not fixtures.
+
+    This is the single source of truth for input generation — all three
+    implementations (cuBLAS, CuTe DSL, Generated CUDA) receive inputs
+    from this function. Fixtures define only Model, not get_inputs().
+    """
+    shape = [int(v) for v in config["shape"]]
+    family = config.get("family", "")
+
+    if "matrix-multiplication" in family or len(shape) == 2:
+        M = shape[0]
+        K = shape[1] if len(shape) > 1 else shape[0]
+        N = shape[1] if len(shape) > 1 else shape[0]
+        A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+        B = torch.randn(K, N, dtype=torch.bfloat16, device=device)
+        return [A, B]
+
+    if "fa4" in family or "mha" in family or len(shape) == 4:
+        batch, seq_len, num_heads, head_dim = shape
+        Q = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
+        K = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
+        V = torch.randn(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device)
+        return [Q, K, V]
+
+    if len(shape) == 1:
+        # Vector ops (e.g., vecadd)
+        A = torch.randn(shape[0], dtype=torch.bfloat16, device=device)
+        B = torch.randn(shape[0], dtype=torch.bfloat16, device=device)
+        return [A, B]
+
+    raise ValueError(f"Cannot generate inputs for config: shape={shape}, family={family}")
+
+
+# ---------------------------------------------------------------------------
 # Reference measurement — CUDA event timing
 # ---------------------------------------------------------------------------
 
@@ -265,12 +310,15 @@ def measure_reference(
     num_warmups: int = NUM_WARMUP_RUNS,
     num_trials: int = NUM_PERF_TRIALS,
 ) -> dict[str, Any]:
-    model_cls, get_inputs, get_init_inputs = normalize_reference_contract(module)
+    model_cls = getattr(module, "Model", None)
+    get_init_inputs = getattr(module, "get_init_inputs", None)
+    if model_cls is None:
+        raise RuntimeError("reference module must export Model(nn.Module)")
     hardware = torch.cuda.get_device_name(device=device)
 
     with torch.no_grad(), torch.cuda.device(device):
         set_seed(seed)
-        init_inputs = list(get_init_inputs())
+        init_inputs = list(get_init_inputs()) if get_init_inputs else []
         init_inputs = [
             x.cuda(device=device) if isinstance(x, torch.Tensor) else x
             for x in init_inputs
@@ -278,11 +326,8 @@ def measure_reference(
         model = model_cls(*init_inputs)
         model = model.cuda(device=device)
 
-        inputs = list(get_inputs(config))
-        inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-            for x in inputs
-        ]
+        # Harness generates inputs — fixtures do NOT own input generation
+        inputs = generate_inputs(config, device)
 
         # L2 cache flush buffer (Triton do_bench pattern)
         l2_size = torch.cuda.get_device_properties(device).L2_cache_size
@@ -297,20 +342,9 @@ def measure_reference(
         for trial_idx in range(num_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
-            # Fill inputs with fresh random data before each trial.
-            # Uses in-place normal_() to preserve tensor pointers (Python
-            # references like CuTe DSL cache compiled kernels by pointer —
-            # reallocating would force recompilation every trial).
-            # The C eval_harness.cu allocates fresh buffers (new pointers)
-            # which breaks pointer caches in the Generated kernel.  This is
-            # acceptable asymmetry: the Generated kernel's TMA descriptor
-            # recreation cost is negligible at large sizes and included in
-            # the C harness timing, while CuTe DSL's JIT recompilation
-            # cost (~100ms) is NOT a per-inference cost and should not be
-            # measured.
-            for inp in inputs:
-                if isinstance(inp, torch.Tensor) and inp.is_floating_point():
-                    inp.normal_()
+            # Fresh input buffers — new allocations per trial (new pointers),
+            # matching the C eval_harness.cu methodology.
+            inputs = generate_inputs(config, device)
             torch.cuda.synchronize(device=device)
             start_ev = torch.cuda.Event(enable_timing=True)
             end_ev = torch.cuda.Event(enable_timing=True)
@@ -320,12 +354,9 @@ def measure_reference(
             end_ev.synchronize()
             latencies_ms.append(start_ev.elapsed_time(end_ev))
 
-        # Restore deterministic inputs and run once more for correctness output
-        inputs = list(get_inputs(config))
-        inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-            for x in inputs
-        ]
+        # Run once more with deterministic inputs for correctness output
+        set_seed(seed)
+        inputs = generate_inputs(config, device)
         last_output = model(*inputs)
         torch.cuda.synchronize(device=device)
 

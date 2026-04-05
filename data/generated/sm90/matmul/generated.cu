@@ -963,9 +963,33 @@ static bool init_tma_encoder() {
     return (res == CUDA_SUCCESS && s_encodeTiled);
 }
 
+/* Cached transposed B buffer */
+static __nv_bfloat16* s_B_t = nullptr;
+static size_t s_B_t_size = 0;
+static const __nv_bfloat16* s_B_last = nullptr;
+
+/* Cached TMA descriptors — avoid per-call cuTensorMapEncodeTiled overhead.
+ * cuTensorMapEncodeTiled is a CPU driver call (~1-3 us each).  Two calls per
+ * kernel_run = 2-6 us overhead, which is 20-60% of total time at 256×256
+ * but negligible at 8192×8192.  Cache and only recreate when pointer changes. */
+static CUtensorMap s_tma_A_big, s_tma_B_big;
+static const void* s_tma_A_ptr_big = nullptr;
+static const void* s_tma_B_ptr_big = nullptr;
+static CUtensorMap s_tma_A_small, s_tma_B_small;
+static const void* s_tma_A_ptr_small = nullptr;
+static const void* s_tma_B_ptr_small = nullptr;
+
 static int s_M = 0, s_N = 0, s_K = 0;
+static int s_last_n = -1;
 static void ensure_shape(int n) {
-    if (s_M > 0) return;
+    if (s_last_n == n) return;
+    s_last_n = n;
+    /* invalidate all caches on shape change */
+    s_B_last = nullptr;
+    s_tma_A_ptr_big = nullptr;
+    s_tma_B_ptr_big = nullptr;
+    s_tma_A_ptr_small = nullptr;
+    s_tma_B_ptr_small = nullptr;
     const char* shape = getenv("CUDA_EXEC_PARAM_SHAPE");
     if (shape) {
         int d0 = 0, d1 = 0;
@@ -982,22 +1006,6 @@ static void ensure_shape(int n) {
         s_N = s_M; s_K = s_M;
     }
 }
-
-/* Cached transposed B buffer */
-static __nv_bfloat16* s_B_t = nullptr;
-static size_t s_B_t_size = 0;
-static const __nv_bfloat16* s_B_last = nullptr;  /* cache: skip transpose if same B */
-
-/* Cached TMA descriptors — avoid per-call cuTensorMapEncodeTiled overhead.
- * cuTensorMapEncodeTiled is a CPU driver call (~1-3 us each).  Two calls per
- * kernel_run = 2-6 us overhead, which is 20-60% of total time at 256×256
- * but negligible at 8192×8192.  Cache and only recreate when pointer changes. */
-static CUtensorMap s_tma_A_big, s_tma_B_big;
-static const void* s_tma_A_ptr_big = nullptr;
-static const void* s_tma_B_ptr_big = nullptr;
-static CUtensorMap s_tma_A_small, s_tma_B_small;
-static const void* s_tma_A_ptr_small = nullptr;
-static const void* s_tma_B_ptr_small = nullptr;
 
 extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
                           __nv_bfloat16** outputs, int num_outputs,

@@ -47,6 +47,21 @@ Rigger  ──(ik:index)─────→  download, parse, build search index
 
 ---
 
+## DevEnv Plugin (`devenv`)
+
+Python environment management. Auto-detects the current host from
+`conf/hosts/default.yaml` and applies the correct CUDA toolkit, PyTorch
+build, driver workarounds, and network constraints.
+
+| Skill | User Intent | Tools Used |
+|-------|-------------|------------|
+| `local` | Manage the project `.venv` on the current machine | `cli.py` (info, setup, test, nuke, activate, run) |
+| `runtime` | Manage Python envs on remote GPU hosts (TODO) | — |
+
+Invocation: `/devenv:local`
+
+---
+
 ## Design Principles
 
 - **CLI-only.** Skills describe bash/Python commands for Claude to run. No MCP server overhead.

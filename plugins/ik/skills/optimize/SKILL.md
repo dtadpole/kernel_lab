@@ -376,6 +376,14 @@ again.
 
 ## Key Principles
 
+- **Never stop, never ask** — when you have a promising direction, execute it.
+  Do not pause to ask the user for confirmation. Do not stop at the reference
+  implementation's performance number. Do not stop at the CuTe DSL number.
+  Keep pushing for maximum performance until you hit hardware limits.
+- **Autonomous execution** — this is a fully autonomous loop. Make decisions,
+  implement changes, evaluate results, and iterate. Only surface results when
+  you have something concrete to show (improvement committed or all ideas
+  exhausted).
 - **Docs are source of truth** — always consult NVIDIA documentation before
   and after profiling. NCU data shows *what*, docs explain *why*
 - **Data-driven** — every decision backed by profiling data or documentation

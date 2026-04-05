@@ -720,7 +720,10 @@ void flash_attention_2wg(
 
         /* == Softmax — runs while PV tensor cores are still executing! ==
          * O rescaling is deferred until after PV completes (CuTe DSL pattern
-         * for hdim≤128: rescale_O_before_gemm=False). */
+         * for hdim≤128: rescale_O_before_gemm=False).
+         * Causal mask boundary: precomputed once per iteration. */
+        const int needs_mask = is_causal &&
+            ((kv_id + 1) * BLOCK_KV > q_block_id * BLOCK_Q + cwg * 64);
         float o_rescale[2];
         #pragma unroll
         for (int half = 0; half < 2; half++) {
@@ -730,9 +733,9 @@ void flash_attention_2wg(
                 rv[p4*2+0] = S_acc[(p4<<2)|(half<<1)|0];
                 rv[p4*2+1] = S_acc[(p4<<2)|(half<<1)|1];
             }
-            /* rv[] is UNSCALED — scale fused into exp2 via FMA */
-
-            if (is_causal) {
+            /* rv[] is UNSCALED — scale fused into exp2 via FMA.
+             * Causal masking skipped for full blocks (kv tile fully below diagonal). */
+            if (needs_mask) {
                 const int row = mywarp * 16 + half * 8 + (lane_id / 4);
                 const int q_pos = q_block_id * BLOCK_Q + cwg * 64 + row;
                 #pragma unroll

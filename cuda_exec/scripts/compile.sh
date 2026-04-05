@@ -55,6 +55,17 @@ if [[ -z "$OUTPUT" ]]; then
   exit 2
 fi
 
+# Auto-detect GPU architecture if ARCH is "native"
+if [[ "$ARCH" == "native" ]]; then
+  CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
+  if [[ -n "$CC" ]]; then
+    ARCH="sm_${CC/./}a"  # e.g., 9.0 -> sm_90a (always use arch-specific features)
+  else
+    echo "ERROR: --arch=native but cannot detect GPU compute capability" >&2
+    exit 2
+  fi
+fi
+
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 NVCC="${CUDA_HOME}/bin/nvcc"
 PTXAS="${CUDA_HOME}/bin/ptxas"

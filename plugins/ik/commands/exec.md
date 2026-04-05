@@ -1,5 +1,5 @@
 ---
-description: Compile, trial, and profile CUDA kernels on local GPUs
+description: Compile, trial, and profile CUDA kernels
 argument-hint: <action> [--gpu N] [options]
 ---
 

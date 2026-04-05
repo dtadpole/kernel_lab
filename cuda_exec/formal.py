@@ -177,10 +177,14 @@ def formal_benchmark(
     if run_dir is not None:
         try:
             from cuda_exec.trajectory import finalize_run
-            finalize_run(run_dir, bench_result, kb_repo=kb_repo_path, runtime_root=bench_runtime)
+            new_gems = finalize_run(run_dir, bench_result, kb_repo=kb_repo_path, runtime_root=bench_runtime)
+            bench_result["gems"] = new_gems
+            bench_result["improved"] = len(new_gems) > 0
             logger.info("Results finalized in %s", run_dir)
         except Exception as exc:
             logger.warning("Failed to finalize run: %s", exc)
+            bench_result["gems"] = {}
+            bench_result["improved"] = False
 
     return bench_result
 

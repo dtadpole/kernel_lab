@@ -7,8 +7,11 @@ argument-hint: <kernel> [--arch smXX] [--gpu N] [--impls impl1 impl2 ...]
 
 # Formal Benchmark
 
-Atomic compile + trial of ALL configs for a kernel. Used by the Formal Evaluator
-(Judge) agent for comprehensive, authoritative assessment. Not for iterative
+**`ik:bench` is the sole official formal benchmark.** All performance results,
+improvement decisions, and gem records come exclusively from `ik:bench`. Results
+from `ik:exec` or `ik:optimize` trials are preliminary and never authoritative.
+
+Atomic compile + trial of ALL configs for a kernel. Not for iterative
 development — use `/ik:exec` for that.
 
 ## What it does
@@ -114,6 +117,10 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
   "impls_requested": ["ref-cublas", "gen-cuda", "gen-cutedsl"],
   "refs": ["ref-cublas"],
   "gens": ["gen-cuda", "gen-cutedsl"],
+  "improved": true,
+  "gems": {
+    "gen-cuda": { "version": 2, "improved_configs": ["mat-8192x8192"], ... }
+  },
   "results": {
     "gen-cuda": {
       "impl": "gen-cuda",
@@ -137,6 +144,13 @@ The response is produced by `cuda_exec.formal.formal_benchmark()`:
   }
 }
 ```
+
+**Key fields for improvement detection:**
+- `improved` (bool): `true` if any impl set a new gem (beat previous best)
+- `gems` (dict): per-impl gem info, only for impls that improved. Empty `{}` if no improvement.
+
+**`ik:bench` is the sole authority on improvements.** Results from `ik:exec` or
+`ik:optimize` trials are preliminary — only `ik:bench` gems are official.
 
 ## Output Format
 
@@ -194,6 +208,8 @@ Example for `matmul/sm90` with `ref-cublas`, `gen-cutedsl`, `gen-cuda`:
 - **Atomic** — compile failure stops immediately, no partial results
 - **Snapshot-first** — sources are snapshotted before compile, never evaluate original files
 - **Read-only intent** — bench does not modify source files
+
+**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
 
 ## Hydra Config
 

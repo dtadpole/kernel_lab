@@ -436,13 +436,18 @@ def prepare_run(
 # Phase 2: finalize_run() — AFTER benchmark
 # ---------------------------------------------------------------------------
 
-def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = None, runtime_root: Path | None = None) -> None:
-    """Write per-impl results + check gems after bench completes."""
+def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = None, runtime_root: Path | None = None) -> dict:
+    """Write per-impl results + check gems after bench completes.
+
+    Returns a dict of impl_slug -> gem_info for impls that set a new gem,
+    or an empty dict if no improvements were found.
+    """
     repo = kb_repo or KB_REPO
     gems_dir = repo / "ik_bench" / "gems"
     kernel = bench_result["kernel"]
     arch = bench_result["arch"]
     ts_str = run_dir.name
+    new_gems: dict[str, dict] = {}
 
     # Load command.json for metadata
     cmd = json.loads((run_dir / "command.json").read_text())
@@ -489,6 +494,7 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
             ver = _next_gem_version(gem_base)
             gem_dir_name = f"v{ver:03d}_{ts_str}"
             gem_info["version"] = ver
+            new_gems[impl_slug] = gem_info
             gem_dir = gem_base / gem_dir_name
             gem_dir.mkdir(parents=True, exist_ok=True)
 
@@ -517,6 +523,8 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
             (gem_dir / "report.md").write_text(gem_report)
 
     _auto_commit(repo, kernel, arch, ts_str)
+
+    return new_gems
 
 
 def _auto_commit(repo: Path, kernel: str, arch: str, ts_str: str) -> None:

@@ -1,18 +1,20 @@
 ---
 name: exec
-description: Compile, trial, and profile CUDA kernels on local GPUs
+description: Compile, trial, and profile CUDA kernels
 user-invocable: true
 argument-hint: <action> [--gpu N] [options]
 ---
 
-# CUDA Kernel Execution (Local)
+# CUDA Kernel Execution
 
-Compile, trial, and profile CUDA kernels on local GPUs by calling `cuda_exec` handlers directly via Python CLI.
+Compile, trial, and profile CUDA kernels by calling `cuda_exec` handlers directly via Python CLI.
 
 ## GPU Selection
 
 When the user specifies `--gpu N`, set `CUDA_VISIBLE_DEVICES=N` on the command.
 If no GPU is specified, check `CLAUDE.md` or `AGENTS.md` for the assigned GPU indices for the current host.
+
+**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
 
 ## Actions
 

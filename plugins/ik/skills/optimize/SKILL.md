@@ -18,7 +18,7 @@ one, verifies improvement, and commits if successful.
 |----------|------|----------|---------|-------------|
 | `$0` | kernel | **yes** | — | Kernel name: `fa4`, `matmul`, etc. |
 | `--impl` | implementation | no | `generated` | Which code to optimize: `generated` (hand-written CUDA) or `reference` (CuTe DSL) |
-| `--target` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from local GPU if omitted |
+| `--target` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `--gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 
 Parse `$ARGUMENTS` to extract these. Example invocations:
@@ -31,9 +31,11 @@ Parse `$ARGUMENTS` to extract these. Example invocations:
 
 When `--gpu N` is provided, set `CUDA_VISIBLE_DEVICES=N` on all `/ik:exec` and `/ik:bench` commands.
 
+**GPU is session-sticky**: once a GPU index is set by ANY ik skill (ik:exec, ik:bench, ik:optimize), ALL subsequent ik skill invocations in the same session MUST use that same GPU — unless the user explicitly provides a new `--gpu` value to override it.
+
 ## Auto-Detection
 
-If `--target` is not provided, detect from local GPU:
+If `--target` is not provided, detect from GPU:
 ```bash
 nvidia-smi --query-gpu=compute_cap --format=csv,noheader
 ```
@@ -256,7 +258,8 @@ idea to implement first.
    **same 1-2 config(s)** profiled in Phase 1b, to compare the specific NCU
    metrics targeted by this optimization. Do NOT profile all configs.
 
-5. **Compare** new latency vs baseline from Phase 1
+5. **Compare** new latency vs baseline from Phase 1. Note: this comparison is
+   preliminary — only `/ik:bench` results are official (see Phase 6).
 
 #### Decision Point
 
@@ -288,15 +291,15 @@ idea to implement first.
                       │              │              │
                       v              v              v
                   Phase 6       Analyze why    Revert code
-                  (commit)      then retry     to baseline
+                  (bench)       then retry     to baseline
 ```
 
 - **Correctness fails** → REJECT immediately. Revert. No exceptions.
-- **Correctness passes + improvement** → Phase 6 (commit)
+- **Correctness passes + improvement** → Phase 6 (record + bench)
 - **Correctness passes + no improvement** → Phase 7 (revert, learn, retry)
 - **Correctness passes + regression** → Phase 7 (revert, learn, retry)
 
-### Phase 6: Commit Results (only if improvement confirmed)
+### Phase 6: Record Results and Bench (only if improvement confirmed)
 
 **Gate: only enter this phase if Phase 5 confirmed improvement.** If there was
 no improvement or a regression, skip to Phase 7 instead.
@@ -316,23 +319,15 @@ Include:
 - NCU metrics comparison (before vs after)
 - What worked and why
 
-#### 6b. Final bench
+#### 6b. Final bench and STOP
 
-**Run `/ik:bench` as the last step before committing.** This is mandatory.
+**Run `/ik:bench` as the last step.** This is mandatory.
 The bench output is the authoritative record of performance and correctness.
-If bench shows any ✗, do NOT commit — go back and fix.
+`ik:bench` handles snapshotting, gem creation, and committing automatically.
+If bench shows any ✗, go back and fix.
 
-#### 6c. Commit and Push
-
-```bash
-git add data/gen/{arch}/{kernel}/cuda.cu
-git add results/{arch}/{gpu_name}/{kernel}/*.md
-git commit -m "perf: {kernel} — {short description of optimization}
-
-{1-2 sentence summary of what changed and the improvement}"
-git push
-Commit: {hash}
-```
+**After a successful bench, print the performance comparison table and STOP.**
+Do not continue optimizing. The user will decide whether to run another round.
 
 ### Phase 7: Retry Loop (no improvement or regression)
 
@@ -371,18 +366,21 @@ again.
 
 ## Key Principles
 
-- **Never stop, never ask** — when you have a promising direction, execute it.
-  Do not pause to ask the user for confirmation. Do not stop at the reference
-  implementation's performance number. Do not stop at the CuTe DSL number.
-  Keep pushing for maximum performance until you hit hardware limits.
+- **Stop on improvement** — when an optimization improves performance, run
+  `/ik:bench`, print the results, and stop. Do not continue optimizing.
+- **Keep trying on failure** — when an idea doesn't improve performance,
+  revert and immediately try the next idea. Do not ask the user.
 - **Autonomous execution** — this is a fully autonomous loop. Make decisions,
   implement changes, evaluate results, and iterate. Only surface results when
-  you have something concrete to show (improvement committed or all ideas
+  you have something concrete to show (improvement benched or all ideas
   exhausted).
 - **Docs are source of truth** — always consult NVIDIA documentation before
   and after profiling. NCU data shows *what*, docs explain *why*
 - **Data-driven** — every decision backed by profiling data or documentation
 - **One change at a time** — isolate variables, measure each change independently
+- **ik:bench is the sole authority** — only `/ik:bench` results are official.
+  `ik:exec` trials are preliminary checks; the `improved` field from `ik:bench`
+  is the only valid signal to stop the loop
 - **Correctness first** — never sacrifice correctness for performance
 - **Never commit a regression** — revert to baseline if performance degrades
 - **Profile failed attempts** — a failed idea still produces useful profiling

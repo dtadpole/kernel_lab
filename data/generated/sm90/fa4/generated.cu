@@ -358,7 +358,7 @@ void flash_attention_2wg(
     }
     __syncthreads();
 
-    /* No setmaxnreg */
+
 
     /* ================================================================
      *  PRODUCER
@@ -401,11 +401,18 @@ void flash_attention_2wg(
         return;
     }
 
+    /* WG3: idle helper — adds scheduler warps, waits for consumers */
+    if (wg_id == 3) {
+        asm volatile("bar.sync 1, 416;");  /* wait for consumer epilogue (256+32+128=416) */
+        return;
+    }
+
     /* ================================================================
-     *  CONSUMER
+     *  CONSUMER (WG1+WG2, unchanged from 3-WG)
      * ================================================================ */
-    const int cwg = (wg_id >= 3) ? 1 : (wg_id - 1);  /* WG3→cwg=1 shadows WG2 */
-    const int mywarp = warp_id % 4;
+    const int cwg = wg_id - 1;
+    const int cwarp = warp_id - 4;
+    const int mywarp = cwarp & 3;
 
     const int my_bar    = 2 + cwg;
     const int other_bar = 2 + (1 - cwg);
@@ -429,7 +436,7 @@ void flash_attention_2wg(
     int k_full_phase = 0, v_full_phase = 0;
 
     if (cwg == 0) {
-        named_barrier_arrive(2, 384);
+        named_barrier_arrive(2, 256);
     }
 
     mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
@@ -532,7 +539,7 @@ void flash_attention_2wg(
         mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
 
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
-        named_barrier_sync(my_bar, 384);
+        named_barrier_sync(my_bar, 256);
 
         float S_acc[64];
         #pragma unroll
@@ -567,7 +574,7 @@ void flash_attention_2wg(
                 P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
         }
         wgmma_commit_group();
-        named_barrier_arrive(other_bar, 384);
+        named_barrier_arrive(other_bar, 256);
 
         wgmma_wait_group<1>();
         /* fence #3 removed: wait_group already synchronizes register state,
@@ -735,7 +742,7 @@ void flash_attention_2wg(
 
     /* Fence + 2-phase epilogue barrier */
     constexpr int EPILOGUE_BAR = 1;
-    constexpr int EPILOGUE_THREADS = 384 + 32;
+    constexpr int EPILOGUE_THREADS = 256 + 32 + 128;  /* +WG3 */
 
     fence_view_async_shared();
     named_barrier_arrive(EPILOGUE_BAR, EPILOGUE_THREADS);

@@ -37,6 +37,7 @@ class AgentMonitor:
         self.config = config or MonitorConfig()
         self._running = False
         self._task: asyncio.Task | None = None
+        self._pending_inject: str | None = None
 
     async def start(self) -> None:
         """Start the monitor as a background task."""
@@ -81,30 +82,18 @@ class AgentMonitor:
             self._running = False
 
         elif action.startswith("inject:"):
-            # Extract guidance, log it, interrupt + resume
+            # Extract guidance, log it.
+            # Inject is stored and will be delivered to the Solver via the
+            # next PreToolUse hook as additionalContext. We do NOT interrupt
+            # the Solver — inject is a soft nudge, not a kill.
             guidance = action[len("inject:"):]
             event = InjectEvent(
                 guidance=guidance,
                 source=f"monitor_{alert.alert_type}",
             )
             self.log.append(event)
-
-            if self.runner and self.runner._client:
-                # Interrupt current execution, then resume with guidance
-                try:
-                    await self.runner.interrupt()
-                    # Small delay to let the interrupt settle
-                    await asyncio.sleep(1)
-                    # Resume with the injected guidance
-                    if self.runner._session_id:
-                        await self.runner._client.query(
-                            f"[Supervisor guidance]: {guidance}"
-                        )
-                except Exception as e:
-                    error_event = TextOutputEvent(
-                        text=f"[monitor] inject failed: {e}"
-                    )
-                    self.log.append(error_event)
+            # Store for delivery via next hook callback
+            self._pending_inject = guidance
 
         else:
             # Unknown action — log it
@@ -112,6 +101,12 @@ class AgentMonitor:
                 text=f"[monitor] unknown action: {action}"
             )
             self.log.append(event)
+
+    def consume_pending_inject(self) -> str | None:
+        """Consume and return any pending inject guidance. Called by runner's PreToolUse hook."""
+        guidance = self._pending_inject
+        self._pending_inject = None
+        return guidance
 
     def _check_health(self) -> MonitorAlert | None:
         """Check for anomalies. Returns an alert or None."""

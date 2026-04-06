@@ -209,8 +209,23 @@ class AgentRunner:
                 log.append(event)
             await handler.on_tool_call(event)
 
-            # Enforce tool rules
-            return self._check_tool_rules(tool_name, tool_input)
+            # Check for pending inject from monitor
+            result = self._check_tool_rules(tool_name, tool_input)
+            if self._monitor and self._monitor._pending_inject:
+                guidance = self._monitor.consume_pending_inject()
+                if guidance:
+                    inject_ctx = f"[Supervisor guidance]: {guidance}"
+                    if result and "hookSpecificOutput" in result:
+                        existing = result["hookSpecificOutput"].get("additionalContext", "")
+                        result["hookSpecificOutput"]["additionalContext"] = f"{existing}\n{inject_ctx}"
+                    else:
+                        result = {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "additionalContext": inject_ctx,
+                            }
+                        }
+            return result
 
         async def on_post_tool_use(input_data, tool_use_id, context):
             tool_name = input_data.get("tool_name", "")

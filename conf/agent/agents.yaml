@@ -13,7 +13,7 @@ monitor:
   total_timeout: 7200          # 2 hours — triggers Steward time_limit review
   hard_limit: 43200            # 12 hours — unconditional kill (6x time_limit)
   check_interval: 60           # check every 1 min
-  loop_threshold: 5            # same tool 5x in a row
+  loop_threshold: 50           # same tool 50x in a row
   progress_check_interval: 900 # 15 min — periodic progress check
 
 steward:

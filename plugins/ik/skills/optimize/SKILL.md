@@ -3,7 +3,7 @@ name: optimize
 description: Autonomous CUDA kernel optimization loop — profile, analyze, brainstorm, implement, verify
 user-invocable: true
 disable-model-invocation: true
-argument-hint: <kernel> [gen=name] [ref=name] [arch=smXX] [gpu=N]
+argument-hint: <kernel> [gen=name] [ref=name] [arch=smXX] [gpu=N] [seed=auto|latest|clear|init|vNNN]
 ---
 
 # Optimize Kernel
@@ -27,6 +27,30 @@ code is modified during optimization.
 | `ref` | ref name(s) | no | all `ref-*` | Reference baseline(s) for comparison. Default: all refs found in `data/ref/{kernel}/`. Comma-separated for multiple: `ref=cublas,cudnn` |
 | `arch` | target arch | no | auto-detect | GPU arch target, e.g. `sm90`, `sm120`. Auto-detected from GPU if omitted |
 | `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
+| `seed` | seed strategy | no | `auto` | How to seed the gen/ scratch. See **Seed Strategies** below |
+
+### Seed Strategies
+
+| `seed` | Behavior |
+|--------|----------|
+| `auto` | **Default.** LLM inspects gems from the current run, picks a promising or under-explored seed — not always the latest. Enables tree-search over optimization branches. |
+| `latest` | Always seed from the most recent gem. No LLM decision. |
+| `init` | Start from scratch — empty gen/ folder, no seed. For writing a kernel from zero. |
+| `v003` | Seed from a specific gem version in the current run. |
+
+**`seed=auto` decision process:**
+```python
+from cuda_exec.impls import list_gems, reseed_gen
+
+gems = list_gems(kernel, arch, run_tag=run_tag)
+# LLM inspects each gem's results + the run's journal:
+#   - Which gems were fully explored vs abandoned early?
+#   - Which architectural branches haven't been tried?
+#   - Is the latest gem at a local optimum (micro-opts exhausted)?
+#   - Would backtracking to an earlier fork point open new possibilities?
+# Then picks a gem and calls:
+reseed_gen(kernel, arch, gem_path=chosen_gem["gen_path"])
+```
 
 The `gen=` and `ref=` values are short names (file stems, not full slugs).
 They map to files in `data/ref/{kernel}/` (in kernel_lab) and

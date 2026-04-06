@@ -33,6 +33,127 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
     return (data_root or _DEFAULT_DATA_ROOT) / "ref" / kernel
 
 
+def list_gems(kernel: str, arch: str, impl_name: str = "cuda",
+              run_tag: str | None = None,
+              kb_repo: Path | None = None) -> list[dict]:
+    """List all available gems for a kernel/arch/impl, newest first.
+
+    If run_tag is specified, only lists gems from that run.
+    Otherwise lists gems across all runs.
+
+    Returns list of dicts with: version, path, gen_path, run, tflops, timestamp.
+    """
+    repo = kb_repo or _KB_REPO
+    gems: list[dict] = []
+
+    # Determine which runs to search
+    runs_dir = repo / "runs"
+    if run_tag:
+        run_dirs = [runs_dir / run_tag] if (runs_dir / run_tag).exists() else []
+    else:
+        run_dirs = sorted(runs_dir.glob("run_*"), reverse=True) if runs_dir.exists() else []
+
+    # New structure: runs/run_*/gems/<slug>/v*/
+    for run_dir in run_dirs:
+        gem_base = run_dir / "gems" / f"gen-{impl_name}"
+        if not gem_base.exists():
+            continue
+        for ver_dir in sorted(gem_base.glob("v*"), reverse=True):
+            gen_path = ver_dir / "gen" / arch / kernel
+            results_file = ver_dir / "results.json"
+            entry = {
+                "version": ver_dir.name.split("_")[0],  # e.g. "v001"
+                "path": ver_dir,
+                "gen_path": gen_path if gen_path.exists() else None,
+                "run": run_dir.name,
+                "timestamp": "_".join(ver_dir.name.split("_")[1:]),
+            }
+            # Extract TFLOPS from results.json if available
+            if results_file.exists():
+                try:
+                    import json
+                    results = json.loads(results_file.read_text())
+                    best_tflops = 0.0
+                    for cfg_data in results.get("configs", {}).values():
+                        ms = cfg_data.get("gen_median_ms") or cfg_data.get("ref_median_ms")
+                        if ms and ms > 0:
+                            # Approximate TFLOPS from the largest config
+                            pass
+                    gem_info = results.get("gem", {})
+                    entry["improved_configs"] = gem_info.get("improved_configs", [])
+                    entry["gem_info"] = gem_info
+                except Exception:
+                    pass
+            gems.append(entry)
+
+    # Old structure: ik_bench/gems/<kernel>/<arch>/<slug>/v*/
+    if not run_tag:
+        old_gems = repo / "ik_bench" / "gems" / kernel / arch / f"gen-{impl_name}"
+        if old_gems.exists():
+            for ver_dir in sorted(old_gems.glob("v*"), reverse=True):
+                gen_path = ver_dir / "data" / "gen" / arch / kernel
+                gems.append({
+                    "version": ver_dir.name.split("_")[0],
+                    "path": ver_dir,
+                    "gen_path": gen_path if gen_path.exists() else None,
+                    "run": "ik_bench (legacy)",
+                    "timestamp": "_".join(ver_dir.name.split("_")[1:]),
+                })
+
+    return gems
+
+
+def reseed_gen(kernel: str, arch: str, *,
+               run_tag: str | None = None,
+               gem_path: Path | None = None,
+               kb_repo: Path | None = None) -> Path:
+    """Clear gen/ scratch and reseed from a gem.
+
+    Args:
+        kernel: kernel name
+        arch: target arch
+        run_tag: which run to reseed. None = auto-detect from host.
+        gem_path: specific gem's gen/ path to seed from. None = latest gem.
+        kb_repo: kernel_lab_kb path.
+
+    Returns:
+        Path to the reseeded gen/<arch>/<kernel>/ directory.
+    """
+    import shutil
+    repo = kb_repo or _KB_REPO
+
+    if not run_tag:
+        run_tag = f"run_{_detect_host_slug()}"
+
+    run_dir = repo / "runs" / run_tag
+    gen_path = run_dir / "gen" / arch / kernel
+
+    # Clear existing
+    if gen_path.exists():
+        shutil.rmtree(gen_path)
+
+    # Find seed source
+    if gem_path is None:
+        gem_path = _find_latest_gem(kernel, arch, kb_repo=repo)
+
+    if gem_path and gem_path.exists():
+        shutil.copytree(gem_path, gen_path)
+        # Fix flat structure from old gems
+        for cu_file in list(gen_path.glob("*.cu")):
+            stem = cu_file.stem
+            subdir = gen_path / stem
+            if not subdir.exists():
+                subdir.mkdir()
+            (subdir / cu_file.name).replace(cu_file)
+            for companion in gen_path.glob(f"{stem}.*"):
+                if companion.is_file():
+                    (subdir / companion.name).replace(companion)
+    else:
+        gen_path.mkdir(parents=True, exist_ok=True)
+
+    return gen_path
+
+
 def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
                      kb_repo: Path | None = None) -> Path | None:
     """Find the latest gem's gen code across all KB runs.

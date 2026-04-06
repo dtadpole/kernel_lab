@@ -618,16 +618,23 @@ void flash_attention_2wg(
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
         named_barrier_sync(my_bar, 256);
 
-        /* Issue PV_lo[n-1] (group 0) + QK_lo[n] (group 1) concurrently */
+        /* Issue PV_lo + PV_hi (group 0, 16 calls) before QK overwrites P_packed */
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
         {
             const uint32_t pvl = (v_stage == 0) ? V0_lo : V1_lo;
+            const uint32_t pvh = (v_stage == 0) ? V0_hi : V1_hi;
             const uint64_t dvl = make_wgmma_desc(pvl, STRIDE);
+            const uint64_t dvh = make_wgmma_desc(pvh, STRIDE);
             wgmma_fence();
             #pragma unroll
             for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-                uint64_t dv_k = gmma_desc_advance(dvl, ks * V_KS_ADVANCE);
-                wgmma_m64n64k16_f32_bf16_RS(O_lo, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
+                uint64_t dvl_k = gmma_desc_advance(dvl, ks * V_KS_ADVANCE);
+                wgmma_m64n64k16_f32_bf16_RS(O_lo, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dvl_k, 1);
+            }
+            #pragma unroll
+            for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+                uint64_t dvh_k = gmma_desc_advance(dvh, ks * V_KS_ADVANCE);
+                wgmma_m64n64k16_f32_bf16_RS(O_hi, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dvh_k, 1);
             }
             wgmma_commit_group();
         }
@@ -677,7 +684,7 @@ void flash_attention_2wg(
         for (int ks=0;ks<4;ks++) { P_packed[ks*4+0]=pack_bf16(S_lo[ks*8+0],S_lo[ks*8+1]); P_packed[ks*4+1]=pack_bf16(S_lo[ks*8+2],S_lo[ks*8+3]);
             P_packed[ks*4+2]=pack_bf16(S_lo[ks*8+4],S_lo[ks*8+5]); P_packed[ks*4+3]=pack_bf16(S_lo[ks*8+6],S_lo[ks*8+7]); }
 
-        wgmma_wait_group<0>();  /* PV done */
+        wgmma_wait_group<0>();  /* PV_lo + PV_hi done */
         if (lane_id==0&&mywarp==0) mbarrier_arrive(&V_empty[v_stage]);
         v_stage^=1; if(v_stage==0) v_full_phase^=1;
 

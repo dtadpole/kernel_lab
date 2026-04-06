@@ -358,7 +358,7 @@ void flash_attention_2wg(
     }
     __syncthreads();
 
-    /* No setmaxnreg: 128 regs/thread sufficient with IS_CAUSAL template */
+    /* No setmaxnreg */
 
     /* ================================================================
      *  PRODUCER
@@ -404,12 +404,11 @@ void flash_attention_2wg(
     /* ================================================================
      *  CONSUMER
      * ================================================================ */
-    const int cwg = wg_id - 1;
-    const int cwarp = warp_id - 4;
-    const int mywarp = cwarp & 3;
+    const int cwg = (wg_id >= 3) ? 1 : (wg_id - 1);  /* WG3→cwg=1 shadows WG2 */
+    const int mywarp = warp_id % 4;
 
-    /* 3-consumer barrier: all sync on bar 2 with 384 threads */
-    (void)cwg; /* cwg used for Q offset, not barrier selection */
+    const int my_bar    = 2 + cwg;
+    const int other_bar = 2 + (1 - cwg);
 
     mbarrier_wait_parity(Q_full_mbar, 0);
 
@@ -430,7 +429,7 @@ void flash_attention_2wg(
     int k_full_phase = 0, v_full_phase = 0;
 
     if (cwg == 0) {
-        named_barrier_arrive(2, 256);
+        named_barrier_arrive(2, 384);
     }
 
     mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
@@ -533,7 +532,7 @@ void flash_attention_2wg(
         mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
 
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
-        named_barrier_sync(2, 384);
+        named_barrier_sync(my_bar, 384);
 
         float S_acc[64];
         #pragma unroll
@@ -568,7 +567,7 @@ void flash_attention_2wg(
                 P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
         }
         wgmma_commit_group();
-        named_barrier_arrive(2, 384);
+        named_barrier_arrive(other_bar, 384);
 
         wgmma_wait_group<1>();
         /* fence #3 removed: wait_group already synchronizes register state,
@@ -736,22 +735,16 @@ void flash_attention_2wg(
 
     /* Fence + 2-phase epilogue barrier */
     constexpr int EPILOGUE_BAR = 1;
-    constexpr int EPILOGUE_THREADS = 384 + 32; /* 3 consumers + warp 4 */
+    constexpr int EPILOGUE_THREADS = 384 + 32;
 
     fence_view_async_shared();
     named_barrier_arrive(EPILOGUE_BAR, EPILOGUE_THREADS);
 
     /* Warp 4 does TMA S2G */
     if (warp_id == 4) {
-        constexpr int Q_CHUNK_E = 64 * HALF_DIM * (int)sizeof(nv_bfloat16);
         named_barrier_sync(EPILOGUE_BAR, EPILOGUE_THREADS);
-        /* 6 TMA S2G stores for 192 Q rows × 128 DIM */
-        tma_store_2d(&tma_O, Q_lo,               coord_head,           batch_seq + q_block_id * BLOCK_Q);
-        tma_store_2d(&tma_O, Q_lo + Q_CHUNK_E,   coord_head,           batch_seq + q_block_id * BLOCK_Q + 64);
-        tma_store_2d(&tma_O, Q_lo + 2*Q_CHUNK_E, coord_head,           batch_seq + q_block_id * BLOCK_Q + 128);
-        tma_store_2d(&tma_O, Q_hi,               coord_head + HALF_DIM, batch_seq + q_block_id * BLOCK_Q);
-        tma_store_2d(&tma_O, Q_hi + Q_CHUNK_E,   coord_head + HALF_DIM, batch_seq + q_block_id * BLOCK_Q + 64);
-        tma_store_2d(&tma_O, Q_hi + 2*Q_CHUNK_E, coord_head + HALF_DIM, batch_seq + q_block_id * BLOCK_Q + 128);
+        tma_store_2d(&tma_O, Q_lo, coord_head, batch_seq + q_block_id * BLOCK_Q);
+        tma_store_2d(&tma_O, Q_hi, coord_head + HALF_DIM, batch_seq + q_block_id * BLOCK_Q);
         cp_async_bulk_commit_group();
         cp_async_bulk_wait_group();
     }
@@ -829,7 +822,7 @@ extern "C" int kernel_run(
 
     if (D != 128) return -2;
 
-    const int BLOCK_Q   = 192;
+    const int BLOCK_Q   = 128;
     const int BLOCK_KV  = 128;
     const int DIM_CONST = 128;
     const int TB_SIZE   = 512;

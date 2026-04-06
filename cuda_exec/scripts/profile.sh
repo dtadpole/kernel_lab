@@ -64,7 +64,14 @@ fi
 
 mkdir -p "$(dirname "$EXPORT_PREFIX")"
 
-CMD=(sudo --preserve-env /usr/local/cuda/bin/ncu --set "$SET_NAME" --target-processes "$TARGET_PROCESSES")
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+NCU="${CUDA_HOME}/bin/ncu"
+if [[ ! -x "$NCU" ]]; then
+  # Fallback: try system ncu
+  NCU="$(command -v ncu 2>/dev/null || echo /usr/local/cuda/bin/ncu)"
+fi
+
+CMD=(sudo --preserve-env "$NCU" --set "$SET_NAME" --target-processes "$TARGET_PROCESSES")
 if [[ "$FORCE_OVERWRITE" == "1" ]]; then
   CMD+=(--force-overwrite)
 fi

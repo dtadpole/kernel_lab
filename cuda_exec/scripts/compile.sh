@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Interface ──────────────────────────────────────────────────────────
+#
+# CLI args (the only interface):
+#   --source FILE     Source .cu file (required)
+#   --output FILE     Output binary path (required)
+#   --arch ARCH       GPU arch: "native" (auto-detect) or e.g. "sm_90a" (default: native)
+#   --harness FILE    Link with eval harness .cu (optional)
+#   --std STD         C++ standard (default: c++17)
+#   --opt LEVEL       Optimization level (default: 3)
+#   --no-lineinfo     Disable -lineinfo
+#
+# Environment (only two):
+#   CUDA_HOME              CUDA toolkit path (auto-detected if unset)
+#   CUDA_VISIBLE_DEVICES   GPU selection (not used by this script, but logged)
+#
+# Everything else is hardcoded with sensible defaults.
+# ───────────────────────────────────────────────────────────────────────
+
 SOURCE=""
 OUTPUT=""
 ARCH="native"
@@ -55,7 +73,27 @@ if [[ -z "$OUTPUT" ]]; then
   exit 2
 fi
 
-# Auto-detect GPU architecture if ARCH is "native"
+# ── Auto-detect CUDA_HOME ─────────────────────────────────────────────
+# Priority: $CUDA_HOME > /usr/local/cuda > newest /usr/local/cuda-*
+if [[ -z "${CUDA_HOME:-}" ]]; then
+  if [[ -x /usr/local/cuda/bin/nvcc ]]; then
+    CUDA_HOME="/usr/local/cuda"
+  else
+    # Find newest cuda-* with nvcc
+    for d in $(ls -d /usr/local/cuda-* 2>/dev/null | sort -V -r); do
+      if [[ -x "$d/bin/nvcc" ]]; then
+        CUDA_HOME="$d"
+        break
+      fi
+    done
+  fi
+  if [[ -z "${CUDA_HOME:-}" ]]; then
+    echo "ERROR: cannot find CUDA toolkit. Set CUDA_HOME." >&2
+    exit 2
+  fi
+fi
+
+# ── Auto-detect GPU architecture ──────────────────────────────────────
 if [[ "$ARCH" == "native" ]]; then
   CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
   if [[ -n "$CC" ]]; then
@@ -66,18 +104,16 @@ if [[ "$ARCH" == "native" ]]; then
   fi
 fi
 
-CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+# ── Toolkit binaries ──────────────────────────────────────────────────
 NVCC="${CUDA_HOME}/bin/nvcc"
 PTXAS="${CUDA_HOME}/bin/ptxas"
 CUOBJDUMP="${CUDA_HOME}/bin/cuobjdump"
 NVDISASM="${CUDA_HOME}/bin/nvdisasm"
-# Default PTXAS_ARCH to match the ARCH passed to nvcc.
-# nvcc generates .target without the 'a' suffix (e.g., sm_90 instead of sm_90a),
-# but ptxas needs the 'a' to enable architecture-specific features like WGMMA.
-PTXAS_ARCH="${PTXAS_ARCH:-${ARCH}}"
-PTXAS_FLAGS="${PTXAS_FLAGS:--v}"
-NVDISASM_FLAGS="${NVDISASM_FLAGS:---print-code --print-instruction-encoding --print-life-ranges}"
 
+# ptxas arch always matches nvcc arch (including the 'a' suffix)
+PTXAS_ARCH="${ARCH}"
+
+# ── Output paths ──────────────────────────────────────────────────────
 OUTPUT_DIR="$(dirname "$OUTPUT")"
 OUTPUT_NAME="$(basename "$OUTPUT")"
 OUTPUT_STEM="${OUTPUT_NAME%.*}"
@@ -100,6 +136,7 @@ NVDISASM_STDERR_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.nvdisasm.stderr"
 
 mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"
 
+# ── Build nvcc flags ──────────────────────────────────────────────────
 # Use -gencode to ensure both PTX and SASS targets carry the 'a' suffix
 # when needed (e.g., sm_90a for WGMMA). Plain -arch=sm_90a generates PTX
 # with .target sm_90 (no 'a') which ptxas rejects for WGMMA instructions.
@@ -109,6 +146,9 @@ if [[ "$LINEINFO" == "1" ]]; then
   COMMON_NVCC_ARGS+=("-lineinfo")
 fi
 
+# Always link libcuda (needed for TMA / cuTensorMap APIs)
+COMMON_NVCC_ARGS+=("-lcuda")
+
 # If harness is provided, add its directory as an include path
 HARNESS_INCLUDE_ARGS=()
 if [[ -n "$HARNESS" ]]; then
@@ -116,47 +156,19 @@ if [[ -n "$HARNESS" ]]; then
   HARNESS_INCLUDE_ARGS=("-I${HARNESS_DIR}")
 fi
 
-# Extra include directories from NVCC_INCLUDE_DIRS (space-separated)
-if [[ -n "$NVCC_INCLUDE_DIRS" ]]; then
-  for dir in $NVCC_INCLUDE_DIRS; do
-    COMMON_NVCC_ARGS+=("-I${dir}")
-  done
-fi
-
-# Extra linker libraries from NVCC_EXTRA_LIBS (space-separated, e.g. "cuda dl")
-if [[ -n "$NVCC_EXTRA_LIBS" ]]; then
-  for lib in $NVCC_EXTRA_LIBS; do
-    COMMON_NVCC_ARGS+=("-l${lib}")
-  done
-fi
-
-# Extra nvcc flags from NVCC_EXTRA_FLAGS (space-separated)
-if [[ -n "$NVCC_EXTRA_FLAGS" ]]; then
-  # shellcheck disable=SC2206
-  COMMON_NVCC_ARGS+=( $NVCC_EXTRA_FLAGS )
-fi
-
+# ── Assemble commands ─────────────────────────────────────────────────
 PTX_CMD=("$NVCC" "${COMMON_NVCC_ARGS[@]}" "${HARNESS_INCLUDE_ARGS[@]}" -ptx "$SOURCE" -o "$PTX_PATH")
-PTXAS_CMD=("$PTXAS" "-arch=${PTXAS_ARCH}")
-if [[ -n "$PTXAS_FLAGS" ]]; then
-  # shellcheck disable=SC2206
-  PTXAS_EXTRA=( $PTXAS_FLAGS )
-  PTXAS_CMD+=("${PTXAS_EXTRA[@]}")
-fi
-PTXAS_CMD+=("$PTX_PATH" -o "$CUBIN_PATH")
+PTXAS_CMD=("$PTXAS" "-arch=${PTXAS_ARCH}" -v "$PTX_PATH" -o "$CUBIN_PATH")
 RESOURCE_USAGE_CMD=("$CUOBJDUMP" --dump-resource-usage "$CUBIN_PATH")
-# shellcheck disable=SC2206
-NVDISASM_EXTRA=( $NVDISASM_FLAGS )
-NVDISASM_CMD=("$NVDISASM" "${NVDISASM_EXTRA[@]}" "$CUBIN_PATH")
+NVDISASM_CMD=("$NVDISASM" --print-code --print-instruction-encoding --print-life-ranges "$CUBIN_PATH")
 
-# Binary command: with or without harness
 if [[ -n "$HARNESS" ]]; then
   BINARY_CMD=("$NVCC" "${COMMON_NVCC_ARGS[@]}" "${HARNESS_INCLUDE_ARGS[@]}" "$HARNESS" "$SOURCE" -o "$OUTPUT")
 else
   BINARY_CMD=("$NVCC" "${COMMON_NVCC_ARGS[@]}" "$SOURCE" -o "$OUTPUT")
 fi
 
-# Dump environment info
+# ── Dump environment info ─────────────────────────────────────────────
 ENV_INFO_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.env-info.txt"
 {
   echo "=== Environment ==="
@@ -171,7 +183,6 @@ ENV_INFO_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.env-info.txt"
   echo "ptxas: $("$PTXAS" --version 2>&1 | tail -1)"
   echo "nvdisasm: $("$NVDISASM" --version 2>&1 | tail -1)"
   echo "cuobjdump: $("$CUOBJDUMP" --version 2>&1 | tail -1)"
-  echo "PTXAS_ARCH: $PTXAS_ARCH"
   echo "ARCH: $ARCH"
   echo ""
   echo "=== GPU ==="
@@ -181,8 +192,6 @@ ENV_INFO_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.env-info.txt"
   echo "CPP_STD: $CPP_STD"
   echo "OPT_LEVEL: $OPT_LEVEL"
   echo "LINEINFO: $LINEINFO"
-  echo "PTXAS_FLAGS: $PTXAS_FLAGS"
-  echo "NVDISASM_FLAGS: $NVDISASM_FLAGS"
   printf 'COMMON_NVCC_ARGS:'
   printf ' %q' "${COMMON_NVCC_ARGS[@]}"
   printf '\n'
@@ -192,6 +201,7 @@ ENV_INFO_PATH="${LOG_DIR}/${AGGREGATE_LOG_BASENAME}.env-info.txt"
   echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-<not set>}"
 } > "$ENV_INFO_PATH" 2>&1
 
+# ── Execute pipeline ──────────────────────────────────────────────────
 echo "toolkit_pipeline:"
 echo "  cwd: $(pwd)"
 echo "  source: $SOURCE"

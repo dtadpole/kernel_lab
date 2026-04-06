@@ -424,14 +424,13 @@ def prepare_run(
 
     runs_dir = repo / "runs"
 
-    # Resolve run_tag: explicit > env CUDA_EXEC_RUN_TAG > run_<host_slug>
+    # Single resolution: delegate to impls._resolve_run_home
     if not run_tag:
-        run_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
-    if not run_tag:
-        from cuda_exec.impls import _detect_host_slug
-        run_tag = f"run_{_detect_host_slug()}"
-
-    run_dir = runs_dir / run_tag
+        from cuda_exec.impls import _resolve_run_home
+        run_dir = _resolve_run_home(kb_repo=repo)
+        run_tag = run_dir.name
+    else:
+        run_dir = runs_dir / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now()
@@ -456,6 +455,12 @@ def prepare_run(
     ref_dst = run_dir / "ref" / kernel
     if ref_src.exists():
         shutil.copytree(ref_src, ref_dst)
+
+    # 2b. Snapshot data/peak/<arch>/<kernel>/ → peak/<arch>/<kernel>/
+    peak_src = PROJECT_ROOT / "data" / "peak" / arch / kernel
+    peak_dst = run_dir / "peak" / arch / kernel
+    if peak_src.exists() and not peak_dst.exists():
+        shutil.copytree(peak_src, peak_dst)
 
     # 3. Ensure gen code exists at gen/<arch>/<kernel>/
     #    Since we reuse the same run_dir, gen/ may already exist.

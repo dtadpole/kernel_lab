@@ -95,8 +95,9 @@ def resolve_host_env() -> Dict[str, str]:
     only included when the value is non-empty.
 
     Fields resolved:
-      CUDA_HOME   — path to the CUDA toolkit root
-      LD_PRELOAD  — library preload (e.g. fbcode libcuda workaround)
+      CUDA_HOME                          — path to the CUDA toolkit root
+      LD_PRELOAD                         — library preload (e.g. fbcode libcuda workaround)
+      TVM_FFI_DISABLE_TORCH_C_DLPACK    — CuTe DSL ABI workaround
     """
     _, entry = _match_host_entry()
     env: Dict[str, str] = {}
@@ -109,6 +110,8 @@ def resolve_host_env() -> Dict[str, str]:
         ld_preload = host_env.get("ld_preload")
         if ld_preload:
             env["LD_PRELOAD"] = str(ld_preload)
+        if host_env.get("tvm_ffi_disable_torch_c_dlpack"):
+            env["TVM_FFI_DISABLE_TORCH_C_DLPACK"] = "1"
     else:
         # Fallback: resolve /usr/local/cuda symlink
         default_cuda = Path("/usr/local/cuda")

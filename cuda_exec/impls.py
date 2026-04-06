@@ -4,7 +4,8 @@ Shared utility that maps implementation slugs to source files.
 Used by compile, trial, bench, and any future tool.
 
 Slug format: {source}-{name}
-  - source: "ref" (data/ref/{kernel}/) or "gen" (data/gen/{arch}/{kernel}/)
+  - source: "ref" (data/ref/{kernel}/), "gen" (data/gen/{arch}/{kernel}/),
+            or "peak" (data/peak/{arch}/{kernel}/)
   - name: file stem (e.g., "cublas", "cutedsl", "cuda")
 
 Full identifier: {kernel}/{impl_slug}  (e.g., "matmul/ref-cublas")
@@ -13,6 +14,7 @@ File resolution: slug → try .py first, then .cu
   - ref-cublas  → data/ref/matmul/cublas.py
   - gen-cutedsl → data/gen/sm90/matmul/cutedsl.py
   - gen-cuda    → data/gen/sm90/matmul/cuda.cu
+  - peak-cuda   → data/peak/sm90/fa4/cuda.cu
 
 Helper files (dependencies of an entry point) are auto-discovered:
   - .py entry points: all other .py files in the same directory are included
@@ -31,6 +33,10 @@ _KB_REPO = Path.home() / "kernel_lab_kb"
 
 def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
     return (data_root or _DEFAULT_DATA_ROOT) / "ref" / kernel
+
+
+def _peak_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
+    return (data_root or _DEFAULT_DATA_ROOT) / "peak" / arch / kernel
 
 
 def list_gems(kernel: str, arch: str, impl_name: str = "cuda",
@@ -164,6 +170,28 @@ def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
     return None
 
 
+def _resolve_run_home(run_tag: str | None = None,
+                      kb_repo: Path | None = None) -> Path:
+    """Resolve the active KB run directory.
+
+    Priority:
+      1. Explicit run_tag argument
+      2. IK_RUN_HOME env var — direct path to a run directory
+      3. Fallback: kernel_lab_kb/runs/run_{host_slug}
+    """
+    import os
+    repo = kb_repo or _KB_REPO
+
+    if run_tag:
+        return repo / "runs" / run_tag
+
+    env_home = os.environ.get("IK_RUN_HOME")
+    if env_home:
+        return Path(env_home)
+
+    return repo / "runs" / f"run_{_detect_host_slug()}"
+
+
 def _ensure_gen_dir(kernel: str, arch: str, *,
                     run_tag: str | None = None,
                     kb_repo: Path | None = None) -> Path:
@@ -173,21 +201,22 @@ def _ensure_gen_dir(kernel: str, arch: str, *,
     No gems → no code. A fresh run starts empty. Does NOT auto-seed.
     The caller (ik:optimize) is responsible for seeding gen/ via reseed_gen().
     """
-    repo = kb_repo or _KB_REPO
-    run_tag = _resolve_run_tag(run_tag)
-    run_dir = repo / "runs" / run_tag
+    run_dir = _resolve_run_home(run_tag, kb_repo)
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir / "gen" / arch / kernel
 
 
 def _resolve_run_tag(run_tag: str | None = None) -> str:
-    """Resolve run_tag: explicit > env CUDA_EXEC_RUN_TAG > run_<host_slug>."""
+    """Resolve run_tag — kept for backward compat with list_gems/reseed_gen.
+
+    Priority: explicit > IK_RUN_HOME dirname > run_{host_slug}.
+    """
     import os
     if run_tag:
         return run_tag
-    env_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
-    if env_tag:
-        return env_tag
+    env_home = os.environ.get("IK_RUN_HOME")
+    if env_home:
+        return Path(env_home).name
     return f"run_{_detect_host_slug()}"
 
 
@@ -231,8 +260,10 @@ def _detect_host_slug() -> str:
 def _gen_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
     """Resolve gen directory.
 
-    1. Explicit data_root (from bench run snapshot) — use directly
-    2. Default: active KB run's gen/ folder, seeded from latest gem if needed
+    Priority:
+      1. Explicit data_root (from bench run snapshot) — use directly
+      2. IK_RUN_HOME env var → $IK_RUN_HOME/gen/{arch}/{kernel}
+      3. Fallback: kernel_lab_kb/runs/run_{host_slug}/gen/{arch}/{kernel}
     """
     if data_root:
         return data_root / "gen" / arch / kernel
@@ -268,16 +299,18 @@ def resolve_impl(
         }
     """
     parts = impl_slug.split("-", 1)
-    if len(parts) != 2 or parts[0] not in ("ref", "gen"):
+    if len(parts) != 2 or parts[0] not in ("ref", "gen", "peak"):
         raise ValueError(
             f"Invalid impl slug '{impl_slug}'. "
-            f"Format: '{{ref|gen}}-{{name}}' (e.g., 'ref-cublas', 'gen-cuda')"
+            f"Format: '{{ref|gen|peak}}-{{name}}' (e.g., 'ref-cublas', 'gen-cuda', 'peak-cuda')"
         )
 
     source, name = parts
 
     if source == "ref":
         impl_dir = _ref_dir(kernel, data_root) / name
+    elif source == "peak":
+        impl_dir = _peak_dir(kernel, arch, data_root) / name
     else:
         impl_dir = _gen_dir(kernel, arch, data_root) / name
 
@@ -359,6 +392,7 @@ def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List
                 })
 
     _scan_dir(_ref_dir(kernel, data_root), "ref")
+    _scan_dir(_peak_dir(kernel, arch, data_root), "peak")
     _scan_dir(_gen_dir(kernel, arch, data_root), "gen")
 
     return impls

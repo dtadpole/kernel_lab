@@ -486,11 +486,11 @@ def run_compile_task(
             copied = _write_input_files(files, impl_dir)
             all_copied[slug] = copied
 
-        # Find the .cu impl to compile (first gen-* with a .cu file)
+        # Find the .cu impl to compile (first gen-* or peak-* with a .cu file)
         cu_slug = None
         cu_files: list[Path] = []
         for slug, copied in all_copied.items():
-            if slug.startswith("gen-") and any(p.suffix == ".cu" for p in copied):
+            if not slug.startswith("ref-") and any(p.suffix == ".cu" for p in copied):
                 cu_slug = slug
                 cu_files = copied
                 break
@@ -498,7 +498,7 @@ def run_compile_task(
         # Legacy compat: also stage to inputs/reference/ and inputs/generated/
         # so trial.py can find them via the old paths
         ref_slugs = [s for s in impls if s.startswith("ref-")]
-        gen_py_slugs = [s for s in impls if s.startswith("gen-") and s != cu_slug]
+        gen_py_slugs = [s for s in impls if s not in (cu_slug,) and not s.startswith("ref-") and any(p.suffix == ".py" for p in all_copied.get(s, []))]
 
         # First .py gen impl → inputs/reference/ (trial.py loads as "reference")
         ref_dir = workspace_path / "inputs" / "reference"

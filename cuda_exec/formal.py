@@ -322,7 +322,7 @@ def formal_benchmark(
     # Auto-generate run_tag for workspace isolation
     run_tag = f"bench-{kernel}-{int(time.time())}"
 
-    refs = [r for r in resolved if r["source"] == "ref"]
+    refs = [r for r in resolved if r["source"] in ("ref", "peak")]
     gens = [r for r in resolved if r["source"] == "gen"]
 
     # Use the first reference as the primary reference for correctness comparison
@@ -367,9 +367,15 @@ def formal_benchmark(
         finally:
             _sys.path[:] = old_path
 
-    # --- Benchmark each ref-* and .py gen-* impl independently ---
-    # Correctness is NOT computed here — trial.py handles it against the golden.
-    for impl in refs + [g for g in gens if g["file_type"] == "py"]:
+    # Split ALL impls by file type, not by source.
+    # .py impls (ref, peak, or gen) → measured via _run_py_impl
+    # .cu impls (ref, peak, or gen) → compiled + trialed via cuda_exec
+    all_impls = refs + gens
+    py_impls = [i for i in all_impls if i["file_type"] == "py"]
+    cu_impls = [i for i in all_impls if i["file_type"] == "cu"]
+
+    # --- Benchmark each .py impl (any source) ---
+    for impl in py_impls:
         logger.info("[%s] measure_py start (%d configs)", impl["slug"], len(configs))
         impl_start = time.time()
         r = _run_py_impl(impl)
@@ -389,8 +395,8 @@ def formal_benchmark(
             }
         logger.info("[%s] measure_py done (%.1fs)", impl["slug"], time.time() - impl_start)
 
-    # --- Trial each gen-* implementation ---
-    for gen in gens:
+    # --- Compile + trial each .cu impl (any source) ---
+    for gen in cu_impls:
         unique_turn = int(time.time()) % 100000
 
         metadata = Metadata(
@@ -404,13 +410,9 @@ def formal_benchmark(
         if gen["file_type"] == "cu":
             # .cu needs compile — build impl-keyed request
             compile_impls = {}
-            # Include all ref impls
-            for ref in refs:
-                compile_impls[ref["slug"]] = dict(ref["files"])
-            # Include all .py gen impls
-            for pg in gens:
-                if pg["file_type"] == "py":
-                    compile_impls[pg["slug"]] = dict(pg["files"])
+            # Include .py impls as references for correctness comparison
+            for py_impl in py_impls:
+                compile_impls[py_impl["slug"]] = dict(py_impl["files"])
             # Include this .cu gen impl
             compile_impls[gen["slug"]] = dict(gen["files"])
 

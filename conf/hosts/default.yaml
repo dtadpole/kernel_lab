@@ -112,6 +112,8 @@ hosts:
       ld_preload: null              # not needed — driver 595 matches CUDA 13.2
       python: /usr/local/bin/python3  # 3.12.13+meta
       cudnn_sdpa_broken: false
+      # CuTe DSL (FA4 ref-cutedsl) requires this due to ABI mismatch with PyTorch
+      tvm_ffi_disable_torch_c_dlpack: true
     network:
       internet: true
       proxy_bypass_method: "fwdproxy"
@@ -153,6 +155,7 @@ hosts:
       # driver during cudnnCreate → cuModuleLoadData. SDPA must exclude
       # CUDNN_ATTENTION backend; use FLASH_ATTENTION instead.
       cudnn_sdpa_broken: true
+      tvm_ffi_disable_torch_c_dlpack: true
     network:
       internet: false               # fwdproxy blocks CONNECT tunnels
       proxy_bypass_method: "ssh_localhost"  # for Claude Code sandbox

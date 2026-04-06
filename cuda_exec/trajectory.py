@@ -184,10 +184,32 @@ def _copy_compile_logs(runtime_root: Path | None, compile_result: dict, dest: Pa
 def _extract_config_results(trial_result: dict) -> dict:
     configs_out: dict[str, dict] = {}
     for slug, cfg in trial_result.get("configs", {}).items():
-        ref_perf = cfg.get("reference", {}).get("performance", {})
-        gen_perf = cfg.get("generated", {}).get("performance", {})
+        # Support both old format (reference/generated/cudnn keys) and
+        # new impls-based format (impls dict with slug keys like gen-cuda/ref-cublas)
+        impls = cfg.get("impls", {})
+        golden_slug = cfg.get("golden_slug", "")
+
+        if impls:
+            # New format: find the gen impl (first non-ref impl) and the golden ref
+            gen_data: dict = {}
+            ref_data: dict = {}
+            for impl_slug, impl_data in impls.items():
+                if impl_slug == golden_slug or impl_slug.startswith("ref-"):
+                    if not ref_data:
+                        ref_data = impl_data
+                elif not gen_data:
+                    gen_data = impl_data
+
+            ref_perf = ref_data.get("performance", {})
+            gen_perf = gen_data.get("performance", {})
+            gen_correct = gen_data.get("correctness", {}) or {}
+        else:
+            # Old format: reference/generated/cudnn keys
+            ref_perf = cfg.get("reference", {}).get("performance", {})
+            gen_perf = cfg.get("generated", {}).get("performance", {})
+            gen_correct = cfg.get("generated", {}).get("correctness", {}) or {}
+
         cudnn_perf = cfg.get("cudnn", {}).get("performance", {})
-        gen_correct = cfg.get("generated", {}).get("correctness", {})
 
         ref_median = ref_perf.get("latency_ms", {}).get("median")
         gen_median = gen_perf.get("latency_ms", {}).get("median")

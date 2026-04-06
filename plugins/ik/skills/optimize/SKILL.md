@@ -182,6 +182,22 @@ if it contains independent sub-tasks that can be parallelized.
 3. **Loop back** to Phase 2 with new evidence
 4. **Stop conditions**: after 4 total failed ideas, write findings summary and stop
 
+## Optimization Targets
+
+The optimization loop aims for TWO targets (both must be met for a kernel
+to be considered "done"):
+
+1. **+10% above native baseline** — the gen kernel's own first gem (v001)
+   must improve by at least 10% TFLOPS at the largest config by the end
+   of the session.
+2. **+10% above reference** — the gen kernel must BEAT the best ref-*
+   implementation (e.g., cuBLAS) by at least 10% TFLOPS at the largest
+   config.
+
+If target 2 is unreachable (e.g., cuBLAS is already at 92% of peak), aim
+to close within 5% of the reference first, then iterate. Document why the
+gap exists and what would be needed to close it.
+
 ## Key Principles
 
 - **Stop on improvement** — bench, print, stop. Don't keep going.

@@ -353,7 +353,23 @@ CUDA_VISIBLE_DEVICES=4 python bench_script.py
 CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:$LD_LIBRARY_PATH python bench_script.py
 ```
 
-### 10. Plugin: `ik`
+### 10. Skill sizing convention
+
+**Main SKILL.md files must not exceed ~200 lines.** This ensures the LLM can
+read and retain the full skill in one pass. If content exceeds this limit,
+split into:
+
+- **SKILL.md** (~200 lines max) — core flow, decision logic, key principles.
+  Every phase gets 2-5 sentences. Include arguments, decision flowcharts,
+  and stop conditions.
+- **artifacts/** — detailed reference material loaded on demand via `Read`.
+  Examples: profiling commands and metrics, analysis methodology, file format
+  templates, project layout details, seed strategies.
+
+Use `Read plugins/.../artifacts/<name>.md` pointers in SKILL.md to reference
+detail. The LLM reads artifacts when it reaches the relevant phase, not upfront.
+
+### 11. Plugin: `ik`
 
 - Single unified plugin at `plugins/ik/` — Claude Code plugin with `.claude-plugin/plugin.json`
 - CLI-only: all skills use bash/Python CLI commands, no MCP server

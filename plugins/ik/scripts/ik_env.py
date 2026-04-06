@@ -493,18 +493,444 @@ def cmd_nuke_venv() -> int:
     return 0
 
 
+def _resolve_cuda_version(version: str) -> tuple[str, str]:
+    """Resolve CUDA version to (toolkit_version, driver_version).
+
+    Uses NVIDIA's official download page to discover the runfile URL.
+    Returns e.g. ("13.2.0", "595.45.04").
+    """
+    # Known mappings — add entries as new versions are tested.
+    KNOWN = {
+        "12.8": ("12.8.1", "570.86.15"),
+        "13.0": ("13.0.1", "580.76.02"),
+        "13.2": ("13.2.0", "595.45.04"),
+    }
+    # Accept "13.2", "13.2.0", or "auto"
+    short = ".".join(version.split(".")[:2])
+    if short in KNOWN:
+        return KNOWN[short]
+    full = version
+    if full in {v for v, _ in KNOWN.values()}:
+        for s, (fv, dv) in KNOWN.items():
+            if fv == full:
+                return fv, dv
+    raise ValueError(
+        f"Unknown CUDA version '{version}'. "
+        f"Known: {', '.join(sorted(KNOWN.keys()))}. "
+        f"Add the mapping to _resolve_cuda_version() or install manually."
+    )
+
+
 def cmd_install_cuda_toolkit(host_cfg: dict, version: str = "auto") -> int:
-    """Install CUDA toolkit."""
-    print("ERROR: cuda-toolkit install not yet implemented.", file=sys.stderr)
-    print("Manual: visit https://developer.download.nvidia.com/compute/cuda/repos/", file=sys.stderr)
-    return 1
+    """Install CUDA toolkit from NVIDIA's official runfile.
+
+    Downloads from developer.download.nvidia.com and installs toolkit-only
+    (no driver) to /usr/local/cuda-<major>.<minor>.
+    """
+    net = _get_network(host_cfg)
+
+    # --- Resolve version ---
+    if version == "auto":
+        # Default to latest known
+        version = "13.2"
+
+    try:
+        toolkit_ver, driver_ver = _resolve_cuda_version(version)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    short_ver = ".".join(toolkit_ver.split(".")[:2])  # "13.2"
+    install_dir = Path(f"/usr/local/cuda-{short_ver}")
+
+    # --- Pre-flight ---
+    if install_dir.exists():
+        nvcc = install_dir / "bin" / "nvcc"
+        if nvcc.exists():
+            r = subprocess.run(
+                [str(nvcc), "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if f"V{toolkit_ver}" in r.stdout:
+                print(f"CUDA {toolkit_ver} already installed at {install_dir}")
+                return 0
+            else:
+                print(f"WARNING: {install_dir} exists but nvcc reports different version.")
+                print(f"  Remove it first: sudo rm -rf {install_dir}")
+                return 1
+        else:
+            print(f"WARNING: {install_dir} exists but has no nvcc — may be incomplete.")
+            print(f"  Remove it first: sudo rm -rf {install_dir}")
+            return 1
+
+    # --- Download ---
+    runfile = f"cuda_{toolkit_ver}_{driver_ver}_linux.run"
+    url = f"https://developer.download.nvidia.com/compute/cuda/{toolkit_ver}/local_installers/{runfile}"
+    tmp_dir = Path("/tmp/cuda_install")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    runfile_path = tmp_dir / runfile
+
+    print(f"=== Installing CUDA Toolkit {toolkit_ver} ===")
+    print(f"    Source:  {url}")
+    print(f"    Target:  {install_dir}")
+    print()
+
+    if runfile_path.exists():
+        print(f"[1/3] Runfile already downloaded: {runfile_path}")
+    else:
+        print(f"[1/3] Downloading {runfile} ...")
+        wget_cmd = f"wget -q --show-progress -O '{runfile_path}' '{url}'"
+        if net.get("proxy_bypass_method") == "ssh_localhost":
+            wget_cmd = f'ssh localhost "{wget_cmd}"'
+        r = subprocess.run(wget_cmd, shell=True, timeout=1800)
+        if r.returncode != 0:
+            print(f"ERROR: Download failed.", file=sys.stderr)
+            runfile_path.unlink(missing_ok=True)
+            return 1
+        print(f"  Downloaded: {runfile_path}")
+
+    # --- Make executable ---
+    runfile_path.chmod(0o755)
+
+    # --- Install (toolkit only, no driver) ---
+    print(f"[2/3] Installing toolkit (no driver) ...")
+    install_cmd = (
+        f"sudo '{runfile_path}' --silent --toolkit "
+        f"--toolkitpath='{install_dir}' --no-opengl-libs --no-drm --no-man-page"
+    )
+    r = subprocess.run(install_cmd, shell=True, timeout=600)
+    if r.returncode != 0:
+        print(f"ERROR: Installation failed (exit {r.returncode}).", file=sys.stderr)
+        print(f"  Check /var/log/cuda-installer.log for details.", file=sys.stderr)
+        return 1
+
+    # --- Verify ---
+    print(f"[3/3] Verifying ...")
+    nvcc = install_dir / "bin" / "nvcc"
+    if not nvcc.exists():
+        print(f"ERROR: nvcc not found at {nvcc} after install.", file=sys.stderr)
+        return 1
+    r = subprocess.run(
+        [str(nvcc), "--version"],
+        capture_output=True, text=True, timeout=5,
+    )
+    print(f"  {r.stdout.strip().splitlines()[-1]}")
+
+    headers = install_dir / "include" / "cuda.h"
+    print(f"  Headers: {'OK' if headers.exists() else 'MISSING'}")
+
+    nvrtc = install_dir / "lib64" / "libnvrtc.so"
+    if nvrtc.exists() or (install_dir / "lib64" / "libnvrtc.so.13").exists():
+        print(f"  libnvrtc: OK")
+    else:
+        print(f"  libnvrtc: not found — cuDNN JIT may not work")
+
+    print()
+    print(f"=== CUDA {toolkit_ver} installed at {install_dir} ===")
+    print(f"Set CUDA_HOME={install_dir} and update PATH/LD_LIBRARY_PATH.")
+    print(f"Cleanup: rm {runfile_path}")
+    return 0
+
+
+def _resolve_driver_version(version: str) -> str:
+    """Resolve driver version shorthand to full version string.
+
+    Accepts: "595", "595.45.04", "auto", or a CUDA version like "13.2".
+    Returns full driver version e.g. "595.45.04".
+    """
+    # Known driver versions (major → full)
+    KNOWN_DRIVERS = {
+        "550": "550.90.07",
+        "570": "570.86.15",
+        "580": "580.76.02",
+        "595": "595.45.04",
+    }
+    # CUDA version → driver mapping (reuse _resolve_cuda_version)
+    CUDA_TO_DRIVER = {
+        "12.4": "550.90.07",
+        "12.8": "570.86.15",
+        "13.0": "580.76.02",
+        "13.2": "595.45.04",
+    }
+
+    if version == "auto":
+        # Default to driver matching latest known CUDA
+        return "595.45.04"
+
+    # Try as driver major (e.g. "595")
+    if version in KNOWN_DRIVERS:
+        return KNOWN_DRIVERS[version]
+
+    # Try as full driver version (e.g. "595.45.04")
+    major = version.split(".")[0]
+    if major in KNOWN_DRIVERS and version.count(".") >= 1:
+        return version  # Trust user-provided full version
+
+    # Try as CUDA version (e.g. "13.2")
+    if version in CUDA_TO_DRIVER:
+        return CUDA_TO_DRIVER[version]
+
+    raise ValueError(
+        f"Unknown driver version '{version}'. "
+        f"Known drivers: {', '.join(sorted(KNOWN_DRIVERS.keys()))}. "
+        f"Or specify a CUDA version: {', '.join(sorted(CUDA_TO_DRIVER.keys()))}."
+    )
+
+
+def _stop_gpu_services() -> list[str]:
+    """Stop services that hold nvidia devices open. Returns list of stopped services."""
+    import time
+    # Order matters: stop consumers first, then persistence daemon last.
+    # Includes Meta infra services that hold GPU devices open.
+    SERVICES = [
+        "nvidia-dcgm",                    # DCGM monitoring (nv-hostengine)
+        "dynologd",                       # Meta performance monitoring daemon
+        "fbagentcollectors-workload",     # Meta agent collectors (manages rgpu)
+        "nvidia-fabricmanager",           # NVSwitch fabric manager
+        "nvidia-persistenced",           # GPU persistence daemon (must be last)
+    ]
+    stopped = []
+    for svc in SERVICES:
+        r = subprocess.run(
+            ["sudo", "systemctl", "is-active", "--quiet", svc],
+            capture_output=True, timeout=5,
+        )
+        if r.returncode == 0:  # service is active
+            print(f"  Stopping {svc}...")
+            try:
+                subprocess.run(["sudo", "systemctl", "stop", svc], timeout=60)
+            except subprocess.TimeoutExpired:
+                print(f"  WARNING: {svc} stop timed out, force-killing...")
+                subprocess.run(
+                    ["sudo", "systemctl", "kill", "-s", "SIGKILL", svc],
+                    capture_output=True, timeout=10,
+                )
+            stopped.append(svc)
+    time.sleep(3)
+    # Kill any remaining processes using nvidia devices, with retry
+    nvidia_devs = [f"/dev/nvidia{i}" for i in range(8)] + [
+        "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools",
+        "/dev/nvidiactl",
+    ]
+    for attempt in range(3):
+        any_procs = False
+        for dev in nvidia_devs:
+            if not os.path.exists(dev):
+                continue
+            r = subprocess.run(
+                ["sudo", "fuser", dev],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = r.stdout.strip().split()
+            if pids:
+                any_procs = True
+                if attempt == 0:
+                    print(f"  Killing PIDs on {dev}: {' '.join(pids)}")
+                subprocess.run(
+                    ["sudo", "kill", "-9"] + pids,
+                    capture_output=True, timeout=10,
+                )
+        if not any_procs:
+            break
+        time.sleep(3)
+    return stopped
+
+
+def _start_gpu_services(services: list[str]) -> None:
+    """Restart previously stopped services in reverse order."""
+    for svc in reversed(services):
+        print(f"  Starting {svc}...")
+        try:
+            subprocess.run(["sudo", "systemctl", "start", svc], timeout=60)
+        except subprocess.TimeoutExpired:
+            print(f"  WARNING: {svc} start timed out — may need manual restart")
+
+
+def _unload_nvidia_modules() -> bool:
+    """Try to unload all nvidia kernel modules. Returns True if successful."""
+    import time
+    # Order: dependents first
+    MODULES = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
+    for mod in MODULES:
+        r = subprocess.run(["lsmod"], capture_output=True, text=True, timeout=5)
+        if mod not in r.stdout:
+            continue
+        print(f"  Unloading {mod}...")
+        try:
+            r = subprocess.run(
+                ["sudo", "rmmod", mod],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode != 0:
+                print(f"  WARNING: Failed to unload {mod}: {r.stderr.strip()}")
+                return False
+        except subprocess.TimeoutExpired:
+            print(f"  WARNING: rmmod {mod} timed out (module likely still in use)")
+            return False
+        time.sleep(1)
+    return True
 
 
 def cmd_install_cuda_driver(host_cfg: dict, version: str = "auto") -> int:
-    """Install CUDA driver."""
-    print("ERROR: cuda-driver install requires root and is not automated.", file=sys.stderr)
-    print("Use: python3 plugins/ik/scripts/ik_env.py status  to check current driver.", file=sys.stderr)
-    return 1
+    """Install NVIDIA driver from official runfile.
+
+    Downloads from download.nvidia.com/XFree86/ and installs with --silent.
+    Automatically stops GPU services, unloads modules, installs, then restarts.
+    Requires root (uses sudo). A reboot is recommended after installation.
+    """
+    net = _get_network(host_cfg)
+
+    # --- Resolve version ---
+    try:
+        driver_ver = _resolve_driver_version(version)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    # --- Check current driver ---
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        current_driver = r.stdout.strip().split("\n")[0]
+    except Exception:
+        current_driver = None
+
+    if current_driver == driver_ver:
+        print(f"Driver {driver_ver} is already installed.")
+        return 0
+
+    print(f"=== Installing NVIDIA Driver {driver_ver} ===")
+    print(f"    Current: {current_driver or 'unknown'}")
+    print(f"    Target:  {driver_ver}")
+    print()
+
+    # Check root
+    if os.geteuid() != 0:
+        print("NOTE: This command needs root. Will use sudo.")
+
+    # --- Download ---
+    runfile = f"NVIDIA-Linux-x86_64-{driver_ver}.run"
+    url = f"https://download.nvidia.com/XFree86/Linux-x86_64/{driver_ver}/{runfile}"
+    tmp_dir = Path("/tmp/nvidia_driver_install")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    runfile_path = tmp_dir / runfile
+
+    if runfile_path.exists():
+        print(f"[1/5] Runfile already downloaded: {runfile_path}")
+    else:
+        print(f"[1/5] Downloading {runfile} ...")
+        wget_cmd = f"wget -q --show-progress -O '{runfile_path}' '{url}'"
+        if net.get("proxy_bypass_method") == "ssh_localhost":
+            wget_cmd = f'ssh localhost "{wget_cmd}"'
+        r = subprocess.run(wget_cmd, shell=True, timeout=600)
+        if r.returncode != 0:
+            print(f"ERROR: Download failed.", file=sys.stderr)
+            runfile_path.unlink(missing_ok=True)
+            return 1
+        print(f"  Downloaded: {runfile_path}")
+
+    runfile_path.chmod(0o755)
+
+    # --- Stop services holding GPU devices ---
+    print(f"[2/5] Stopping GPU services ...")
+    stopped_services = _stop_gpu_services()
+
+    # --- Unload nvidia modules ---
+    print(f"[3/5] Unloading nvidia kernel modules ...")
+    modules_unloaded = _unload_nvidia_modules()
+    if not modules_unloaded:
+        print(f"  WARNING: Could not fully unload modules. Installer will attempt anyway.")
+
+    # --- Install ---
+    print(f"[4/5] Installing driver {driver_ver} ...")
+    # Detect if kernel was built with clang; if so, use full LLVM toolchain.
+    # We must pass LLVM=1 so the kernel Makefile uses llvm-nm, llvm-ar, etc.
+    env_vars = {}
+    try:
+        r = subprocess.run(
+            ["cat", "/proc/version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "clang" in r.stdout.lower():
+            cc_path = shutil.which("clang")
+            if cc_path:
+                # Create symlinks so kernel build scripts find LLVM tools
+                # as default 'nm', 'ar', etc. in PATH. Also set CC + env vars.
+                compat_dir = Path("/tmp/llvm-compat")
+                compat_dir.mkdir(exist_ok=True)
+                llvm_tools = {
+                    "nm": shutil.which("llvm-nm"),
+                    "ar": shutil.which("llvm-ar"),
+                    "ld": shutil.which("ld.lld"),
+                    "objcopy": shutil.which("llvm-objcopy"),
+                    "strip": shutil.which("llvm-strip"),
+                }
+                for name, target in llvm_tools.items():
+                    if target:
+                        link = compat_dir / name
+                        link.unlink(missing_ok=True)
+                        link.symlink_to(target)
+                env_vars = {
+                    "CC": cc_path,
+                    "IGNORE_CC_MISMATCH": "1",
+                    "PATH": f"{compat_dir}:{os.environ.get('PATH', '/usr/bin')}",
+                }
+                print(f"  Kernel was built with clang, using CC=clang + LLVM tools in PATH")
+    except Exception:
+        pass
+    env_str = " ".join(f"{k}={v}" for k, v in env_vars.items())
+    # Use 'sudo env' to properly pass environment variables
+    install_cmd = (
+        f"sudo env {env_str} '{runfile_path}' --silent --no-questions "
+        f"--ui=none --no-backup --no-nouveau-check "
+        f"--no-cc-version-check --dkms "
+        f"--allow-installation-with-running-driver "
+        f"--no-check-for-alternate-installs"
+    )
+    r = subprocess.run(install_cmd, shell=True, timeout=600)
+    install_ok = r.returncode == 0
+
+    if not install_ok:
+        print(f"ERROR: Driver installation failed (exit {r.returncode}).", file=sys.stderr)
+        print(f"  Check /var/log/nvidia-installer.log for details.", file=sys.stderr)
+
+    # --- Restart services (even if install failed — need GPU back) ---
+    print(f"[5/5] Restarting GPU services ...")
+    # Load modules first (may take time if kernel module was just built)
+    try:
+        subprocess.run(["sudo", "modprobe", "nvidia"], capture_output=True, timeout=60)
+        subprocess.run(["sudo", "modprobe", "nvidia_uvm"], capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print(f"  WARNING: modprobe timed out — reboot may be needed")
+    _start_gpu_services(stopped_services)
+
+    if not install_ok:
+        return 1
+
+    # --- Verify ---
+    import time
+    time.sleep(2)
+    r = subprocess.run(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        capture_output=True, text=True, timeout=10,
+    )
+    new_driver = r.stdout.strip().split("\n")[0] if r.returncode == 0 else "unknown"
+
+    print()
+    if new_driver == driver_ver:
+        print(f"  Driver: {new_driver}  OK")
+    else:
+        print(f"  Driver reports: {new_driver} (expected {driver_ver})")
+        print(f"  A reboot is required to load the new driver.")
+
+    print()
+    print(f"=== Driver {driver_ver} installation complete ===")
+    print(f"RECOMMENDED: Reboot to ensure clean module load.")
+    print(f"  sudo reboot")
+    print(f"Cleanup: rm {runfile_path}")
+    return 0
 
 
 # ---------------------------------------------------------------------------

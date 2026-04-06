@@ -310,6 +310,11 @@ void flash_attention_2wg(
     const uint32_t V1_hi  = sb + 2*HALF_Q + 7*HALF_KV;
 
     constexpr int DATA_BYTES = 2*HALF_Q + 8*HALF_KV;
+    /* O_acc staging region: 2 consumers × 64 floats × 128 threads × 4 bytes = 64KB */
+    constexpr int O_STAGE_BYTES = 2 * 64 * WG_SIZE * (int)sizeof(float);  /* 65536 = 64KB */
+    constexpr int O_STAGE_OFFSET = DATA_BYTES + 128;  /* after mbarriers */
+    float *O_stage = (float*)((char*)smem + O_STAGE_OFFSET);
+    /* Per-consumer staging: consumer cwg writes at O_stage + cwg * 64 * 128 */
     uint64_t *mbar = (uint64_t*)((char*)smem + DATA_BYTES);
     uint64_t *K_full  = &mbar[0];
     uint64_t *K_empty = &mbar[2];
@@ -541,6 +546,39 @@ void flash_attention_2wg(
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
         named_barrier_sync(my_bar, 256);
 
+        /* ==== PV[kv_id-1] FIRST (no QK overlap) ==== */
+        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
+        const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
+        const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
+        wgmma_fence();
+        #pragma unroll
+        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+            uint64_t dv_k = gmma_desc_advance(dv, ks * V_KS_ADVANCE);
+            wgmma_m64n128k16_f32_bf16_RS(O_acc,
+                P_packed[ks*4+0], P_packed[ks*4+1],
+                P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
+        }
+        wgmma_commit_group();
+        wgmma_wait_group<0>();  /* wait PV done */
+
+        if (lane_id == 0 && mywarp == 0)
+            mbarrier_arrive(&V_empty[v_stage]);
+        v_stage ^= 1;
+        if (v_stage == 0) v_full_phase ^= 1;
+
+        /* ==== O rescale (PV done, O_acc is safe to modify) ==== */
+        /* o_rescale from PREVIOUS iteration's softmax */
+
+        
+        /* Save O_acc to SMEM to free registers for QK */
+        {
+            float *my_O_stage = O_stage + cwg * 64 * WG_SIZE + wg_tid * 64;
+            #pragma unroll
+            for (int i = 0; i < 64; i++) my_O_stage[i] = O_acc[i];
+        }
+        asm volatile("" ::: "memory");  /* compiler barrier */
+
+/* ==== QK[kv_id] SECOND ==== */
         float S_acc[64];
         #pragma unroll
         for (int i = 0; i < 64; i++) S_acc[i] = 0.0f;
@@ -560,32 +598,15 @@ void flash_attention_2wg(
             wgmma_m64n128k16_f32_bf16(S_acc, dq, dk, (ks == 0) ? 0 : 1);
         }
         wgmma_commit_group();
-
-        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
-        const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
-        const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
-
-        wgmma_fence();
-        #pragma unroll
-        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint64_t dv_k = gmma_desc_advance(dv, ks * V_KS_ADVANCE);
-            wgmma_m64n128k16_f32_bf16_RS(O_acc,
-                P_packed[ks*4+0], P_packed[ks*4+1],
-                P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
-        }
-        wgmma_commit_group();
         named_barrier_arrive(other_bar, 256);
-
-        wgmma_wait_group<1>();
-        /* fence #3 removed: wait_group already synchronizes register state,
-         * next wgmma fence is at start of next iteration (fence #1) */
+        wgmma_wait_group<0>();  /* wait QK done */
 
         if (lane_id == 0 && mywarp == 0)
             mbarrier_arrive(&K_empty[k_stage]);
         k_stage ^= 1;
         if (k_stage == 0) k_full_phase ^= 1;
 
-        /* Softmax (overlaps PV tensor core execution) */
+        /* ==== Softmax ==== */
         const int needs_mask = IS_CAUSAL &&
             ((kv_id + 1) * BLOCK_KV > q_block_id * BLOCK_Q + cwg * 64);
         float o_rescale[2];
@@ -648,12 +669,14 @@ void flash_attention_2wg(
             }
         }
 
-        wgmma_wait_group<0>();
-        if (lane_id == 0 && mywarp == 0)
-            mbarrier_arrive(&V_empty[v_stage]);
-        v_stage ^= 1;
-        if (v_stage == 0) v_full_phase ^= 1;
+                /* Restore O_acc from SMEM */
+        {
+            float *my_O_stage = O_stage + cwg * 64 * WG_SIZE + wg_tid * 64;
+            #pragma unroll
+            for (int i = 0; i < 64; i++) O_acc[i] = my_O_stage[i];
+        }
 
+/* O rescale (deferred from PV) */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
             #pragma unroll
@@ -665,6 +688,7 @@ void flash_attention_2wg(
             }
         }
 
+        /* Pack P */
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
             P_packed[ks*4+0] = pack_bf16(S_acc[ks*8+0], S_acc[ks*8+1]);
@@ -837,7 +861,7 @@ extern "C" int kernel_run(
     int num_blocks = B * H * cdiv(S, BLOCK_Q);
     int smem_size = 2 * (BLOCK_Q * (DIM_CONST / 2) * (int)sizeof(nv_bfloat16))
                   + 8 * (BLOCK_KV * (DIM_CONST / 2) * (int)sizeof(nv_bfloat16))
-                  + 256;
+                  + 256 + 65536;  /* +64KB O_acc staging */
 
     int seq_stride = H * D;
     cuuint64_t globalDim[2]    = {(cuuint64_t)seq_stride, (cuuint64_t)(B * S)};

@@ -194,7 +194,8 @@ __global__ void __launch_bounds__(THREADS, 1)
 matmul_wgmma_tma(
     __nv_bfloat16* __restrict__ C, int M, int N, int K,
     const __grid_constant__ CUtensorMap tma_A,
-    const __grid_constant__ CUtensorMap tma_B)
+    const __grid_constant__ CUtensorMap tma_B,
+    int grid_m, int grid_n)
 {
     extern __shared__ char smem[];
 
@@ -203,9 +204,25 @@ matmul_wgmma_tma(
 
     int tid = threadIdx.x;
     int wg_id = tid / WG_SIZE;
-    int ctaRow = blockIdx.y * TILE_M;
-    int ctaCol = blockIdx.x * TILE_N;
     int numK = (K + TILE_K - 1) / TILE_K;
+
+    /* CTA swizzle for L2 reuse — same approach as CuTe DSL.
+     * Groups of GROUP_M consecutive M-tiles share the same N-column,
+     * so B data stays in L2 across the group.
+     * Linear blockIdx → swizzled (pid_m, pid_n). */
+    int pid_m, pid_n;
+    {
+        const int GROUP_M = 8;
+        int linear_id = blockIdx.x + blockIdx.y * gridDim.x;
+        int group_id  = linear_id / (GROUP_M * grid_n);
+        int first_m   = group_id * GROUP_M;
+        int group_sz  = (first_m + GROUP_M <= grid_m) ? GROUP_M : (grid_m - first_m);
+        int local_id  = linear_id % (GROUP_M * grid_n);
+        pid_m = first_m + local_id % group_sz;
+        pid_n = local_id / group_sz;
+    }
+    int ctaRow = pid_m * TILE_M;
+    int ctaCol = pid_n * TILE_N;
 
     /* Init mbarriers (thread 0 only) */
     if (tid == 0) {
@@ -391,13 +408,16 @@ extern "C" int kernel_run(
         if (r != CUDA_SUCCESS) return -3;
     }
 
-    /* Launch: 3 warpgroups, 384 threads */
+    /* Launch with 1D grid + CTA swizzle inside kernel */
+    int grid_m = (M + TILE_M - 1) / TILE_M;
+    int grid_n = (N + TILE_N - 1) / TILE_N;
+    int total_tiles = grid_m * grid_n;
     dim3 block(THREADS);
-    dim3 grid((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
+    dim3 grid(total_tiles);
     cudaFuncSetAttribute(matmul_wgmma_tma,
         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
     matmul_wgmma_tma<<<grid, block, SMEM_TOTAL, stream>>>(
-        C, M, N, K, tma_A, tma_B);
+        C, M, N, K, tma_A, tma_B, grid_m, grid_n);
 
     return 0;
 }

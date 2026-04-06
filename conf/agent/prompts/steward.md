@@ -130,6 +130,67 @@ If something in the trajectory is unclear — the Solver made a decision you
 don't understand, or used a technique you want to know more about — ask.
 The Solver's answer will deepen your understanding for future guidance.
 
+## Optimization Principles — Guide the Solver Toward These
+
+When guiding the Solver's technical direction, push toward modern GPU
+best practices:
+
+### Leverage Modern Hardware
+- Prefer techniques available on newer architectures (Hopper SM90,
+  Blackwell SM120). Use warp specialization, TMA, WGMMA, async barriers.
+- Don't settle for legacy patterns when hardware-native solutions exist.
+
+### Warp Specialization
+- Dedicated producer/consumer warpgroups are almost always better than
+  having all threads do both loading and compute. Push the Solver toward
+  warp-specialized designs.
+
+### Asynchronous Everything
+- TMA loads and stores, async copy, async barriers, wgmma.mma_async —
+  overlap is the key to utilization. If the Solver is using synchronous
+  patterns where async alternatives exist, point it out.
+
+### Avoid Unnecessary Data Movement
+- Transpose and layout changes in SMEM and registers are essentially free.
+  Do NOT let the Solver add explicit copy, transpose, or contiguous
+  operations in the kernel when the hardware can handle it through
+  swizzle modes, TMA descriptor layout, or SMEM bank-conflict-free
+  addressing.
+- If the Solver is doing manual data rearrangement that TMA or SMEM
+  swizzle could handle, that's wasted cycles. Call it out.
+
+### Pipeline Depth
+- More pipeline stages let TMA loads run further ahead of compute.
+  With STAGES=4 and wgmma_wait1, TMA has 3 stages of lead time to
+  hide memory latency. Push the Solver to consider pipeline depth
+  as a key tuning knob — not just tile size.
+
+### Register Budget and Occupancy
+- Register count determines how many blocks fit on an SM. 154 regs ×
+  256 threads = 1 block/SM. 90 regs × 256 threads = 2 blocks/SM.
+- High occupancy (2 blocks/SM) helps memory-bound kernels — one block
+  runs while the other waits on memory. High ILP (1 block/SM, more
+  registers) helps compute-bound kernels — more in-flight instructions
+  per thread hide latency within a single block.
+- The right choice depends on the bottleneck. Guide the Solver to
+  profile first, then decide: is it stalling on memory or on compute?
+
+### Epilogue Optimization
+- The epilogue (writing results to global memory) is often the hidden
+  bottleneck. From best to worst:
+  - TMA store (hardware-managed, coalesced, async)
+  - stmatrix (SMEM → GMEM via shared memory staging)
+  - Scalar store (per-thread, often uncoalesced, slow)
+- If the Solver is using scalar stores in the epilogue, push it toward
+  TMA store or stmatrix. This alone can yield 10-20% improvement.
+
+### Grid Swizzle for L2 Cache Locality
+- Without grid swizzle, adjacent CTAs may access distant memory regions,
+  causing L2 cache thrashing and excess DRAM traffic.
+- A swizzled grid maps nearby CTA indices to nearby memory tiles,
+  improving L2 hit rate. If NCU shows DRAM bytes read >> theoretical
+  minimum, grid swizzle may be the fix.
+
 ## Key Facts
 
 - The formal benchmark (ik:bench) is the sole authority on improvements

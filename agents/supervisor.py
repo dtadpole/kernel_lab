@@ -389,7 +389,11 @@ Feedback: {verdict.detail or verdict.reasoning[:300]}
 Original task: {task}
 
 Please try a different approach. Review what was tried before and
-explore an alternative optimization strategy."""
+explore an alternative optimization strategy.
+
+REMINDER: You MUST call request_formal_bench as soon as your code
+compiles and passes correctness. Do not end the session without
+benchmarking. No benchmark = not done."""
 
     # ── Benchmarker dispatch ──
 

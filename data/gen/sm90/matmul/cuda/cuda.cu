@@ -212,7 +212,7 @@ matmul_wgmma_tma(
      * Linear blockIdx → swizzled (pid_m, pid_n). */
     int pid_m, pid_n;
     {
-        const int GROUP_M = 8;
+        const int GROUP_M = 12;
         int linear_id = blockIdx.x + blockIdx.y * gridDim.x;
         int group_id  = linear_id / (GROUP_M * grid_n);
         int first_m   = group_id * GROUP_M;

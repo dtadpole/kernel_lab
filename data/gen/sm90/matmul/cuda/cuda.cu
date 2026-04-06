@@ -162,17 +162,20 @@ void store_acc_n64(__nv_bfloat16* C, float (&acc)[32],
     int lane = local_tid % 32;
     int row_base = ctaRow + warp * 16 + lane / 4;
     int col_base = ctaCol + (lane % 4) * 2;
+    /* Pack 2 adjacent bf16 into 1 x 32-bit store (halves store count) */
     for (int p = 0; p < 8; p++) {
         int col = col_base + p * 8;
         int row0 = row_base, row8 = row_base + 8;
-        if (row0 < M && col < N)
-            C[row0 * N + col] = __float2bfloat16(acc[4*p]);
-        if (row0 < M && col + 1 < N)
-            C[row0 * N + col + 1] = __float2bfloat16(acc[4*p + 1]);
-        if (row8 < M && col < N)
-            C[row8 * N + col] = __float2bfloat16(acc[4*p + 2]);
-        if (row8 < M && col + 1 < N)
-            C[row8 * N + col + 1] = __float2bfloat16(acc[4*p + 3]);
+        if (row0 < M && col + 1 < N) {
+            __nv_bfloat162 v01 = __halves2bfloat162(
+                __float2bfloat16(acc[4*p]), __float2bfloat16(acc[4*p + 1]));
+            *(__nv_bfloat162*)(C + row0 * N + col) = v01;
+        }
+        if (row8 < M && col + 1 < N) {
+            __nv_bfloat162 v23 = __halves2bfloat162(
+                __float2bfloat16(acc[4*p + 2]), __float2bfloat16(acc[4*p + 3]));
+            *(__nv_bfloat162*)(C + row8 * N + col) = v23;
+        }
     }
 }
 
@@ -384,7 +387,7 @@ extern "C" int kernel_run(
         CUresult r = s_encodeTiled(&tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
             (void*)B, dims, str, box, el,
             CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-            CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+            CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (r != CUDA_SUCCESS) return -3;
     }
 

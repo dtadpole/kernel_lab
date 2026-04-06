@@ -93,6 +93,28 @@ void tma_load_2d(void* smem_dst, const void* tma_desc,
         : "memory");
 }
 
+/* TMA store: async SMEM → GMEM bulk transfer */
+__device__ __forceinline__
+void tma_store_2d(const void* tma_desc, int coord0, int coord1,
+                  const void* smem_src) {
+    unsigned smem_addr = __cvta_generic_to_shared(smem_src);
+    asm volatile(
+        "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group"
+        " [%0, {%1, %2}], [%3];\n"
+        :: "l"(tma_desc), "r"(coord0), "r"(coord1), "r"(smem_addr)
+        : "memory");
+}
+
+__device__ __forceinline__
+void tma_store_commit() {
+    asm volatile("cp.async.bulk.commit_group;\n" ::: "memory");
+}
+
+__device__ __forceinline__
+void tma_store_wait() {
+    asm volatile("cp.async.bulk.wait_group.read 0;\n" ::: "memory");
+}
+
 /* =========================================================================
  * WGMMA descriptor helpers
  * ========================================================================= */
@@ -155,8 +177,32 @@ void wgmma_m64n64k16(float (&d)[32], uint64_t da, uint64_t db, int scale_d) {
 }
 
 /* =========================================================================
- * Epilogue — store 32-element accumulator for m64n64k16
+ * Epilogue — store accumulator to SMEM for TMA store, or to GMEM directly
  * ========================================================================= */
+
+/* Write 32-element m64n64k16 accumulator to SMEM in row-major BF16 layout.
+ * smem_base points to a 64×64 BF16 buffer (8KB) in shared memory.
+ * Tile is 64 rows × 64 cols (matching one N-quarter). */
+__device__ __forceinline__
+void store_acc_to_smem(__nv_bfloat16* smem_base, float (&acc)[32],
+                       int local_tid) {
+    int warp = local_tid / 32;
+    int lane = local_tid % 32;
+    int row_base = warp * 16 + lane / 4;
+    int col_base = (lane % 4) * 2;
+    for (int p = 0; p < 8; p++) {
+        int col = col_base + p * 8;
+        int row0 = row_base, row8 = row_base + 8;
+        __nv_bfloat162 v01 = __halves2bfloat162(
+            __float2bfloat16(acc[4*p]), __float2bfloat16(acc[4*p + 1]));
+        *(__nv_bfloat162*)(smem_base + row0 * TILE_NQ + col) = v01;
+        __nv_bfloat162 v23 = __halves2bfloat162(
+            __float2bfloat16(acc[4*p + 2]), __float2bfloat16(acc[4*p + 3]));
+        *(__nv_bfloat162*)(smem_base + row8 * TILE_NQ + col) = v23;
+    }
+}
+
+/* Fallback: direct GMEM store (for correctness comparison) */
 __device__ __forceinline__
 void store_acc_n64(__nv_bfloat16* C, float (&acc)[32],
                    int ctaRow, int ctaCol, int M, int N, int local_tid) {
@@ -164,7 +210,6 @@ void store_acc_n64(__nv_bfloat16* C, float (&acc)[32],
     int lane = local_tid % 32;
     int row_base = ctaRow + warp * 16 + lane / 4;
     int col_base = ctaCol + (lane % 4) * 2;
-    /* Pack 2 adjacent bf16 into 1 x 32-bit store (halves store count) */
     for (int p = 0; p < 8; p++) {
         int col = col_base + p * 8;
         int row0 = row_base, row8 = row_base + 8;
@@ -197,6 +242,7 @@ matmul_wgmma_tma(
     __nv_bfloat16* __restrict__ C, int M, int N, int K,
     const __grid_constant__ CUtensorMap tma_A,
     const __grid_constant__ CUtensorMap tma_B,
+    const __grid_constant__ CUtensorMap tma_C,
     int grid_m, int grid_n, int total_tiles, unsigned* tile_counter)
 {
     extern __shared__ char smem[];
@@ -373,12 +419,37 @@ matmul_wgmma_tma(
                     mbarrier_arrive(&mbar_empty[(numK - 1) % STAGES]);
             }
 
-            /* Epilogue (SMEM is now free — producer can start prefilling next tile) */
-            int consumer_row = ctaRow + consumer_id * 64;
-            store_acc_n64(C, acc0, consumer_row, ctaCol,                  M, N, local_tid);
-            store_acc_n64(C, acc1, consumer_row, ctaCol + TILE_NQ,        M, N, local_tid);
-            store_acc_n64(C, acc2, consumer_row, ctaCol + 2 * TILE_NQ,    M, N, local_tid);
-            store_acc_n64(C, acc3, consumer_row, ctaCol + 3 * TILE_NQ,    M, N, local_tid);
+            /* Epilogue: write accumulators to SMEM, then TMA store to GMEM.
+             * Reuse stage 0's SMEM buffer (48KB) for epilogue staging.
+             * Each consumer stores 4 N-quarters (4 × 64×64 × 2B = 32KB). */
+            {
+                int consumer_row = ctaRow + consumer_id * 64;
+                /* Use stage 0 SMEM for epilogue: consumer 0 uses first 32KB,
+                 * consumer 1 uses next 32KB (within B portion of stage 0+1) */
+                __nv_bfloat16* epi_smem = (__nv_bfloat16*)(smem + consumer_id * 32768);
+
+                /* Store each N-quarter: acc → SMEM → TMA store → GMEM.
+                 * Each quarter: 64 rows × 64 cols × 2B = 8KB in SMEM. */
+                #define EPI_STORE_Q(ACC, Q) do { \
+                    __nv_bfloat16* smem_q = epi_smem + (Q) * (TILE_NQ * 64); \
+                    store_acc_to_smem(smem_q, ACC, local_tid); \
+                    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); \
+                    if (local_tid == 0) \
+                        tma_store_2d(&tma_C, ctaCol + (Q) * TILE_NQ, consumer_row, smem_q); \
+                    tma_store_commit(); \
+                } while(0)
+
+                EPI_STORE_Q(acc0, 0);
+                EPI_STORE_Q(acc1, 1);
+                EPI_STORE_Q(acc2, 2);
+                EPI_STORE_Q(acc3, 3);
+
+                #undef EPI_STORE_Q
+
+                /* Wait for all TMA stores to complete before reusing SMEM */
+                tma_store_wait();
+                asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+            }
         }
     }
 }
@@ -429,7 +500,7 @@ extern "C" int kernel_run(
     int M = dim, N = dim, K = dim;
 
     /* Create TMA descriptors */
-    CUtensorMap tma_A, tma_B;
+    CUtensorMap tma_A, tma_B, tma_C;
     {
         cuuint64_t dims[2] = {(cuuint64_t)K, (cuuint64_t)M};
         cuuint64_t str[1]  = {(cuuint64_t)(K * 2)};
@@ -455,6 +526,19 @@ extern "C" int kernel_run(
             CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
         if (r != CUDA_SUCCESS) return -3;
     }
+    {
+        /* C is M×N row-major (N contiguous). TMA store: dims [N, M], box [64, 64].
+         * No swizzle for store — SMEM is plain row-major. */
+        cuuint64_t dims[2] = {(cuuint64_t)N, (cuuint64_t)M};
+        cuuint64_t str[1]  = {(cuuint64_t)(N * 2)};
+        cuuint32_t box[2]  = {(cuuint32_t)TILE_NQ, 64};
+        cuuint32_t el[2]   = {1, 1};
+        CUresult r = s_encodeTiled(&tma_C, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)C, dims, str, box, el,
+            CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+            CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        if (r != CUDA_SUCCESS) return -4;
+    }
 
     /* Persistent launch: 1 block per SM */
     int num_sms = 0;
@@ -474,7 +558,7 @@ extern "C" int kernel_run(
     cudaFuncSetAttribute(matmul_wgmma_tma,
         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
     matmul_wgmma_tma<<<num_blocks, THREADS, SMEM_TOTAL, stream>>>(
-        C, M, N, K, tma_A, tma_B,
+        C, M, N, K, tma_A, tma_B, tma_C,
         grid_m, grid_n, total_tiles, s_tile_counter);
 
     return 0;

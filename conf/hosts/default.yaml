@@ -97,19 +97,19 @@ hosts:
       gpu: "NVIDIA H100"
       gpu_count: 8
       gpu_variant: "SXM R&R SKU 96GB"
-      driver_version: "570.86.15"
-      driver_cuda_version: "12.8"   # max CUDA version this driver supports
+      driver_version: "595.45.04"
+      driver_cuda_version: "13.2"   # max CUDA version this driver supports
       # R&R SKU roofline at 650W TDP (see docs/roofline/h100_sxm.md)
       peak_tflops_bf16: 800         # BF16 Tensor Core (rated at 650W, not 989 @ 700W)
       peak_tflops_fp16: 800         # FP16 Tensor Core
       peak_tflops_fp32: 53.7        # FP32 CUDA Core (scaled from 66.9 * 800/989)
       peak_bandwidth_gb_s: 2447     # HBM3, 6144-bit bus @ 1593 MHz
     env:
-      cuda_home: /usr/local/cuda-12.8
-      cuda_available: ["12.8", "12.9", "13.0"]  # toolkits installed (but 13.0 unusable with this driver)
-      torch_cuda: "cu128"
-      torch_cuda_arch: "9.0"       # Hopper = sm_90
-      ld_preload: null              # not needed — fbcode libcuda matches system driver (both 570.86.15)
+      cuda_home: /usr/local/cuda-13.2
+      cuda_available: ["12.8", "12.9", "13.0", "13.2"]
+      torch_cuda: "cu132"
+      torch_cuda_arch: "9.0"       # Hopper = sm_90 / sm_90a
+      ld_preload: null              # not needed — driver 595 matches CUDA 13.2
       python: /usr/local/bin/python3  # 3.12.13+meta
       cudnn_sdpa_broken: false
     network:

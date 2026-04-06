@@ -86,20 +86,6 @@ def list_gems(kernel: str, arch: str, impl_name: str = "cuda",
                     pass
             gems.append(entry)
 
-    # Old structure: ik_bench/gems/<kernel>/<arch>/<slug>/v*/
-    if not run_tag:
-        old_gems = repo / "ik_bench" / "gems" / kernel / arch / f"gen-{impl_name}"
-        if old_gems.exists():
-            for ver_dir in sorted(old_gems.glob("v*"), reverse=True):
-                gen_path = ver_dir / "data" / "gen" / arch / kernel
-                gems.append({
-                    "version": ver_dir.name.split("_")[0],
-                    "path": ver_dir,
-                    "gen_path": gen_path if gen_path.exists() else None,
-                    "run": "ik_bench (legacy)",
-                    "timestamp": "_".join(ver_dir.name.split("_")[1:]),
-                })
-
     return gems
 
 
@@ -157,11 +143,10 @@ def reseed_gen(kernel: str, arch: str, *,
 def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
                      run_tag: str | None = None,
                      kb_repo: Path | None = None) -> Path | None:
-    """Find the latest gem's gen code within the SAME run.
+    """Find the latest gem's gen code within the SAME run only.
 
-    Gems are per-run artifacts. Seeding only looks within the specified
-    run_tag (or auto-detected host run). Falls back to old ik_bench/gems/
-    only if no new-structure gems exist for this run.
+    Gems are per-run artifacts. No cross-run access.
+    A fresh run with no gems returns None — the caller must seed explicitly.
     """
     repo = kb_repo or _KB_REPO
     runs_dir = repo / "runs"
@@ -169,7 +154,6 @@ def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
     if not run_tag:
         run_tag = f"run_{_detect_host_slug()}"
 
-    # Search gems within the same run only
     run_dir = runs_dir / run_tag
     if run_dir.exists():
         gem_base = run_dir / "gems" / f"gen-{impl_name}"
@@ -180,15 +164,6 @@ def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
                 if candidate.exists():
                     return candidate
 
-    # Fallback: old ik_bench/gems/ (pre-migration data, shared)
-    old_gems = repo / "ik_bench" / "gems" / kernel / arch / f"gen-{impl_name}"
-    if old_gems.exists():
-        versions = sorted(old_gems.glob("v*"), reverse=True)
-        for ver in versions:
-            candidate = ver / "data" / "gen" / arch / kernel
-            if candidate.exists():
-                return candidate
-
     return None
 
 
@@ -198,58 +173,25 @@ def _ensure_gen_dir(kernel: str, arch: str, *,
     """Get or create the gen/ scratch dir in the active KB run.
 
     If the gen dir doesn't exist yet, seed it from the latest gem.
-    If no gem exists, creates an empty directory.
-
-    Args:
-        kernel: kernel name (matmul, fa4, etc.)
-        arch: target arch (sm90, sm120, etc.)
-        run_tag: run folder name (e.g. run_h8_3). If None, auto-detects from host config.
-        kb_repo: path to kernel_lab_kb repo.
-
-    Returns:
-        Path to gen/<arch>/<kernel>/ in the active run.
+    No gems → no code. A fresh run starts empty. Does NOT auto-seed.
+    The caller (ik:optimize) is responsible for seeding gen/ via reseed_gen().
     """
-    import shutil
     repo = kb_repo or _KB_REPO
-    runs_dir = repo / "runs"
+    run_tag = _resolve_run_tag(run_tag)
+    run_dir = repo / "runs" / run_tag
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir / "gen" / arch / kernel
 
-    # Find or create the active run
+
+def _resolve_run_tag(run_tag: str | None = None) -> str:
+    """Resolve run_tag: explicit > env CUDA_EXEC_RUN_TAG > run_<host_slug>."""
+    import os
     if run_tag:
-        run_dir = runs_dir / run_tag
-    else:
-        # Auto-detect host slug from conf/hosts/default.yaml
-        host_slug = _detect_host_slug()
-        run_tag = f"run_{host_slug}"
-        run_dir = runs_dir / run_tag
-
-    if not run_dir.exists():
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-    gen_path = run_dir / "gen" / arch / kernel
-    if gen_path.exists():
-        return gen_path
-
-    # Seed from latest gem within THIS run only
-    gem_src = _find_latest_gem(kernel, arch, run_tag=run_tag, kb_repo=repo)
-    if gem_src:
-        shutil.copytree(gem_src, gen_path)
-        # Fix flat structure from old gems: if cuda.cu is at top level,
-        # move into cuda/ subdirectory for list_impls compatibility
-        for cu_file in list(gen_path.glob("*.cu")):
-            stem = cu_file.stem  # e.g. "cuda"
-            subdir = gen_path / stem
-            if not subdir.exists():
-                subdir.mkdir()
-            (subdir / cu_file.name).replace(cu_file)
-            # Also move companion files (.baseline, .md, etc.)
-            for companion in gen_path.glob(f"{stem}.*"):
-                if companion.is_file():
-                    (subdir / companion.name).replace(companion)
-        return gen_path
-
-    # Nothing to seed from — return empty dir
-    gen_path.mkdir(parents=True, exist_ok=True)
-    return gen_path
+        return run_tag
+    env_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
+    if env_tag:
+        return env_tag
+    return f"run_{_detect_host_slug()}"
 
 
 def _detect_host_slug() -> str:

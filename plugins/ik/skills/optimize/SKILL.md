@@ -126,6 +126,35 @@ Before starting, know where things live:
 2. If gen/ doesn't exist, seeds it from the latest gem across all KB runs
 3. The run tag defaults to `run_<host_slug>` (auto-detected from `conf/hosts/default.yaml`)
 
+## Phase 0: Initialize Gen Code
+
+Before the optimization loop, ensure gen/ has code to optimize.
+
+```python
+from cuda_exec.impls import _ensure_gen_dir, list_gems, reseed_gen
+
+gen_path = _ensure_gen_dir(kernel, arch)
+if not gen_path.exists():
+    # No code yet. Check for gems in THIS run:
+    gems = list_gems(kernel, arch)
+    if gems:
+        # seed=auto: LLM picks a promising gem
+        reseed_gen(kernel, arch, gem_path=chosen_gem["gen_path"])
+    else:
+        # seed=init: No gems, no code. Write initial kernel from scratch.
+        # Use NVIDIA docs, ref implementations, and arch specs as reference.
+        # Write the kernel to gen_path/<impl>/kernel.cu
+        gen_path.mkdir(parents=True, exist_ok=True)
+        # ... LLM generates initial kernel code ...
+```
+
+**No gems → no code.** A fresh run starts empty. `_ensure_gen_dir()` does NOT
+auto-seed. The optimizer is responsible for creating initial code (seed=init)
+or seeding from a gem within the same run (seed=auto|latest|vNNN).
+
+**No cross-run access.** Gems from other runs are never used. If the user wants
+to start from a previous run's gem, they must manually copy it.
+
 ## The Loop
 
 Run this loop **autonomously without user input** until a performance

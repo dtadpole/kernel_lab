@@ -10,6 +10,7 @@ All compile/trial must use the snapshot in run_dir/data/, never the original fil
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -395,16 +396,26 @@ def prepare_run(
     timeout_seconds: int,
     *,
     kb_repo: Path | None = None,
+    gen_source: Path | None = None,
+    run_tag: str | None = None,
 ) -> Path:
-    """Create run dir, snapshot sources + configs. Returns run_dir path.
+    """Create or reuse run dir, snapshot sources + configs. Returns run_dir path.
 
-    Call this BEFORE compile/trial. The snapshot in run_dir is the
-    canonical source for all subsequent resolve_impls/load_configs calls.
+    Each run is isolated — gems and impls are per-run only.
 
-    Structure: runs/run_<YYYYMMDD_HHMMSS>/
+    Args:
+        gen_source: explicit path to gen/<arch>/<kernel>/ to snapshot.
+            If None, uses the run's existing gen/ or seeds from its gems.
+        run_tag: explicit run folder name (e.g. run_h8_3).
+            If None, auto-detects from host slug.
+            Supervisor always passes this when using agent SDK.
+
+    Structure: runs/run_<tag>/
         gen/<arch>/<kernel>/    — solver scratch (mutable)
         ref/<kernel>/           — reference snapshot (immutable)
         configs/<kernel>.json   — config snapshot (immutable)
+        impls/<bench_ts>/       — formal bench output (immutable)
+        gems/<slug>/v00N/       — per-run best implementations
         command.json            — run metadata
     """
     repo = kb_repo or KB_REPO
@@ -412,10 +423,18 @@ def prepare_run(
         raise FileNotFoundError(f"kernel_lab_kb not found at {repo}")
 
     runs_dir = repo / "runs"
-    ts = datetime.now()
-    ts_str = ts.strftime("%Y%m%d_%H%M%S")
-    run_dir = runs_dir / f"run_{ts_str}"
+
+    # Resolve run_tag: explicit > env CUDA_EXEC_RUN_TAG > run_<host_slug>
+    if not run_tag:
+        run_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
+    if not run_tag:
+        from cuda_exec.impls import _detect_host_slug
+        run_tag = f"run_{_detect_host_slug()}"
+
+    run_dir = runs_dir / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now()
 
     # 1. Write command.json
     command = {
@@ -423,6 +442,7 @@ def prepare_run(
         "arch": arch,
         "impls": impls,
         "timeout_seconds": timeout_seconds,
+        "run_tag": run_tag,
         "timestamp": ts.isoformat(timespec="seconds"),
         "git_commit": _git_commit_hash(),
         "git_branch": _git_branch(),
@@ -437,37 +457,16 @@ def prepare_run(
     if ref_src.exists():
         shutil.copytree(ref_src, ref_dst)
 
-    # 3. Snapshot gen code → gen/<arch>/<kernel>/
-    #    Source: latest KB gem. gen code lives in kernel_lab_kb, not kernel_lab.
+    # 3. Ensure gen code exists at gen/<arch>/<kernel>/
+    #    Since we reuse the same run_dir, gen/ may already exist.
+    #    Only seed if it doesn't exist yet.
     gen_dst = run_dir / "gen" / arch / kernel
-    gen_src = None
-    # Find latest gem from most recent KB run
-    kb_runs = sorted((repo / "runs").glob("run_*")) if (repo / "runs").exists() else []
-    for prev_run in reversed(kb_runs):
-        if prev_run == run_dir:
-            continue
-        gem_base = prev_run / "gems"
-        if gem_base.exists():
-            for slug_dir in gem_base.iterdir():
-                gem_versions = sorted(slug_dir.glob("v*"))
-                if gem_versions:
-                    candidate = gem_versions[-1] / "gen" / arch / kernel
-                    if candidate.exists():
-                        gen_src = candidate
-                        break
-        if gen_src:
-            break
-    # Also check: active run's gen/ might already be seeded (e.g. by _ensure_gen_dir)
-    if not gen_src:
-        for prev_run in reversed(kb_runs):
-            if prev_run == run_dir:
-                continue
-            candidate = prev_run / "gen" / arch / kernel
-            if candidate.exists():
-                gen_src = candidate
-                break
-    if gen_src:
-        shutil.copytree(gen_src, gen_dst)
+    if not gen_dst.exists():
+        if gen_source and gen_source.exists():
+            shutil.copytree(gen_source, gen_dst)
+        else:
+            from cuda_exec.impls import _ensure_gen_dir
+            _ensure_gen_dir(kernel, arch, run_tag=run_tag, kb_repo=repo)
 
     # 4. Snapshot data/configs/<kernel>.json → configs/<kernel>.json
     cfg_src = PROJECT_ROOT / "data" / "configs" / f"{kernel}.json"

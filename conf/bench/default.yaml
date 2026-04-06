@@ -4,6 +4,9 @@ arch: auto          # auto-detect from host config / nvidia-smi, or explicit: sm
 impls: all          # "all" or list: [ref-cublas, gen-cuda]
 timeout: 120        # per-config timeout in seconds
 gpu: null           # GPU index (sets CUDA_VISIBLE_DEVICES; null = use env)
+run_tag: null       # run folder in kernel_lab_kb/runs/
+                    #   null = auto: env CUDA_EXEC_RUN_TAG > run_<host_slug>
+                    #   explicit: bench.run_tag=run_my_experiment
 
 # Paths (override via CLI, env, or config file)
 kb_repo: ~/kernel_lab_kb                # knowledge base repo for runs + gems

@@ -256,6 +256,7 @@ def formal_benchmark(
     kernel: str,
     arch: str,
     *,
+    run_tag: str | None = None,
     impls: str | List[str] = "all",
     timeout_seconds: int = 120,
     kb_repo: str | None = None,
@@ -299,7 +300,7 @@ def formal_benchmark(
     logger.info("Snapshot start [%s]", datetime.now().strftime(_ts_fmt))
     try:
         from cuda_exec.trajectory import prepare_run
-        run_dir = prepare_run(kernel, arch, impls, timeout_seconds, kb_repo=kb_repo_path)
+        run_dir = prepare_run(kernel, arch, impls, timeout_seconds, kb_repo=kb_repo_path, run_tag=run_tag)
         snapshot_data = run_dir
         logger.info("Snapshot done [%s] → %s", datetime.now().strftime(_ts_fmt), run_dir)
     except Exception as exc:
@@ -534,6 +535,7 @@ def cli_main() -> None:
     result = formal_benchmark(
         kernel=bench_cfg.kernel,
         arch=bench_cfg.arch,
+        run_tag=bench_cfg.get("run_tag"),
         impls=impls,
         timeout_seconds=bench_cfg.timeout,
         kb_repo=bench_cfg.get("kb_repo"),

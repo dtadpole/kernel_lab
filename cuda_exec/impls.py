@@ -132,9 +132,9 @@ def reseed_gen(kernel: str, arch: str, *,
     if gen_path.exists():
         shutil.rmtree(gen_path)
 
-    # Find seed source
+    # Find seed source from THIS run's gems only
     if gem_path is None:
-        gem_path = _find_latest_gem(kernel, arch, kb_repo=repo)
+        gem_path = _find_latest_gem(kernel, arch, run_tag=run_tag, kb_repo=repo)
 
     if gem_path and gem_path.exists():
         shutil.copytree(gem_path, gen_path)
@@ -155,28 +155,32 @@ def reseed_gen(kernel: str, arch: str, *,
 
 
 def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
+                     run_tag: str | None = None,
                      kb_repo: Path | None = None) -> Path | None:
-    """Find the latest gem's gen code across all KB runs.
+    """Find the latest gem's gen code within the SAME run.
 
-    Searches new structure (runs/run_*/gems/) first, then old
-    structure (ik_bench/gems/) for backward compatibility.
+    Gems are per-run artifacts. Seeding only looks within the specified
+    run_tag (or auto-detected host run). Falls back to old ik_bench/gems/
+    only if no new-structure gems exist for this run.
     """
     repo = kb_repo or _KB_REPO
-
-    # New structure: runs/run_*/gems/<slug>/v*/gen/<arch>/<kernel>
     runs_dir = repo / "runs"
-    if runs_dir.exists():
-        for run_dir in sorted(runs_dir.glob("run_*"), reverse=True):
-            gem_base = run_dir / "gems" / f"gen-{impl_name}"
-            if not gem_base.exists():
-                continue
+
+    if not run_tag:
+        run_tag = f"run_{_detect_host_slug()}"
+
+    # Search gems within the same run only
+    run_dir = runs_dir / run_tag
+    if run_dir.exists():
+        gem_base = run_dir / "gems" / f"gen-{impl_name}"
+        if gem_base.exists():
             versions = sorted(gem_base.glob("v*"), reverse=True)
             for ver in versions:
                 candidate = ver / "gen" / arch / kernel
                 if candidate.exists():
                     return candidate
 
-    # Old structure: ik_bench/gems/<kernel>/<arch>/<slug>/v*/data/gen/<arch>/<kernel>
+    # Fallback: old ik_bench/gems/ (pre-migration data, shared)
     old_gems = repo / "ik_bench" / "gems" / kernel / arch / f"gen-{impl_name}"
     if old_gems.exists():
         versions = sorted(old_gems.glob("v*"), reverse=True)
@@ -225,8 +229,8 @@ def _ensure_gen_dir(kernel: str, arch: str, *,
     if gen_path.exists():
         return gen_path
 
-    # Seed from latest gem in kernel_lab_kb
-    gem_src = _find_latest_gem(kernel, arch, kb_repo=repo)
+    # Seed from latest gem within THIS run only
+    gem_src = _find_latest_gem(kernel, arch, run_tag=run_tag, kb_repo=repo)
     if gem_src:
         shutil.copytree(gem_src, gen_path)
         # Fix flat structure from old gems: if cuda.cu is at top level,

@@ -457,127 +457,115 @@ void flash_attention_2wg(
 
     mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
 
-    /* ---- PROLOGUE: QK[0] ---- */
+    /* ---- PROLOGUE: QK[0] with streaming softmax ---- */
     {
         const uint32_t cur_K_lo = K0_lo;
         const uint32_t cur_K_hi = K0_hi;
-        float S_lo[32], S_hi[32];
+        const uint64_t dk_lo_d = make_wgmma_desc(cur_K_lo, STRIDE);
+        const uint64_t dk_hi_d = make_wgmma_desc(cur_K_hi, STRIDE);
+        constexpr int K_SUB1 = 64 * HALF_DIM * (int)sizeof(nv_bfloat16) / 16;
+
+        /* Step 1: QK sub-tile 0 → S_lo[32] */
+        float S_lo[32];
         #pragma unroll
-        for (int i = 0; i < 32; i++) { S_lo[i] = 0.0f; S_hi[i] = 0.0f; }
-
-        const uint64_t dk_lo = make_wgmma_desc(cur_K_lo, STRIDE);
-        const uint64_t dk_hi = make_wgmma_desc(cur_K_hi, STRIDE);
-        constexpr int K_SUB1_P = 64 * HALF_DIM * (int)sizeof(nv_bfloat16) / 16;
-
+        for (int i = 0; i < 32; i++) S_lo[i] = 0.0f;
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < DIM / 16; ks++) {
-            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks * 2)
-                                   : gmma_desc_advance(desc_q_hi, (ks - 4) * 2);
-            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo, ks * 2)
-                                   : gmma_desc_advance(dk_hi, (ks - 4) * 2);
-            wgmma_m64n64k16_f32_bf16(S_lo, dq, dk, (ks == 0) ? 0 : 1);
-        }
-        wgmma_commit_group(); wgmma_wait_group<0>();
-        wgmma_fence();
-        #pragma unroll
-        for (int ks = 0; ks < DIM / 16; ks++) {
-            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks * 2)
-                                   : gmma_desc_advance(desc_q_hi, (ks - 4) * 2);
-            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo, ks * 2 + K_SUB1_P)
-                                   : gmma_desc_advance(dk_hi, (ks - 4) * 2 + K_SUB1_P);
-            wgmma_m64n64k16_f32_bf16(S_hi, dq, dk, (ks == 0) ? 0 : 1);
+            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks*2) : gmma_desc_advance(desc_q_hi, (ks-4)*2);
+            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo_d, ks*2) : gmma_desc_advance(dk_hi_d, (ks-4)*2);
+            wgmma_m64n64k16_f32_bf16(S_lo, dq, dk, (ks==0)?0:1);
         }
         wgmma_commit_group(); wgmma_wait_group<0>();
 
-        /* Pack P_lo immediately → S_lo can die before QK_hi */
-        #pragma unroll
-        for (int ks = 0; ks < 4; ks++) {
-            P_packed[ks*4+0] = pack_bf16(S_lo[ks*8+0], S_lo[ks*8+1]);
-            P_packed[ks*4+1] = pack_bf16(S_lo[ks*8+2], S_lo[ks*8+3]);
-            P_packed[ks*4+2] = pack_bf16(S_lo[ks*8+4], S_lo[ks*8+5]);
-            P_packed[ks*4+3] = pack_bf16(S_lo[ks*8+6], S_lo[ks*8+7]);
-        }
-
-
-        if (lane_id == 0 && mywarp == 0)
-            mbarrier_arrive(&K_empty[k_stage]);
-        k_stage ^= 1;
-        if (k_stage == 0) k_full_phase ^= 1;
-
-        /* Softmax (first block) */
+        /* Step 2: Partial softmax on S_lo (KV 0-63) + pack P_lo */
+        float partial_max[2], partial_sum[2];
         #pragma unroll
         for (int half = 0; half < 2; half++) {
-            float rv[32];
+            float rv[16];
             #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                rv[p4*2+0] = S_lo[(p4<<2)|(half<<1)|0];
-                rv[p4*2+1] = S_lo[(p4<<2)|(half<<1)|1];
-            }
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                rv[16+p4*2+0] = S_hi[(p4<<2)|(half<<1)|0];
-                rv[16+p4*2+1] = S_hi[(p4<<2)|(half<<1)|1];
-            }
+            for (int p4 = 0; p4 < 8; p4++) { rv[p4*2] = S_lo[(p4<<2)|(half<<1)]; rv[p4*2+1] = S_lo[(p4<<2)|(half<<1)|1]; }
             if (IS_CAUSAL) {
-                const int row = mywarp * 16 + half * 8 + (lane_id / 4);
-                const int q_pos = q_block_id * BLOCK_Q + cwg * 64 + row;
+                const int row = mywarp*16 + half*8 + (lane_id/4);
+                const int q_pos = q_block_id*BLOCK_Q + cwg*64 + row;
                 #pragma unroll
-                for (int p4 = 0; p4 < 16; p4++) {
-                    #pragma unroll
-                    for (int s2 = 0; s2 < 2; s2++) {
-                        const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
-                        if (col > q_pos) rv[p4*2+s2] = -FLT_MAX;
-                    }
-                }
+                for (int p4 = 0; p4 < 8; p4++) { for (int s2 = 0; s2 < 2; s2++) {
+                    const int col = p4*8 + s2 + (lane_id%4)*2;
+                    if (col > q_pos) rv[p4*2+s2] = -FLT_MAX;
+                }}
             }
-            float tmax[16];
+            float lmax = rv[0];
             #pragma unroll
-            for (int i = 0; i < 16; i++) tmax[i] = fmaxf(rv[i], rv[i + 16]);
-            #pragma unroll
-            for (int i = 0; i < 8; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 8]);
-            #pragma unroll
-            for (int i = 0; i < 4; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 4]);
-            tmax[0] = fmaxf(tmax[0], tmax[2]); tmax[1] = fmaxf(tmax[1], tmax[3]);
-            float lmax = fmaxf(tmax[0], tmax[1]);
+            for (int i = 1; i < 16; i++) lmax = fmaxf(lmax, rv[i]);
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 1));
             lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
-            rowmax[half] = lmax;
-
-            float neg_max_scaled = -lmax * softmax_scale_log2;
-            float tsum[16];
+            partial_max[half] = lmax;
+            float neg_ms = -lmax * softmax_scale_log2;
+            float lsum = 0.0f;
             #pragma unroll
-            for (int c = 0; c < 32; c++)
-                rv[c] = fast_exp2f(fmaf(rv[c], softmax_scale_log2, neg_max_scaled));
+            for (int i = 0; i < 16; i++) { rv[i] = fast_exp2f(fmaf(rv[i], softmax_scale_log2, neg_ms)); lsum += rv[i]; }
+            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 1);
+            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 2);
+            partial_sum[half] = lsum;
             #pragma unroll
-            for (int i = 0; i < 16; i++) tsum[i] = rv[i] + rv[i + 16];
-            #pragma unroll
-            for (int i = 0; i < 8; i++) tsum[i] += tsum[i + 8];
-            #pragma unroll
-            for (int i = 0; i < 4; i++) tsum[i] += tsum[i + 4];
-            tsum[0] += tsum[2]; tsum[1] += tsum[3];
-            rowsumexp[half] = tsum[0] + tsum[1];
-
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                S_lo[(p4<<2)|(half<<1)|0] = rv[p4*2+0];
-                S_lo[(p4<<2)|(half<<1)|1] = rv[p4*2+1];
-            }
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                S_hi[(p4<<2)|(half<<1)|0] = rv[16+p4*2+0];
-                S_hi[(p4<<2)|(half<<1)|1] = rv[16+p4*2+1];
-            }
+            for (int p4 = 0; p4 < 8; p4++) { S_lo[(p4<<2)|(half<<1)] = rv[p4*2]; S_lo[(p4<<2)|(half<<1)|1] = rv[p4*2+1]; }
         }
-
+        /* Pack P_lo → S_lo DEAD */
         #pragma unroll
-        /* Pack P: k-steps 0-3 from S_lo, 4-7 from S_hi */
         for (int ks = 0; ks < 4; ks++) {
             P_packed[ks*4+0] = pack_bf16(S_lo[ks*8+0], S_lo[ks*8+1]);
             P_packed[ks*4+1] = pack_bf16(S_lo[ks*8+2], S_lo[ks*8+3]);
             P_packed[ks*4+2] = pack_bf16(S_lo[ks*8+4], S_lo[ks*8+5]);
             P_packed[ks*4+3] = pack_bf16(S_lo[ks*8+6], S_lo[ks*8+7]);
         }
+
+        /* Step 3: QK sub-tile 1 → S_hi[32] (S_lo is DEAD, peak: O[64]+S_hi[32]+P_lo[16]=112) */
+        float S_hi[32];
+        #pragma unroll
+        for (int i = 0; i < 32; i++) S_hi[i] = 0.0f;
+        wgmma_fence();
+        #pragma unroll
+        for (int ks = 0; ks < DIM / 16; ks++) {
+            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks*2) : gmma_desc_advance(desc_q_hi, (ks-4)*2);
+            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo_d, ks*2+K_SUB1) : gmma_desc_advance(dk_hi_d, (ks-4)*2+K_SUB1);
+            wgmma_m64n64k16_f32_bf16(S_hi, dq, dk, (ks==0)?0:1);
+        }
+        wgmma_commit_group(); wgmma_wait_group<0>();
+
+        /* Step 4: Merge softmax with S_hi (KV 64-127) + pack P_hi */
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            float rv[16];
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) { rv[p4*2] = S_hi[(p4<<2)|(half<<1)]; rv[p4*2+1] = S_hi[(p4<<2)|(half<<1)|1]; }
+            if (IS_CAUSAL) {
+                const int row = mywarp*16 + half*8 + (lane_id/4);
+                const int q_pos = q_block_id*BLOCK_Q + cwg*64 + row;
+                #pragma unroll
+                for (int p4 = 0; p4 < 8; p4++) { for (int s2 = 0; s2 < 2; s2++) {
+                    const int col = 64 + p4*8 + s2 + (lane_id%4)*2;
+                    if (col > q_pos) rv[p4*2+s2] = -FLT_MAX;
+                }}
+            }
+            float lmax_hi = rv[0];
+            #pragma unroll
+            for (int i = 1; i < 16; i++) lmax_hi = fmaxf(lmax_hi, rv[i]);
+            lmax_hi = fmaxf(lmax_hi, __shfl_xor_sync(0xFFFFFFFF, lmax_hi, 1));
+            lmax_hi = fmaxf(lmax_hi, __shfl_xor_sync(0xFFFFFFFF, lmax_hi, 2));
+            float new_max = fmaxf(partial_max[half], lmax_hi);
+            rowmax[half] = new_max;
+            float rescale_lo = fast_exp2f((partial_max[half] - new_max) * softmax_scale_log2);
+            float neg_ms = -new_max * softmax_scale_log2;
+            float lsum_hi = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 16; i++) { rv[i] = fast_exp2f(fmaf(rv[i], softmax_scale_log2, neg_ms)); lsum_hi += rv[i]; }
+            lsum_hi += __shfl_xor_sync(0xFFFFFFFF, lsum_hi, 1);
+            lsum_hi += __shfl_xor_sync(0xFFFFFFFF, lsum_hi, 2);
+            rowsumexp[half] = partial_sum[half] * rescale_lo + lsum_hi;
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) { S_hi[(p4<<2)|(half<<1)] = rv[p4*2]; S_hi[(p4<<2)|(half<<1)|1] = rv[p4*2+1]; }
+        }
+        /* Pack P_hi */
         #pragma unroll
         for (int ks = 0; ks < 4; ks++) {
             P_packed[16+ks*4+0] = pack_bf16(S_hi[ks*8+0], S_hi[ks*8+1]);
@@ -585,6 +573,10 @@ void flash_attention_2wg(
             P_packed[16+ks*4+2] = pack_bf16(S_hi[ks*8+4], S_hi[ks*8+5]);
             P_packed[16+ks*4+3] = pack_bf16(S_hi[ks*8+6], S_hi[ks*8+7]);
         }
+
+        /* Release K[0] */
+        if (lane_id == 0 && mywarp == 0) mbarrier_arrive(&K_empty[k_stage]);
+        k_stage ^= 1; if (k_stage == 0) k_full_phase ^= 1;
     }
 
     /* ---- MAINLOOP: QK[n] + PV[n-1] overlap ---- */
@@ -594,30 +586,60 @@ void flash_attention_2wg(
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
         named_barrier_sync(my_bar, 256);
 
-        float S_lo[32], S_hi[32];
+        /* Step 1: QK sub-tile 0 → S_lo[32] */
+        float S_lo[32];
         #pragma unroll
-        for (int i = 0; i < 32; i++) { S_lo[i] = 0.0f; S_hi[i] = 0.0f; }
-
+        for (int i = 0; i < 32; i++) S_lo[i] = 0.0f;
         const uint32_t cur_K_lo = (k_stage == 0) ? K0_lo : K1_lo;
         const uint32_t cur_K_hi = (k_stage == 0) ? K0_hi : K1_hi;
-        const uint64_t dk_lo = make_wgmma_desc(cur_K_lo, STRIDE);
-        const uint64_t dk_hi = make_wgmma_desc(cur_K_hi, STRIDE);
+        const uint64_t dk_lo_d = make_wgmma_desc(cur_K_lo, STRIDE);
+        const uint64_t dk_hi_d = make_wgmma_desc(cur_K_hi, STRIDE);
         constexpr int K_SUB1_M = 64 * HALF_DIM * (int)sizeof(nv_bfloat16) / 16;
 
-        /* QK sub-tile 0 → S_lo[32] */
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < DIM / 16; ks++) {
-            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks * 2)
-                                   : gmma_desc_advance(desc_q_hi, (ks - 4) * 2);
-            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo, ks * 2)
-                                   : gmma_desc_advance(dk_hi, (ks - 4) * 2);
-            wgmma_m64n64k16_f32_bf16(S_lo, dq, dk, (ks == 0) ? 0 : 1);
+            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks*2) : gmma_desc_advance(desc_q_hi, (ks-4)*2);
+            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo_d, ks*2) : gmma_desc_advance(dk_hi_d, (ks-4)*2);
+            wgmma_m64n64k16_f32_bf16(S_lo, dq, dk, (ks==0)?0:1);
         }
-        wgmma_commit_group();
-        wgmma_wait_group<0>();
+        wgmma_commit_group(); wgmma_wait_group<0>();
 
-        /* Pack P_lo immediately → S_lo can die before QK_hi */
+        /* Step 2: Partial softmax on S_lo + pack P_lo → S_lo DEAD */
+        float partial_max[2], partial_sum[2];
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            float rv[16];
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) { rv[p4*2] = S_lo[(p4<<2)|(half<<1)]; rv[p4*2+1] = S_lo[(p4<<2)|(half<<1)|1]; }
+            if (IS_CAUSAL) {
+                const int needs_mask_lo = (kv_id * BLOCK_KV + 64) > q_block_id * BLOCK_Q + cwg * 64;
+                if (needs_mask_lo) {
+                    const int row = mywarp*16 + half*8 + (lane_id/4);
+                    const int q_pos = q_block_id*BLOCK_Q + cwg*64 + row;
+                    #pragma unroll
+                    for (int p4 = 0; p4 < 8; p4++) { for (int s2 = 0; s2 < 2; s2++) {
+                        const int col = kv_id*BLOCK_KV + p4*8 + s2 + (lane_id%4)*2;
+                        if (col > q_pos) rv[p4*2+s2] = -FLT_MAX;
+                    }}
+                }
+            }
+            float lmax = rv[0];
+            #pragma unroll
+            for (int i = 1; i < 16; i++) lmax = fmaxf(lmax, rv[i]);
+            lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 1));
+            lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
+            partial_max[half] = lmax;
+            float neg_ms = -lmax * softmax_scale_log2;
+            float lsum = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 16; i++) { rv[i] = fast_exp2f(fmaf(rv[i], softmax_scale_log2, neg_ms)); lsum += rv[i]; }
+            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 1);
+            lsum += __shfl_xor_sync(0xFFFFFFFF, lsum, 2);
+            partial_sum[half] = lsum;
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) { S_lo[(p4<<2)|(half<<1)] = rv[p4*2]; S_lo[(p4<<2)|(half<<1)|1] = rv[p4*2+1]; }
+        }
         #pragma unroll
         for (int ks = 0; ks < 4; ks++) {
             P_packed[ks*4+0] = pack_bf16(S_lo[ks*8+0], S_lo[ks*8+1]);
@@ -626,22 +648,84 @@ void flash_attention_2wg(
             P_packed[ks*4+3] = pack_bf16(S_lo[ks*8+6], S_lo[ks*8+7]);
         }
 
-        /* QK sub-tile 1 → S_hi[32] */
+        /* Step 3: QK sub-tile 1 → S_hi[32] */
+        float S_hi[32];
+        #pragma unroll
+        for (int i = 0; i < 32; i++) S_hi[i] = 0.0f;
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < DIM / 16; ks++) {
-            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks * 2)
-                                   : gmma_desc_advance(desc_q_hi, (ks - 4) * 2);
-            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo, ks * 2 + K_SUB1_M)
-                                   : gmma_desc_advance(dk_hi, (ks - 4) * 2 + K_SUB1_M);
-            wgmma_m64n64k16_f32_bf16(S_hi, dq, dk, (ks == 0) ? 0 : 1);
+            uint64_t dq = (ks < 4) ? gmma_desc_advance(desc_q_lo, ks*2) : gmma_desc_advance(desc_q_hi, (ks-4)*2);
+            uint64_t dk = (ks < 4) ? gmma_desc_advance(dk_lo_d, ks*2+K_SUB1_M) : gmma_desc_advance(dk_hi_d, (ks-4)*2+K_SUB1_M);
+            wgmma_m64n64k16_f32_bf16(S_hi, dq, dk, (ks==0)?0:1);
         }
-        wgmma_commit_group();
+        wgmma_commit_group(); wgmma_wait_group<0>();
 
+        /* Step 4: Merge softmax with S_hi + pack P_hi + rescale O_acc */
+        float o_rescale[2];
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            float rv[16];
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) { rv[p4*2] = S_hi[(p4<<2)|(half<<1)]; rv[p4*2+1] = S_hi[(p4<<2)|(half<<1)|1]; }
+            if (IS_CAUSAL) {
+                const int needs_mask_hi = ((kv_id+1) * BLOCK_KV) > q_block_id * BLOCK_Q + cwg * 64;
+                if (needs_mask_hi) {
+                    const int row = mywarp*16 + half*8 + (lane_id/4);
+                    const int q_pos = q_block_id*BLOCK_Q + cwg*64 + row;
+                    #pragma unroll
+                    for (int p4 = 0; p4 < 8; p4++) { for (int s2 = 0; s2 < 2; s2++) {
+                        const int col = kv_id*BLOCK_KV + 64 + p4*8 + s2 + (lane_id%4)*2;
+                        if (col > q_pos) rv[p4*2+s2] = -FLT_MAX;
+                    }}
+                }
+            }
+            float lmax_hi = rv[0];
+            #pragma unroll
+            for (int i = 1; i < 16; i++) lmax_hi = fmaxf(lmax_hi, rv[i]);
+            lmax_hi = fmaxf(lmax_hi, __shfl_xor_sync(0xFFFFFFFF, lmax_hi, 1));
+            lmax_hi = fmaxf(lmax_hi, __shfl_xor_sync(0xFFFFFFFF, lmax_hi, 2));
+            /* Merge with partial + previous rowmax */
+            float combined_max = fmaxf(partial_max[half], lmax_hi);
+            float new_max = fmaxf(combined_max, rowmax[half]);
+            float rescale_prev = fast_exp2f((rowmax[half] - new_max) * softmax_scale_log2);
+            float rescale_lo = fast_exp2f((partial_max[half] - new_max) * softmax_scale_log2);
+            rowmax[half] = new_max;
+            o_rescale[half] = rescale_prev;
+            float neg_ms = -new_max * softmax_scale_log2;
+            float lsum_hi = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 16; i++) { rv[i] = fast_exp2f(fmaf(rv[i], softmax_scale_log2, neg_ms)); lsum_hi += rv[i]; }
+            lsum_hi += __shfl_xor_sync(0xFFFFFFFF, lsum_hi, 1);
+            lsum_hi += __shfl_xor_sync(0xFFFFFFFF, lsum_hi, 2);
+            rowsumexp[half] = rowsumexp[half] * rescale_prev + partial_sum[half] * rescale_lo + lsum_hi;
+            /* Rescale P_lo (bf16x2) by rescale_lo */
+            #pragma unroll
+            for (int ks = 0; ks < 4; ks++) {
+                nv_bfloat162 v0 = reinterpret_cast<nv_bfloat162&>(P_packed[ks*4 + (half ? 1 : 0)]);
+                float2 f0 = __bfloat1622float2(v0);
+                f0.x *= rescale_lo; f0.y *= rescale_lo;
+                nv_bfloat162 packed = __float22bfloat162_rn(f0); P_packed[ks*4 + (half ? 1 : 0)] = reinterpret_cast<uint32_t&>(packed);
+            }
+            #pragma unroll
+            for (int p4 = 0; p4 < 8; p4++) { S_hi[(p4<<2)|(half<<1)] = rv[p4*2]; S_hi[(p4<<2)|(half<<1)|1] = rv[p4*2+1]; }
+        }
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            P_packed[16+ks*4+0] = pack_bf16(S_hi[ks*8+0], S_hi[ks*8+1]);
+            P_packed[16+ks*4+1] = pack_bf16(S_hi[ks*8+2], S_hi[ks*8+3]);
+            P_packed[16+ks*4+2] = pack_bf16(S_hi[ks*8+4], S_hi[ks*8+5]);
+            P_packed[16+ks*4+3] = pack_bf16(S_hi[ks*8+6], S_hi[ks*8+7]);
+        }
+
+        /* Release K */
+        if (lane_id == 0 && mywarp == 0) mbarrier_arrive(&K_empty[k_stage]);
+        k_stage ^= 1; if (k_stage == 0) k_full_phase ^= 1;
+
+        /* Step 5: PV[n-1] (uses P_packed from PREVIOUS iteration, same as 3-WG) */
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
         const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
         const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
-
         wgmma_fence();
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
@@ -652,95 +736,12 @@ void flash_attention_2wg(
         }
         wgmma_commit_group();
         named_barrier_arrive(other_bar, 256);
-
-        wgmma_wait_group<1>();
-        /* fence #3 removed: wait_group already synchronizes register state,
-         * next wgmma fence is at start of next iteration (fence #1) */
-
-        if (lane_id == 0 && mywarp == 0)
-            mbarrier_arrive(&K_empty[k_stage]);
-        k_stage ^= 1;
-        if (k_stage == 0) k_full_phase ^= 1;
-
-        /* Softmax (overlaps PV tensor core execution) */
-        const int needs_mask = IS_CAUSAL &&
-            ((kv_id + 1) * BLOCK_KV > q_block_id * BLOCK_Q + cwg * 64);
-        float o_rescale[2];
-        #pragma unroll
-        for (int half = 0; half < 2; half++) {
-            float rv[32];
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                rv[p4*2+0] = S_lo[(p4<<2)|(half<<1)|0];
-                rv[p4*2+1] = S_lo[(p4<<2)|(half<<1)|1];
-            }
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                rv[16+p4*2+0] = S_hi[(p4<<2)|(half<<1)|0];
-                rv[16+p4*2+1] = S_hi[(p4<<2)|(half<<1)|1];
-            }
-            if (needs_mask) {
-                const int row = mywarp * 16 + half * 8 + (lane_id / 4);
-                const int q_pos = q_block_id * BLOCK_Q + cwg * 64 + row;
-                #pragma unroll
-                for (int p4 = 0; p4 < 16; p4++) {
-                    #pragma unroll
-                    for (int s2 = 0; s2 < 2; s2++) {
-                        const int col = p4 * 8 + s2 + (lane_id % 4) * 2;
-                        const int kv_pos = kv_id * BLOCK_KV + col;
-                        if (kv_pos > q_pos) rv[p4*2+s2] = -FLT_MAX;
-                    }
-                }
-            }
-            float tmax[16];
-            #pragma unroll
-            for (int i = 0; i < 16; i++) tmax[i] = fmaxf(rv[i], rv[i + 16]);
-            #pragma unroll
-            for (int i = 0; i < 8; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 8]);
-            #pragma unroll
-            for (int i = 0; i < 4; i++) tmax[i] = fmaxf(tmax[i], tmax[i + 4]);
-            tmax[0] = fmaxf(tmax[0], tmax[2]); tmax[1] = fmaxf(tmax[1], tmax[3]);
-            float lmax = fmaxf(tmax[0], tmax[1]);
-            lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 1));
-            lmax = fmaxf(lmax, __shfl_xor_sync(0xFFFFFFFF, lmax, 2));
-
-            float new_max = fmaxf(lmax, rowmax[half]);
-            float rescale = fast_exp2f((rowmax[half] - new_max) * softmax_scale_log2);
-            rowmax[half] = new_max;
-            o_rescale[half] = rescale;
-
-            float neg_max_scaled = -new_max * softmax_scale_log2;
-            float tsum[16];
-            #pragma unroll
-            for (int c = 0; c < 32; c++)
-                rv[c] = fast_exp2f(fmaf(rv[c], softmax_scale_log2, neg_max_scaled));
-            #pragma unroll
-            for (int i = 0; i < 16; i++) tsum[i] = rv[i] + rv[i + 16];
-            #pragma unroll
-            for (int i = 0; i < 8; i++) tsum[i] += tsum[i + 8];
-            #pragma unroll
-            for (int i = 0; i < 4; i++) tsum[i] += tsum[i + 4];
-            tsum[0] += tsum[2]; tsum[1] += tsum[3];
-            rowsumexp[half] = rowsumexp[half] * rescale + (tsum[0] + tsum[1]);
-
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                S_lo[(p4<<2)|(half<<1)|0] = rv[p4*2+0];
-                S_lo[(p4<<2)|(half<<1)|1] = rv[p4*2+1];
-            }
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                S_hi[(p4<<2)|(half<<1)|0] = rv[16+p4*2+0];
-                S_hi[(p4<<2)|(half<<1)|1] = rv[16+p4*2+1];
-            }
-        }
-
         wgmma_wait_group<0>();
-        if (lane_id == 0 && mywarp == 0)
-            mbarrier_arrive(&V_empty[v_stage]);
-        v_stage ^= 1;
-        if (v_stage == 0) v_full_phase ^= 1;
 
+        if (lane_id == 0 && mywarp == 0) mbarrier_arrive(&V_empty[v_stage]);
+        v_stage ^= 1; if (v_stage == 0) v_full_phase ^= 1;
+
+        /* O rescale */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
             #pragma unroll
@@ -750,22 +751,6 @@ void flash_attention_2wg(
                 O_acc[32+(p4<<2)|(half<<1)|0] *= o_rescale[half];
                 O_acc[32+(p4<<2)|(half<<1)|1] *= o_rescale[half];
             }
-        }
-
-        #pragma unroll
-        /* Pack P: k-steps 0-3 from S_lo, 4-7 from S_hi */
-        for (int ks = 0; ks < 4; ks++) {
-            P_packed[ks*4+0] = pack_bf16(S_lo[ks*8+0], S_lo[ks*8+1]);
-            P_packed[ks*4+1] = pack_bf16(S_lo[ks*8+2], S_lo[ks*8+3]);
-            P_packed[ks*4+2] = pack_bf16(S_lo[ks*8+4], S_lo[ks*8+5]);
-            P_packed[ks*4+3] = pack_bf16(S_lo[ks*8+6], S_lo[ks*8+7]);
-        }
-        #pragma unroll
-        for (int ks = 0; ks < 4; ks++) {
-            P_packed[16+ks*4+0] = pack_bf16(S_hi[ks*8+0], S_hi[ks*8+1]);
-            P_packed[16+ks*4+1] = pack_bf16(S_hi[ks*8+2], S_hi[ks*8+3]);
-            P_packed[16+ks*4+2] = pack_bf16(S_hi[ks*8+4], S_hi[ks*8+5]);
-            P_packed[16+ks*4+3] = pack_bf16(S_hi[ks*8+6], S_hi[ks*8+7]);
         }
 
         if (kv_id + 1 < max_kv_iter)

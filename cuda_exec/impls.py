@@ -36,22 +36,19 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
 def list_gems(kernel: str, arch: str, impl_name: str = "cuda",
               run_tag: str | None = None,
               kb_repo: Path | None = None) -> list[dict]:
-    """List all available gems for a kernel/arch/impl, newest first.
+    """List gems for a kernel/arch/impl within the SAME run, newest first.
 
-    If run_tag is specified, only lists gems from that run.
-    Otherwise lists gems across all runs.
+    Gems are per-run. No cross-run access.
+    If run_tag is None, uses the current host run (run_<host_slug>).
 
     Returns list of dicts with: version, path, gen_path, run, tflops, timestamp.
     """
     repo = kb_repo or _KB_REPO
     gems: list[dict] = []
 
-    # Determine which runs to search
+    run_tag = _resolve_run_tag(run_tag)
     runs_dir = repo / "runs"
-    if run_tag:
-        run_dirs = [runs_dir / run_tag] if (runs_dir / run_tag).exists() else []
-    else:
-        run_dirs = sorted(runs_dir.glob("run_*"), reverse=True) if runs_dir.exists() else []
+    run_dirs = [runs_dir / run_tag] if (runs_dir / run_tag).exists() else []
 
     # New structure: runs/run_*/gems/<slug>/v*/
     for run_dir in run_dirs:

@@ -137,27 +137,21 @@ hosts:
       gpu: "NVIDIA H100"
       gpu_count: 8
       gpu_variant: "SXM R&R SKU 96GB"
-      driver_version: "580.65.06"
-      driver_cuda_version: "13.0"   # max CUDA version this driver supports
+      driver_version: "595.45.04"
+      driver_cuda_version: "13.2"   # max CUDA version this driver supports
       # R&R SKU roofline at 650W TDP (see docs/roofline/h100_sxm.md)
       peak_tflops_bf16: 800
       peak_tflops_fp16: 800
       peak_tflops_fp32: 53.7
       peak_bandwidth_gb_s: 2447
     env:
-      cuda_home: /usr/local/cuda-13.0
-      cuda_available: ["12.8", "12.9", "13.0"]
-      torch_cuda: "cu130"
+      cuda_home: /usr/local/cuda-13.2
+      cuda_available: ["12.8", "12.9", "13.0", "13.2"]
+      torch_cuda: "cu130"           # PyTorch cu130 works with driver 595
       torch_cuda_arch: "9.0"       # Hopper = sm_90
-      # fbcode ships libcuda.so.550.90.07 (CUDA 12.4) which shadows the
-      # system driver 580.65.06 (CUDA 13.0). Without this, PyTorch fails
-      # with "driver too old (found version 12040)".
-      ld_preload: /usr/lib64/libcuda.so.580.65.06
+      ld_preload: null              # driver 595 matches — no workaround needed
       python: /usr/local/bin/python3  # 3.12.13+meta
-      # cuDNN 9.19 (bundled with torch 2.11+cu130) segfaults on CUDA 13.0
-      # driver during cudnnCreate → cuModuleLoadData. SDPA must exclude
-      # CUDNN_ATTENTION backend; use FLASH_ATTENTION instead.
-      cudnn_sdpa_broken: true
+      cudnn_sdpa_broken: false      # driver 595 fixes cuDNN 9.19 segfault
       tvm_ffi_disable_torch_c_dlpack: true
     network:
       internet: false               # fwdproxy blocks CONNECT tunnels

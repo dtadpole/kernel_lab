@@ -118,6 +118,20 @@ def resolve_host_env() -> Dict[str, str]:
         if default_cuda.exists():
             env["CUDA_HOME"] = str(default_cuda.resolve())
 
+    # CUTLASS include paths for NVCC
+    if entry:
+        cutlass_include = entry.get("env", {}).get("cutlass_include")
+        if cutlass_include:
+            if isinstance(cutlass_include, list):
+                dirs = [d for d in cutlass_include if Path(d).is_dir()]
+            elif Path(cutlass_include).is_dir():
+                dirs = [cutlass_include]
+            else:
+                dirs = []
+            if dirs:
+                env["NVCC_INCLUDE_DIRS"] = " ".join(str(d) for d in dirs)
+                env["NVCC_EXTRA_LIBS"] = "cuda dl"
+
     key, _ = _match_host_entry()
     logger.info("Host env resolved [%s]: %s", key or "auto-detect", env)
     return env

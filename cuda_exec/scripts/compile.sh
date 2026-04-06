@@ -156,6 +156,29 @@ if [[ -n "$HARNESS" ]]; then
   HARNESS_INCLUDE_ARGS=("-I${HARNESS_DIR}")
 fi
 
+# Extra include directories from NVCC_INCLUDE_DIRS (space-separated)
+NVCC_INCLUDE_DIRS="${NVCC_INCLUDE_DIRS:-}"
+if [[ -n "$NVCC_INCLUDE_DIRS" ]]; then
+  for dir in $NVCC_INCLUDE_DIRS; do
+    COMMON_NVCC_ARGS+=("-I${dir}")
+  done
+fi
+
+# Extra linker libraries from NVCC_EXTRA_LIBS (space-separated, e.g. "cuda dl")
+NVCC_EXTRA_LIBS="${NVCC_EXTRA_LIBS:-}"
+if [[ -n "$NVCC_EXTRA_LIBS" ]]; then
+  for lib in $NVCC_EXTRA_LIBS; do
+    COMMON_NVCC_ARGS+=("-l${lib}")
+  done
+fi
+
+# Extra nvcc flags from NVCC_EXTRA_FLAGS (space-separated)
+NVCC_EXTRA_FLAGS="${NVCC_EXTRA_FLAGS:-}"
+if [[ -n "$NVCC_EXTRA_FLAGS" ]]; then
+  # shellcheck disable=SC2206
+  COMMON_NVCC_ARGS+=( $NVCC_EXTRA_FLAGS )
+fi
+
 # ── Assemble commands ─────────────────────────────────────────────────
 PTX_CMD=("$NVCC" "${COMMON_NVCC_ARGS[@]}" "${HARNESS_INCLUDE_ARGS[@]}" -ptx "$SOURCE" -o "$PTX_PATH")
 PTXAS_CMD=("$PTXAS" "-arch=${PTXAS_ARCH}" -v "$PTX_PATH" -o "$CUBIN_PATH")

@@ -114,6 +114,9 @@ hosts:
       cudnn_sdpa_broken: false
       # CuTe DSL (FA4 ref-cutedsl) requires this due to ABI mismatch with PyTorch
       tvm_ffi_disable_torch_c_dlpack: true
+      cutlass_include:
+        - /home/zhenc/workspace1/third-party/cutlass/4.3.5/include
+        - /home/zhenc/workspace1/third-party/cutlass/4.3.5/tools/util/include
     network:
       internet: true
       proxy_bypass_method: "fwdproxy"

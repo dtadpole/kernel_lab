@@ -277,6 +277,25 @@ void wgmma_m64n128k16_f32_bf16_RS(float acc[64],
       "l"(desc_b), "r"(scale_D));
 }
 
+
+/* m64n64k16 RS for split PV (DIM halves) — tnspB=1 */
+__device__ __forceinline__
+void wgmma_m64n64k16_f32_bf16_RS(float acc[32],
+                                  uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+                                  uint64_t desc_b, int scale_D) {
+    asm volatile(
+    "{\n.reg .pred p;\nsetp.ne.b32 p, %37, 0;\n"
+    "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+    "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"
+    "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31},"
+    "{%32,%33,%34,%35},%36,p,1,1,1;\n}\n"
+    : "+f"(acc[0]),"+f"(acc[1]),"+f"(acc[2]),"+f"(acc[3]),"+f"(acc[4]),"+f"(acc[5]),"+f"(acc[6]),"+f"(acc[7]),
+      "+f"(acc[8]),"+f"(acc[9]),"+f"(acc[10]),"+f"(acc[11]),"+f"(acc[12]),"+f"(acc[13]),"+f"(acc[14]),"+f"(acc[15]),
+      "+f"(acc[16]),"+f"(acc[17]),"+f"(acc[18]),"+f"(acc[19]),"+f"(acc[20]),"+f"(acc[21]),"+f"(acc[22]),"+f"(acc[23]),
+      "+f"(acc[24]),"+f"(acc[25]),"+f"(acc[26]),"+f"(acc[27]),"+f"(acc[28]),"+f"(acc[29]),"+f"(acc[30]),"+f"(acc[31])
+    : "r"(a0),"r"(a1),"r"(a2),"r"(a3),"l"(desc_b),"r"(scale_D));
+}
+
 /* --- Pack BF16x2 ------------------------------------------------------- */
 
 __device__ __forceinline__
@@ -440,9 +459,10 @@ void flash_attention_2wg(
     const uint64_t desc_q_lo = make_wgmma_desc(my_Q_lo, STRIDE);
     const uint64_t desc_q_hi = make_wgmma_desc(my_Q_hi, STRIDE);
 
-    float O_acc[64];
+    float O_lo[32], O_hi[32];  /* split DIM halves */
     #pragma unroll
-    for (int i = 0; i < 64; i++) O_acc[i] = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 32; i++) { O_lo[i] = 0.0f; O_hi[i] = 0.0f; }
     float rowmax[2] = {-FLT_MAX, -FLT_MAX};
     float rowsumexp[2] = {0.0f, 0.0f};
 
@@ -598,16 +618,16 @@ void flash_attention_2wg(
     for (int kv_id = 1; kv_id < max_kv_iter; kv_id++) {
         named_barrier_sync(my_bar, 256);
 
-        /* Issue PV[n-1] (group 0) + QK_lo[n] (group 1) concurrently */
+        /* Issue PV_lo[n-1] (group 0) + QK_lo[n] (group 1) concurrently */
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
         {
-            const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
-            const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
+            const uint32_t pvl = (v_stage == 0) ? V0_lo : V1_lo;
+            const uint64_t dvl = make_wgmma_desc(pvl, STRIDE);
             wgmma_fence();
             #pragma unroll
             for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-                uint64_t dv_k = gmma_desc_advance(dv, ks * V_KS_ADVANCE);
-                wgmma_m64n128k16_f32_bf16_RS(O_acc, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
+                uint64_t dv_k = gmma_desc_advance(dvl, ks * V_KS_ADVANCE);
+                wgmma_m64n64k16_f32_bf16_RS(O_lo, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
             }
             wgmma_commit_group();
         }
@@ -716,8 +736,8 @@ void flash_attention_2wg(
         #pragma unroll
         for (int half=0;half<2;half++) {
             #pragma unroll
-            for (int p4=0;p4<8;p4++) { O_acc[(p4<<2)|(half<<1)|0]*=o_rescale[half]; O_acc[(p4<<2)|(half<<1)|1]*=o_rescale[half];
-                O_acc[32+(p4<<2)|(half<<1)|0]*=o_rescale[half]; O_acc[32+(p4<<2)|(half<<1)|1]*=o_rescale[half]; }}
+            for (int p4=0;p4<8;p4++) { O_lo[(p4<<2)|(half<<1)|0]*=o_rescale[half]; O_lo[(p4<<2)|(half<<1)|1]*=o_rescale[half];
+                O_hi[(p4<<2)|(half<<1)|0]*=o_rescale[half]; O_hi[(p4<<2)|(half<<1)|1]*=o_rescale[half]; }}
 
         if (kv_id+1<max_kv_iter) mbarrier_wait_parity(&K_full[k_stage],k_full_phase);
     }
@@ -728,19 +748,29 @@ void flash_attention_2wg(
     /* ---- EPILOGUE: PV[last] ---- */
     {
         mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
-        const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
-        const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
+        const uint32_t epvl = (v_stage == 0) ? V0_lo : V1_lo;
+        const uint32_t epvh = (v_stage == 0) ? V0_hi : V1_hi;
 
-        wgmma_fence();
-        #pragma unroll
-        for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
-            uint64_t dv_k = gmma_desc_advance(dv, ks * V_KS_ADVANCE);
-            wgmma_m64n128k16_f32_bf16_RS(O_acc,
-                P_packed[ks*4+0], P_packed[ks*4+1],
-                P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
+        /* PV_lo */
+        { const uint64_t dvl = make_wgmma_desc(epvl, STRIDE);
+          wgmma_fence();
+          #pragma unroll
+          for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+              uint64_t dv_k = gmma_desc_advance(dvl, ks * V_KS_ADVANCE);
+              wgmma_m64n64k16_f32_bf16_RS(O_lo, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
+          }
+          wgmma_commit_group(); wgmma_wait_group<0>();
         }
-        wgmma_commit_group();
-        wgmma_wait_group<0>();
+        /* PV_hi */
+        { const uint64_t dvh = make_wgmma_desc(epvh, STRIDE);
+          wgmma_fence();
+          #pragma unroll
+          for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
+              uint64_t dv_k = gmma_desc_advance(dvh, ks * V_KS_ADVANCE);
+              wgmma_m64n64k16_f32_bf16_RS(O_hi, P_packed[ks*4+0], P_packed[ks*4+1], P_packed[ks*4+2], P_packed[ks*4+3], dv_k, 1);
+          }
+          wgmma_commit_group(); wgmma_wait_group<0>();
+        }
 
         if (lane_id == 0 && mywarp == 0)
             mbarrier_arrive(&V_empty[v_stage]);
@@ -760,10 +790,10 @@ void flash_attention_2wg(
         float inv = fast_rcp(rowsumexp[half]);
         #pragma unroll
         for (int p4 = 0; p4 < 8; p4++) {
-            O_acc[(p4<<2)|(half<<1)|0] *= inv;
-            O_acc[(p4<<2)|(half<<1)|1] *= inv;
-            O_acc[32+(p4<<2)|(half<<1)|0] *= inv;
-            O_acc[32+(p4<<2)|(half<<1)|1] *= inv;
+            O_lo[(p4<<2)|(half<<1)|0] *= inv;
+            O_lo[(p4<<2)|(half<<1)|1] *= inv;
+            O_hi[(p4<<2)|(half<<1)|0] *= inv;
+            O_hi[(p4<<2)|(half<<1)|1] *= inv;
         }
     }
 
@@ -778,8 +808,8 @@ void flash_attention_2wg(
             const int idx0 = (p4 << 2) | (half << 1) | 0;
             const int idx1 = (p4 << 2) | (half << 1) | 1;
 
-            uint32_t lo_packed = pack_bf16(O_acc[idx0], O_acc[idx1]);
-            uint32_t hi_packed = pack_bf16(O_acc[32+idx0], O_acc[32+idx1]);
+            uint32_t lo_packed = pack_bf16(O_lo[idx0], O_lo[idx1]);
+            uint32_t hi_packed = pack_bf16(O_hi[idx0], O_hi[idx1]);
 
             uint32_t byte_off = full_row * 128 + col_base * 2;
             uint32_t swz = byte_off ^ (((byte_off >> 7) & 7) << 4);

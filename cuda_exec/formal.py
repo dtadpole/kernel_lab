@@ -467,6 +467,7 @@ def formal_benchmark(
         "impls_requested": [r["slug"] for r in resolved],
         "refs": [r["slug"] for r in refs],
         "gens": [r["slug"] for r in gens],
+        "source_paths": {r["slug"]: str(Path(r["entry_point"]).resolve()) for r in resolved},
         "results": results,
     }
 
@@ -561,6 +562,13 @@ def cli_main() -> None:
     table = format_results_table(result)
     if table:
         print(table, file=sys.stderr)
+
+    # Print source paths for each implementation
+    source_paths = result.get("source_paths", {})
+    if source_paths:
+        print("\nSource paths:", file=sys.stderr)
+        for slug, path in source_paths.items():
+            print(f"  {slug}: {path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

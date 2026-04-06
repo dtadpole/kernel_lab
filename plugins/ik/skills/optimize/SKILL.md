@@ -148,12 +148,17 @@ if not gen_path.exists():
         # ... LLM generates initial kernel code ...
 ```
 
-**No gems → no code.** A fresh run starts empty. `_ensure_gen_dir()` does NOT
-auto-seed. The optimizer is responsible for creating initial code (seed=init)
-or seeding from a gem within the same run (seed=auto|latest|vNNN).
+**No gems → write brand new code.** A fresh run starts empty. `_ensure_gen_dir()`
+does NOT auto-seed. When no gems exist in the current run, the optimizer MUST
+write a brand new kernel from scratch — never seed from worktrees, legacy
+directories, other runs, or any source outside the current run's gems.
 
 **No cross-run access.** Gems from other runs are never used. If the user wants
 to start from a previous run's gem, they must manually copy it.
+
+**No external seeding.** Never copy code from `.worktrees/`, `legacy/`,
+`data/generated/`, or other ad-hoc locations. The only valid seed sources are
+gems within the current run. Everything else must be written fresh.
 
 ## The Loop
 

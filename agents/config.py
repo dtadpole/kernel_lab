@@ -31,10 +31,10 @@ class MonitorConfig:
 
     @classmethod
     def for_solver(cls) -> MonitorConfig:
-        """Solver: long-running optimization, 15 min idle, 4 hour total."""
+        """Solver: long-running optimization, 30 min idle, 2h soft, 12h hard."""
         return cls(
-            idle_timeout=900, total_timeout=14400, hard_limit=21600,
-            check_interval=60, loop_threshold=5, progress_check_interval=900,
+            idle_timeout=1800, total_timeout=7200, hard_limit=43200,
+            check_interval=60, loop_threshold=5, progress_check_interval=300,
         )
 
     @classmethod

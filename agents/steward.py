@@ -97,34 +97,33 @@ class Steward:
 
     async def answer_question(
         self,
+        transcript_path: str,
         question: str,
-        solver_context: str,
-        task: str,
-        session_summary: str,
+        solver_context: str = "",
     ) -> str:
         """Solver asks for guidance. Returns free-text answer (intervention_level=1)."""
+        full_question = question
+        if solver_context:
+            full_question = f"{question}\n\nContext: {solver_context}"
+
         return await self.router.respond_raw("ask_question", {
-            "task_description": task,
-            "session_summary": session_summary,
-            "question": question,
-            "solver_context": solver_context,
+            "transcript_path": transcript_path,
+            "question": full_question,
         })
 
     # ── Scenario 2: Permission check ──
 
     async def check_permission(
         self,
+        transcript_path: str,
         tool_name: str,
         tool_input: dict,
-        task: str,
-        recent_tool_calls: str,
     ) -> StewardResponse:
         """Review a restricted tool call. Returns ALLOW/DENY (intervention_level=1)."""
         verdict = await self.router.respond("permission", {
+            "transcript_path": transcript_path,
             "tool_name": tool_name,
             "tool_input": str(tool_input),
-            "task_description": task,
-            "recent_tool_calls": recent_tool_calls,
         })
         return _to_steward_response(verdict)
 
@@ -132,20 +131,16 @@ class Steward:
 
     async def handle_stuck(
         self,
+        transcript_path: str,
         alert_type: str,
         alert_details: str,
-        task: str,
-        recent_events: str,
-        tool_call_counts: str,
         elapsed_time: str,
     ) -> StewardResponse:
         """Solver stalled. Returns CONTINUE/INJECT/INTERRUPT (intervention_level=1/2/4)."""
         verdict = await self.router.respond("stuck", {
+            "transcript_path": transcript_path,
             "alert_type": alert_type,
             "alert_details": alert_details,
-            "task_description": task,
-            "recent_events": recent_events,
-            "tool_call_counts": tool_call_counts,
             "elapsed_time": elapsed_time,
         })
         return _to_steward_response(verdict)
@@ -154,23 +149,21 @@ class Steward:
 
     async def review_session_end(
         self,
+        transcript_path: str,
         result_text: str,
         stop_reason: str,
-        task: str,
         elapsed_time: str,
         total_tool_calls: int,
         error_count: int,
-        session_summary: str,
     ) -> StewardResponse:
         """Review whether Solver truly finished. Returns ACCEPT/REJECT/RETRY (intervention_level=1/3)."""
         verdict = await self.router.respond("session_end", {
-            "task_description": task,
+            "transcript_path": transcript_path,
             "result_text": result_text,
             "stop_reason": stop_reason,
             "elapsed_time": elapsed_time,
             "total_tool_calls": str(total_tool_calls),
             "error_count": str(error_count),
-            "session_summary": session_summary,
         })
         return _to_steward_response(verdict)
 
@@ -178,19 +171,15 @@ class Steward:
 
     async def handle_time_limit(
         self,
+        transcript_path: str,
         elapsed_time: str,
         time_limit: str,
-        task: str,
-        recent_progress: str,
-        tool_call_trend: str,
     ) -> StewardResponse:
         """Solver exceeded time budget. Returns EXTEND/WRAP_UP/KILL (intervention_level=1/2/4)."""
         verdict = await self.router.respond("time_limit", {
+            "transcript_path": transcript_path,
             "elapsed_time": elapsed_time,
             "time_limit": time_limit,
-            "task_description": task,
-            "recent_progress": recent_progress,
-            "tool_call_trend": tool_call_trend,
         })
         return _to_steward_response(verdict)
 
@@ -198,18 +187,12 @@ class Steward:
 
     async def check_progress(
         self,
-        task: str,
-        session_summary: str,
+        transcript_path: str,
         elapsed_time: str,
-        recent_events: str,
-        tool_call_counts: str,
     ) -> StewardResponse:
         """Periodic progress assessment. Returns ON_TRACK/DRIFTING/REDIRECT (intervention_level=1/2)."""
         verdict = await self.router.respond("progress_check", {
-            "task_description": task,
-            "session_summary": session_summary,
+            "transcript_path": transcript_path,
             "elapsed_time": elapsed_time,
-            "recent_events": recent_events,
-            "tool_call_counts": tool_call_counts,
         })
         return _to_steward_response(verdict)

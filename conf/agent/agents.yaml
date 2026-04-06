@@ -9,9 +9,9 @@ defaults:
   max_budget_usd: 5.0
 
 monitor:
-  idle_timeout: 900            # 15 min — triggers Steward progress check
-  total_timeout: 14400         # 4 hours — triggers Steward time_limit review
-  hard_limit: 21600            # 6 hours — unconditional kill
+  idle_timeout: 1800           # 30 min — triggers Steward stuck check
+  total_timeout: 7200          # 2 hours — triggers Steward time_limit review
+  hard_limit: 43200            # 12 hours — unconditional kill (6x time_limit)
   check_interval: 60           # check every 1 min
   loop_threshold: 5            # same tool 5x in a row
   progress_check_interval: 900 # 15 min — periodic progress check

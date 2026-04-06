@@ -78,24 +78,21 @@ def test_router_loads_prompts():
 def test_router_build_context():
     router = ResponseRouter(prompts_dir="conf/agent/response_prompts")
     ctx = router.build_context("ask_question", {
-        "task_description": "Optimize matmul kernel",
-        "session_summary": "3 tool calls, 1 error",
+        "transcript_path": "/tmp/test/transcript.md",
         "question": "Should I use WGMMA or HMMA?",
-        "solver_context": "Targeting SM90",
     })
-    assert "Optimize matmul" in ctx
+    assert "transcript.md" in ctx
     assert "WGMMA or HMMA" in ctx
-    assert "SM90" in ctx
 
 
 @pytest.mark.quick
 def test_router_build_context_missing_vars():
     router = ResponseRouter(prompts_dir="conf/agent/response_prompts")
     ctx = router.build_context("session_end", {
-        "task_description": "Test task",
+        "transcript_path": "/tmp/test/transcript.md",
         # Missing most variables
     })
-    assert "Test task" in ctx
+    assert "transcript.md" in ctx
     assert "(not available)" in ctx  # missing vars get placeholder
 
 
@@ -259,9 +256,9 @@ def test_steward_has_all_scenarios():
 @pytest.mark.quick
 def test_monitor_config_for_solver():
     mc = MonitorConfig.for_solver()
-    assert mc.idle_timeout == 900       # 15 min
-    assert mc.total_timeout == 14400    # 4 hours
-    assert mc.hard_limit == 21600       # 6 hours
+    assert mc.idle_timeout == 1800      # 30 min
+    assert mc.total_timeout == 7200     # 2 hours
+    assert mc.hard_limit == 43200       # 12 hours
 
 
 @pytest.mark.quick

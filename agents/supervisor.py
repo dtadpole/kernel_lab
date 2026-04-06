@@ -95,7 +95,128 @@ class Supervisor(DefaultHandler):
         self._current_log: SessionLog | None = None
         self._pending_stop_event: StopEvent | None = None
 
-    # ── Main entry point ──
+    # ── Continuous loop ──
+
+    async def run_continuous(
+        self,
+        task: str,
+        kernel: str = "matmul",
+    ) -> None:
+        """Run Solver sessions in an infinite loop until manually stopped.
+
+        Each session is a fresh Solver with a new run_tag, picking up from
+        the current state of data/gen/. Sessions accumulate experience —
+        each new Solver gets a summary of what previous sessions tried.
+        """
+        session_number = 0
+        session_history: list[dict] = []
+
+        print(f"\n{'='*60}")
+        print(f"[Supervisor] CONTINUOUS MODE — will run indefinitely")
+        print(f"[Supervisor] Kernel: {kernel}")
+        print(f"[Supervisor] Kill with Ctrl+C or hard_limit to stop")
+        print(f"{'='*60}\n")
+
+        while True:
+            session_number += 1
+            now = datetime.now()
+            run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
+
+            # Build prompt with history from previous sessions
+            session_prompt = self._build_continuous_prompt(
+                task, kernel, session_number, session_history,
+            )
+
+            print(f"\n{'='*60}")
+            print(f"[Supervisor] Session {session_number} starting")
+            print(f"[Supervisor] Run tag: {run_tag}")
+            if session_history:
+                last = session_history[-1]
+                print(f"[Supervisor] Previous session: {last.get('verdict', '?')} "
+                      f"— {last.get('summary', '')[:100]}")
+            print(f"{'='*60}\n")
+
+            try:
+                result = await self.run_task(
+                    task=session_prompt,
+                    kernel=kernel,
+                    run_tag=run_tag,
+                )
+
+                # Record session result
+                session_record = {
+                    "session": session_number,
+                    "run_tag": run_tag,
+                    "success": result.success,
+                    "verdict": result.verdict_history[-1]["action"] if result.verdict_history else "?",
+                    "iterations": result.iterations,
+                    "elapsed": f"{result.elapsed_seconds:.0f}s",
+                    "benchmarks": len(result.bench_results),
+                    "improved": any(b["improved"] for b in result.bench_results),
+                    "summary": result.result_text[:300],
+                }
+                session_history.append(session_record)
+
+                print(f"\n[Supervisor] Session {session_number} ended: "
+                      f"verdict={session_record['verdict']}, "
+                      f"improved={session_record['improved']}, "
+                      f"elapsed={session_record['elapsed']}")
+
+                # Save session history to journal
+                self._save_continuous_log(kernel, session_history)
+
+            except KeyboardInterrupt:
+                print(f"\n[Supervisor] Interrupted by user after {session_number} sessions")
+                break
+            except Exception as e:
+                print(f"\n[Supervisor] Session {session_number} error: {e}")
+                session_history.append({
+                    "session": session_number,
+                    "run_tag": run_tag,
+                    "success": False,
+                    "verdict": "ERROR",
+                    "summary": str(e)[:300],
+                })
+                # Continue to next session despite error
+
+    def _build_continuous_prompt(
+        self, task: str, kernel: str,
+        session_number: int, history: list[dict],
+    ) -> str:
+        """Build prompt for a new session, including history from previous sessions."""
+        parts = [task]
+
+        if history:
+            parts.append("\n---\n")
+            parts.append(f"## Previous Sessions ({len(history)} completed)\n")
+            # Show last 5 sessions in detail, earlier ones summarized
+            recent = history[-5:]
+            for h in recent:
+                improved = "✓ IMPROVED" if h.get("improved") else "✗ no improvement"
+                parts.append(
+                    f"- Session {h['session']} ({h['elapsed']}): "
+                    f"verdict={h['verdict']}, {improved}\n"
+                    f"  {h.get('summary', '')[:200]}\n"
+                )
+            parts.append(
+                "\nBuild on what previous sessions learned. "
+                "Do NOT repeat approaches that already failed. "
+                "Try something fundamentally different if prior approaches "
+                "did not produce improvement.\n"
+            )
+
+        return "\n".join(parts)
+
+    def _save_continuous_log(self, kernel: str, history: list[dict]) -> None:
+        """Save the continuous session history to a log file."""
+        import json
+        log_path = self.config.storage.journal_path / f"continuous_{kernel}.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w") as f:
+            for h in history:
+                f.write(json.dumps(h, default=str) + "\n")
+
+    # ── Single task ──
 
     async def run_task(
         self,
@@ -169,13 +290,12 @@ class Supervisor(DefaultHandler):
             if stop_event:
                 print(f"[Supervisor] Reviewing session end (stop_reason={stop_event.reason})")
                 verdict = await self.steward.review_session_end(
+                    transcript_path=self._get_transcript_path(),
                     result_text=stop_event.result_text or last_result.result_text,
                     stop_reason=stop_event.reason,
-                    task=self.state.task,
                     elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
                     total_tool_calls=self.state.turns_completed,
                     error_count=self.state.error_count,
-                    session_summary=self._get_session_summary(),
                 )
             else:
                 verdict = None
@@ -327,10 +447,9 @@ explore an alternative optimization strategy."""
 
         # ── Regular question → Steward ──
         return await self.steward.answer_question(
+            transcript_path=self._get_transcript_path(),
             question=event.question,
             solver_context=event.context,
-            task=self.state.task,
-            session_summary=self._get_session_summary(),
         )
 
     async def _handle_bench_request(self, event: AskEvent) -> str:
@@ -375,10 +494,9 @@ and call request_formal_bench when ready."""
 
     async def on_permission(self, event: PermissionEvent) -> bool:
         response = await self.steward.check_permission(
+            transcript_path=self._get_transcript_path(),
             tool_name=event.tool_name,
             tool_input=event.tool_input,
-            task=self.state.task,
-            recent_tool_calls=self._get_recent_tool_calls(),
         )
         return response.action == "ALLOW"
 
@@ -398,40 +516,36 @@ and call request_formal_bench when ready."""
         if event.alert_type == "hard_limit":
             return "interrupt"
 
+        tp = self._get_transcript_path()
+        elapsed = str(log.elapsed()) if log else "unknown"
+
         if event.alert_type == "total_timeout":
             response = await self.steward.handle_time_limit(
-                elapsed_time=str(log.elapsed()) if log else "unknown",
+                transcript_path=tp,
+                elapsed_time=elapsed,
                 time_limit=str(self.config.monitor.total_timeout),
-                task=self.state.task,
-                recent_progress=self._get_recent_events(),
-                tool_call_trend=self._get_tool_call_trend(),
             )
         elif event.alert_type in ("idle_timeout", "loop_detected"):
             self.state.consecutive_stuck += 1
 
             if self.state.consecutive_stuck >= 3:
-                # 3 consecutive stuck checks (45 min) → force new guidance
-                print(f"[Supervisor] 3 consecutive stuck alerts — forcing Steward guidance")
+                # 3 × 10 min = 30 min no progress → force interrupt + new guidance
+                print(f"[Supervisor] 3 consecutive stuck alerts (30 min) — forcing interrupt")
                 response = await self.steward.handle_stuck(
+                    transcript_path=tp,
                     alert_type=event.alert_type,
                     alert_details=f"{event.details} (consecutive_stuck={self.state.consecutive_stuck})",
-                    task=self.state.task,
-                    recent_events=self._get_recent_events(),
-                    tool_call_counts=str(log.tool_call_counts()) if log else "{}",
-                    elapsed_time=str(log.elapsed()) if log else "unknown",
+                    elapsed_time=elapsed,
                 )
                 self.state.consecutive_stuck = 0
-                # Force inject even if Steward says CONTINUE
                 if response.action == "CONTINUE":
-                    return "inject:You have been stuck for 45 minutes. Please try a completely different optimization approach."
+                    return "interrupt"
             else:
                 response = await self.steward.handle_stuck(
+                    transcript_path=tp,
                     alert_type=event.alert_type,
                     alert_details=event.details,
-                    task=self.state.task,
-                    recent_events=self._get_recent_events(),
-                    tool_call_counts=str(log.tool_call_counts()) if log else "{}",
-                    elapsed_time=str(log.elapsed()) if log else "unknown",
+                    elapsed_time=elapsed,
                 )
         else:
             return "continue"
@@ -470,43 +584,8 @@ and call request_formal_bench when ready."""
 
     # ── Context helpers ──
 
-    def _get_session_summary(self) -> str:
-        log = self._current_log or (self._solver_runner.log if self._solver_runner else None)
-        return log.to_summary() if log else "(no session data)"
-
-    def _get_recent_tool_calls(self) -> str:
-        log = self._current_log or (self._solver_runner.log if self._solver_runner else None)
-        if not log:
-            return "(no data)"
-        lines = []
-        for e in log.recent(10):
-            if isinstance(e, ToolCallEvent):
-                inp = str(e.tool_input)[:100]
-                lines.append(f"- {e.tool_name}: {inp}")
-        return "\n".join(lines) or "(no recent tool calls)"
-
-    def _get_recent_events(self) -> str:
-        log = self._current_log or (self._solver_runner.log if self._solver_runner else None)
-        if not log:
-            return "(no data)"
-        lines = []
-        for e in log.recent(10):
-            ts = e.timestamp.strftime("%H:%M:%S")
-            name = type(e).__name__
-            if isinstance(e, ToolCallEvent):
-                lines.append(f"[{ts}] {name}: {e.tool_name}")
-            elif isinstance(e, ToolResultEvent):
-                status = "ERR" if e.is_error else "OK"
-                lines.append(f"[{ts}] {name}: {e.tool_name} [{status}]")
-            elif isinstance(e, TextOutputEvent):
-                lines.append(f"[{ts}] {name}: {e.text[:80]}")
-            else:
-                lines.append(f"[{ts}] {name}")
-        return "\n".join(lines) or "(no events)"
-
-    def _get_tool_call_trend(self) -> str:
-        log = self._current_log or (self._solver_runner.log if self._solver_runner else None)
-        if not log:
-            return "(no data)"
-        seq = log.recent_tool_sequence(20)
-        return " → ".join(seq) if seq else "(no tool calls)"
+    def _get_transcript_path(self) -> str:
+        """Return the path to the current Solver's transcript.md."""
+        if self._solver_runner and self._solver_runner._storage:
+            return str(self._solver_runner._storage.transcript_path)
+        return "(no transcript available)"

@@ -110,13 +110,13 @@ class SessionLog:
             self._storage.append_transcript(f"\n### Session started ({ts})\n")
         elif isinstance(event, ToolCallEvent):
             inp = str(event.tool_input)
-            if len(inp) > 200:
-                inp = inp[:200] + "..."
+            if len(inp) > 500:
+                inp = inp[:500] + "..."
             self._storage.append_transcript(f"**[{ts}] Tool: {event.tool_name}**")
             self._storage.append_transcript(f"> {inp}\n")
         elif isinstance(event, ToolResultEvent):
             status = "ERROR" if event.is_error else "OK"
-            self._storage.append_transcript(f"**[{ts}] Result ({status}):** {event.result_summary[:200]}\n")
+            self._storage.append_transcript(f"**[{ts}] Result ({status}):** {event.result_summary[:500]}\n")
         elif isinstance(event, TextOutputEvent):
             self._storage.append_transcript(f"**[{ts}] Agent:**")
             self._storage.append_transcript(f"> {event.text[:500]}\n")

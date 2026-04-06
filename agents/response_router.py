@@ -17,72 +17,60 @@ from agents.config import AgentConfig, MonitorConfig, StorageConfig
 # ── Context templates per scenario ──
 # Each template defines what variables are injected into the user prompt.
 
+# Per-scenario max_turns (how deep each scenario can go with tool calls)
+SCENARIO_MAX_TURNS: dict[str, int] = {
+    "permission": 5,
+    "progress_check": 10,
+    "ask_question": 20,
+    "time_limit": 20,
+    "session_end": 20,
+    "stuck": 20,
+}
+
 CONTEXT_TEMPLATES: dict[str, str] = {
-    "ask_question": """## Current Task
-{task_description}
+    "ask_question": """## Trajectory
+Read the full trajectory at: {transcript_path}
 
-## Session Summary
-{session_summary}
+## Question
+{question}""",
 
-## Solver's Question
-{question}
+    "permission": """## Trajectory
+Read the full trajectory at: {transcript_path}
 
-## Solver's Context
-{solver_context}""",
-
-    "permission": """## Requested Operation
+## Permission Request
 Tool: {tool_name}
-Input: {tool_input}
+Input: {tool_input}""",
 
-## Current Task
-{task_description}
+    "stuck": """## Trajectory
+Read the full trajectory at: {transcript_path}
 
-## Recent Operations
-{recent_tool_calls}""",
-
-    "stuck": """## Alert
+## Alert
 {alert_type}: {alert_details}
+Elapsed: {elapsed_time}""",
 
-## Current Task
-{task_description}
+    "session_end": """## Trajectory
+Read the full trajectory at: {transcript_path}
 
-## Recent 10 Events
-{recent_events}
-
-## Tool Call Statistics
-{tool_call_counts}
-
-## Elapsed Time
-{elapsed_time}""",
-
-    "session_end": """## Original Task
-{task_description}
+## Session Ended
+Stop reason: {stop_reason}
+Elapsed: {elapsed_time}
+Tool calls: {total_tool_calls}
+Errors: {error_count}
 
 ## Solver's Final Output
-{result_text}
+{result_text}""",
 
-## Stop Reason
-{stop_reason}
+    "time_limit": """## Trajectory
+Read the full trajectory at: {transcript_path}
 
-## Session Statistics
-- Elapsed: {elapsed_time}
-- Tool calls: {total_tool_calls}
-- Errors: {error_count}
+## Time Limit
+Elapsed: {elapsed_time} (limit: {time_limit})""",
 
-## Operation Summary
-{session_summary}""",
+    "progress_check": """## Trajectory
+Read the full trajectory at: {transcript_path}
 
-    "time_limit": """## Elapsed Time
-{elapsed_time} (limit: {time_limit})
-
-## Current Task
-{task_description}
-
-## Recent Progress
-{recent_progress}
-
-## Tool Call Trend
-{tool_call_trend}""",
+## Progress Check
+Elapsed: {elapsed_time}""",
 }
 
 
@@ -93,7 +81,7 @@ class ResponseScenario:
     system_prompt: str
     context_template: str
     tools: list[str] = field(default_factory=list)
-    max_turns: int = 3  # enough for tool calls + verdict output
+    max_turns: int = 10  # enough for reading trajectory + tool calls + verdict
     model: str = "claude-sonnet-4-6"
 
 
@@ -140,26 +128,45 @@ class ResponseRouter:
         prompts_dir: str | Path,
         model: str = "claude-sonnet-4-6",
         storage_config: StorageConfig | None = None,
+        base_prompt_path: str | Path = "conf/agent/prompts/steward.md",
     ):
         self.model = model
         self.storage_config = storage_config or StorageConfig()
         self.scenarios: dict[str, ResponseScenario] = {}
+        self._base_prompt = self._load_base_prompt(Path(base_prompt_path))
         self._load_prompts(Path(prompts_dir))
 
+    @staticmethod
+    def _load_base_prompt(path: Path) -> str:
+        """Load the shared Steward base system prompt."""
+        if path.exists():
+            return path.read_text().strip()
+        return ""
+
     def _load_prompts(self, prompts_dir: Path) -> None:
-        """Load all .md files from prompts_dir as scenarios."""
+        """Load all .md files from prompts_dir as scenarios.
+
+        Each scenario's system prompt = base Steward prompt + scenario-specific prompt.
+        """
         if not prompts_dir.exists():
             return
 
         for md_file in sorted(prompts_dir.glob("*.md")):
             name = md_file.stem  # e.g., "ask_question"
-            system_prompt = md_file.read_text().strip()
+            scenario_prompt = md_file.read_text().strip()
             context_template = CONTEXT_TEMPLATES.get(name, "{context}")
+
+            # Combine: base identity + scenario-specific instructions
+            if self._base_prompt:
+                system_prompt = f"{self._base_prompt}\n\n---\n\n## Current Scenario: {name}\n\n{scenario_prompt}"
+            else:
+                system_prompt = scenario_prompt
 
             self.scenarios[name] = ResponseScenario(
                 name=name,
                 system_prompt=system_prompt,
                 context_template=context_template,
+                max_turns=SCENARIO_MAX_TURNS.get(name, 10),
                 model=self.model,
             )
 
@@ -220,8 +227,10 @@ class ResponseRouter:
         import asyncio
         from agents.runner import AgentRunner  # deferred to avoid circular import
 
-        # Steward gets Read for context lookup, acceptEdits to avoid permission prompts
-        steward_tools = config.tools if config.tools else ["Read", "Grep"]
+        # Steward gets read-only tools + web research + doc_retrieval via Bash
+        steward_tools = config.tools if config.tools else [
+            "Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch",
+        ]
         agent_config = AgentConfig(
             name=f"steward_{config.name}",
             model=config.model,

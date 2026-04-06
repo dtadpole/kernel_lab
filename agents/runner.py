@@ -107,8 +107,8 @@ class AgentRunner:
         self.log = SessionLog(self._storage)
 
         # Init transcript with full prompt and system prompt
-        self._storage.init_transcript(self.agent_config.name, prompt[:200])
-        self._storage.append_transcript(f"### System Prompt\n```\n{self.agent_config.system_prompt[:2000]}\n```\n")
+        self._storage.init_transcript(self.agent_config.name, prompt)
+        self._storage.append_transcript(f"### System Prompt\n```\n{self.agent_config.system_prompt}\n```\n")
         self._storage.append_transcript(f"### User Prompt\n```\n{prompt}\n```\n")
 
         # Log prompt as first event
@@ -213,8 +213,8 @@ class AgentRunner:
             tool_response = input_data.get("tool_response", "")
 
             summary = str(tool_response)
-            if len(summary) > 200:
-                summary = summary[:200] + "..."
+            if len(summary) > 500:
+                summary = summary[:500] + "..."
 
             event = ToolResultEvent(
                 tool_name=tool_name,
@@ -233,7 +233,7 @@ class AgentRunner:
             event = ToolResultEvent(
                 tool_name=tool_name,
                 tool_use_id=tool_use_id or "",
-                result_summary=str(error)[:200],
+                result_summary=str(error)[:500],
                 is_error=True,
             )
             if log:

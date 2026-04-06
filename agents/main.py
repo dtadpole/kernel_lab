@@ -1,9 +1,12 @@
 """Entry point for running the Supervisor → Solver → Benchmarker loop.
 
 Usage:
+    # Continuous mode (default) — runs forever, spawning new Solvers
     cd /home/zhenc/kernel_lab
-    .venv/bin/python -m agents.main --kernel matmul --task "Optimize the matmul kernel for SM90"
-    .venv/bin/python -m agents.main --kernel matmul  # uses default task
+    .venv/bin/python -m agents.main --kernel matmul
+
+    # Single session mode
+    .venv/bin/python -m agents.main --kernel matmul --single
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ DEFAULT_TASKS = {
 
 def print_result(result: TaskResult) -> None:
     print(f"\n{'='*60}")
-    print(f"  SUPERVISOR RESULT")
+    print(f"  SESSION RESULT")
     print(f"{'='*60}")
     print(f"  Success:    {result.success}")
     print(f"  Iterations: {result.iterations}")
@@ -56,7 +59,8 @@ def print_result(result: TaskResult) -> None:
     print(f"{'='*60}\n")
 
 
-async def run(args: argparse.Namespace) -> TaskResult:
+async def run_continuous(args: argparse.Namespace) -> None:
+    """Continuous mode — run Solver sessions forever."""
     config = SystemConfig.from_yaml(args.config)
 
     supervisor = Supervisor(
@@ -67,10 +71,29 @@ async def run(args: argparse.Namespace) -> TaskResult:
 
     task = args.task or DEFAULT_TASKS.get(args.kernel, DEFAULT_TASKS["matmul"])
 
-    print(f"[Main] Starting Supervisor")
+    print(f"[Main] Starting Supervisor — CONTINUOUS MODE")
     print(f"[Main] Kernel: {args.kernel}")
     print(f"[Main] Task: {task[:100]}...")
-    print(f"[Main] Max iterations: {args.max_iterations}")
+    print(f"[Main] Config: {args.config}")
+
+    await supervisor.run_continuous(task=task, kernel=args.kernel)
+
+
+async def run_single(args: argparse.Namespace) -> TaskResult:
+    """Single session mode — run one Solver session."""
+    config = SystemConfig.from_yaml(args.config)
+
+    supervisor = Supervisor(
+        config=config,
+        max_iterations=args.max_iterations,
+        response_prompts_dir=args.prompts_dir,
+    )
+
+    task = args.task or DEFAULT_TASKS.get(args.kernel, DEFAULT_TASKS["matmul"])
+
+    print(f"[Main] Starting Supervisor — SINGLE SESSION")
+    print(f"[Main] Kernel: {args.kernel}")
+    print(f"[Main] Task: {task[:100]}...")
     print(f"[Main] Config: {args.config}")
 
     result = await supervisor.run_task(
@@ -110,13 +133,18 @@ def main():
     parser.add_argument("--prompts-dir", default="conf/agent/response_prompts",
                         help="Steward prompts directory")
     parser.add_argument("--max-iterations", type=int, default=0,
-                        help="Max solve iterations (0 = unlimited, run until ACCEPT or hard_limit)")
+                        help="Max iterations per session (0 = unlimited)")
     parser.add_argument("--run-tag", default=None,
-                        help="Custom run_tag (default: auto-generated)")
+                        help="Custom run_tag (single mode only)")
+    parser.add_argument("--single", action="store_true",
+                        help="Run a single session instead of continuous mode")
     args = parser.parse_args()
 
-    result = asyncio.run(run(args))
-    sys.exit(0 if result.success else 1)
+    if args.single:
+        result = asyncio.run(run_single(args))
+        sys.exit(0 if result.success else 1)
+    else:
+        asyncio.run(run_continuous(args))
 
 
 if __name__ == "__main__":

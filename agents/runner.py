@@ -171,6 +171,7 @@ class AgentRunner:
             max_turns=ac.max_turns,
             model=ac.model,
             hooks=self._build_hooks(),
+            env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000"},
         )
 
         if ac.max_budget_usd > 0:

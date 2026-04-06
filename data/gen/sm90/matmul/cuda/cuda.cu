@@ -26,7 +26,7 @@
 #define WG_SIZE     128
 #define NUM_WG      3
 #define THREADS     (NUM_WG * WG_SIZE)   /* 384 */
-#define STAGES      5
+#define STAGES      6
 
 #define A_BYTES       (TILE_M * TILE_K * 2)       /* 16384 */
 #define B_HALF_BYTES  (TILE_N_HALF * TILE_K * 2)  /* 8192 */
@@ -241,7 +241,7 @@ matmul_wgmma_tma(
          * wait mbar_empty → issue TMA → mbar_full auto-completes via TX.
          * Only thread 0 issues TMA; other producer threads idle.
          * ============================================================= */
-        asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n");
+        asm volatile("setmaxnreg.dec.sync.aligned.u32 24;\n");
 
         if (tid == 0) {
             int prefill = (numK < STAGES) ? numK : STAGES;
@@ -272,7 +272,7 @@ matmul_wgmma_tma(
          * Each consumer: wait mbar_full → WGMMA × 4 k-substeps on its
          * M-half (left + right N-halves) → signal mbar_empty for prev stage.
          * ============================================================= */
-        asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n");
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 240;\n");
 
         int consumer_id = wg_id - 1;  /* 0 or 1 */
         int local_tid = tid - wg_id * WG_SIZE;

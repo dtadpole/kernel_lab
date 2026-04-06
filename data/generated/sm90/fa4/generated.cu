@@ -562,6 +562,18 @@ void flash_attention_2wg(
             lsum_hi += __shfl_xor_sync(0xFFFFFFFF, lsum_hi, 1);
             lsum_hi += __shfl_xor_sync(0xFFFFFFFF, lsum_hi, 2);
             rowsumexp[half] = partial_sum[half] * rescale_lo + lsum_hi;
+            /* Rescale P_lo by rescale_lo (was missing in prologue!) */
+            #pragma unroll
+            for (int ks = 0; ks < 4; ks++) {
+                int idx0 = ks*4 + (half ? 1 : 0);
+                int idx1 = ks*4 + (half ? 3 : 2);
+                nv_bfloat162 v0 = reinterpret_cast<nv_bfloat162&>(P_packed[idx0]);
+                float2 f0 = __bfloat1622float2(v0); f0.x *= rescale_lo; f0.y *= rescale_lo;
+                nv_bfloat162 p0 = __float22bfloat162_rn(f0); P_packed[idx0] = reinterpret_cast<uint32_t&>(p0);
+                nv_bfloat162 v1 = reinterpret_cast<nv_bfloat162&>(P_packed[idx1]);
+                float2 f1 = __bfloat1622float2(v1); f1.x *= rescale_lo; f1.y *= rescale_lo;
+                nv_bfloat162 p1 = __float22bfloat162_rn(f1); P_packed[idx1] = reinterpret_cast<uint32_t&>(p1);
+            }
             #pragma unroll
             for (int p4 = 0; p4 < 8; p4++) { S_hi[(p4<<2)|(half<<1)] = rv[p4*2]; S_hi[(p4<<2)|(half<<1)|1] = rv[p4*2+1]; }
         }

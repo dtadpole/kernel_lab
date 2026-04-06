@@ -35,20 +35,35 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
 
 def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
                      kb_repo: Path | None = None) -> Path | None:
-    """Find the latest gem's gen code across all KB runs."""
+    """Find the latest gem's gen code across all KB runs.
+
+    Searches new structure (runs/run_*/gems/) first, then old
+    structure (ik_bench/gems/) for backward compatibility.
+    """
     repo = kb_repo or _KB_REPO
+
+    # New structure: runs/run_*/gems/<slug>/v*/gen/<arch>/<kernel>
     runs_dir = repo / "runs"
-    if not runs_dir.exists():
-        return None
-    for run_dir in sorted(runs_dir.glob("run_*"), reverse=True):
-        gem_base = run_dir / "gems" / f"gen-{impl_name}"
-        if not gem_base.exists():
-            continue
-        versions = sorted(gem_base.glob("v*"), reverse=True)
+    if runs_dir.exists():
+        for run_dir in sorted(runs_dir.glob("run_*"), reverse=True):
+            gem_base = run_dir / "gems" / f"gen-{impl_name}"
+            if not gem_base.exists():
+                continue
+            versions = sorted(gem_base.glob("v*"), reverse=True)
+            for ver in versions:
+                candidate = ver / "gen" / arch / kernel
+                if candidate.exists():
+                    return candidate
+
+    # Old structure: ik_bench/gems/<kernel>/<arch>/<slug>/v*/data/gen/<arch>/<kernel>
+    old_gems = repo / "ik_bench" / "gems" / kernel / arch / f"gen-{impl_name}"
+    if old_gems.exists():
+        versions = sorted(old_gems.glob("v*"), reverse=True)
         for ver in versions:
-            candidate = ver / "gen" / arch / kernel
+            candidate = ver / "data" / "gen" / arch / kernel
             if candidate.exists():
                 return candidate
+
     return None
 
 
@@ -93,6 +108,18 @@ def _ensure_gen_dir(kernel: str, arch: str, *,
     gem_src = _find_latest_gem(kernel, arch, kb_repo=repo)
     if gem_src:
         shutil.copytree(gem_src, gen_path)
+        # Fix flat structure from old gems: if cuda.cu is at top level,
+        # move into cuda/ subdirectory for list_impls compatibility
+        for cu_file in list(gen_path.glob("*.cu")):
+            stem = cu_file.stem  # e.g. "cuda"
+            subdir = gen_path / stem
+            if not subdir.exists():
+                subdir.mkdir()
+            (subdir / cu_file.name).replace(cu_file)
+            # Also move companion files (.baseline, .md, etc.)
+            for companion in gen_path.glob(f"{stem}.*"):
+                if companion.is_file():
+                    (subdir / companion.name).replace(companion)
         return gen_path
 
     # Nothing to seed from — return empty dir

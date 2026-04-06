@@ -109,8 +109,8 @@ def main():
                         help="Config file path")
     parser.add_argument("--prompts-dir", default="conf/agent/response_prompts",
                         help="Steward prompts directory")
-    parser.add_argument("--max-iterations", type=int, default=10,
-                        help="Max solve iterations (default: 10)")
+    parser.add_argument("--max-iterations", type=int, default=0,
+                        help="Max solve iterations (0 = unlimited, run until ACCEPT or hard_limit)")
     parser.add_argument("--run-tag", default=None,
                         help="Custom run_tag (default: auto-generated)")
     args = parser.parse_args()

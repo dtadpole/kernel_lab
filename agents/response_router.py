@@ -93,7 +93,7 @@ class ResponseScenario:
     system_prompt: str
     context_template: str
     tools: list[str] = field(default_factory=list)
-    max_turns: int = 1
+    max_turns: int = 3  # enough for tool calls + verdict output
     model: str = "claude-sonnet-4-6"
 
 

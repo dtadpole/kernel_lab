@@ -77,7 +77,7 @@ class Supervisor(DefaultHandler):
     def __init__(
         self,
         config: SystemConfig,
-        max_iterations: int = 10,
+        max_iterations: int = 0,  # 0 = unlimited (run until ACCEPT or hard_limit)
         response_prompts_dir: str | Path = "conf/agent/response_prompts",
     ):
         self.config = config
@@ -130,7 +130,10 @@ class Supervisor(DefaultHandler):
 
         solver_prompt = self._build_initial_prompt(task, run_tag, kernel)
 
-        for iteration in range(self.max_iterations):
+        iteration = 0
+        while True:  # run until ACCEPT or hard_limit
+            if self.max_iterations > 0 and iteration >= self.max_iterations:
+                break
             self.state.iteration = iteration
             self.state.turns_completed = 0
             self.state.error_count = 0
@@ -203,8 +206,12 @@ class Supervisor(DefaultHandler):
                     task, run_tag, kernel, verdict, iteration,
                 )
             else:
-                self.state.phase = "done"
-                break
+                # Unknown verdict — keep going (don't silently stop)
+                solver_prompt = self._build_retry_prompt(
+                    task, run_tag, kernel, verdict, iteration,
+                )
+
+            iteration += 1
 
         elapsed = (datetime.now() - self.state.started_at).total_seconds() if self.state.started_at else 0
 

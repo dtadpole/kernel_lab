@@ -490,6 +490,16 @@ void flash_attention_2wg(
         }
         wgmma_commit_group(); wgmma_wait_group<0>();
 
+        /* Pack P_lo immediately → S_lo can die before QK_hi */
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            P_packed[ks*4+0] = pack_bf16(S_lo[ks*8+0], S_lo[ks*8+1]);
+            P_packed[ks*4+1] = pack_bf16(S_lo[ks*8+2], S_lo[ks*8+3]);
+            P_packed[ks*4+2] = pack_bf16(S_lo[ks*8+4], S_lo[ks*8+5]);
+            P_packed[ks*4+3] = pack_bf16(S_lo[ks*8+6], S_lo[ks*8+7]);
+        }
+
+
         if (lane_id == 0 && mywarp == 0)
             mbarrier_arrive(&K_empty[k_stage]);
         k_stage ^= 1;
@@ -606,6 +616,16 @@ void flash_attention_2wg(
         }
         wgmma_commit_group();
         wgmma_wait_group<0>();
+
+        /* Pack P_lo immediately → S_lo can die before QK_hi */
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            P_packed[ks*4+0] = pack_bf16(S_lo[ks*8+0], S_lo[ks*8+1]);
+            P_packed[ks*4+1] = pack_bf16(S_lo[ks*8+2], S_lo[ks*8+3]);
+            P_packed[ks*4+2] = pack_bf16(S_lo[ks*8+4], S_lo[ks*8+5]);
+            P_packed[ks*4+3] = pack_bf16(S_lo[ks*8+6], S_lo[ks*8+7]);
+        }
+
         /* QK sub-tile 1 → S_hi[32] */
         wgmma_fence();
         #pragma unroll

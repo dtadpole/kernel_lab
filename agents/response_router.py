@@ -107,6 +107,9 @@ class ResponseVerdict:
     @classmethod
     def parse(cls, raw: str) -> ResponseVerdict:
         """Parse a structured response (first line = action, rest = reasoning)."""
+        if not raw or not raw.strip():
+            return cls(action="", detail="", reasoning="Empty response from Steward")
+
         lines = raw.strip().split("\n", 1)
         first_line = lines[0].strip()
         reasoning = lines[1].strip() if len(lines) > 1 else ""
@@ -217,12 +220,14 @@ class ResponseRouter:
         import asyncio
         from agents.runner import AgentRunner  # deferred to avoid circular import
 
+        # Steward gets Read for context lookup, acceptEdits to avoid permission prompts
+        steward_tools = config.tools if config.tools else ["Read", "Grep"]
         agent_config = AgentConfig(
             name=f"steward_{config.name}",
             model=config.model,
-            permission_mode="default",
+            permission_mode="acceptEdits",
             max_turns=config.max_turns,
-            builtin_tools=config.tools,
+            builtin_tools=steward_tools,
             system_prompt=config.system_prompt,
         )
 

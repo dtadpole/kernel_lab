@@ -177,10 +177,13 @@ class Supervisor(DefaultHandler):
             else:
                 verdict = None
 
-            if verdict is None:
+            if verdict is None or not verdict.action:
+                # No verdict or empty action — default to RETRY so we don't
+                # silently accept incomplete work
                 verdict = StewardResponse(
-                    action="ACCEPT", detail="", reasoning="No verdict",
-                    intervention_level=1,
+                    action="RETRY", detail="Steward could not produce a verdict",
+                    reasoning="No verdict available — retrying with fresh approach",
+                    intervention_level=3,
                 )
 
             self.state.verdict_history.append({

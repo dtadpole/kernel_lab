@@ -6,8 +6,8 @@
  *   WG1 = consumer0 (WGMMA rows 0-63, 232 registers per thread)
  *   WG2 = consumer1 (WGMMA rows 64-127, 232 registers per thread)
  *
- * CTA tile 128×128, TILE_K=64, 5-stage pipeline.
- * B loaded MN-major (no transpose) via split TMA: two 64-col loads with 128B swizzle.
+ * CTA tile 128×256, TILE_K=64, 4-stage pipeline.
+ * B loaded MN-major (no transpose) via split TMA: four 64-col loads with 128B swizzle.
  * WGMMA m64n64k16 with trans-b=1.
  * Dual mbarrier sets: mbar_full (producer→consumers) + mbar_empty (consumers→producer).
  * FP32 accumulation → BF16 output.
@@ -20,26 +20,26 @@
 #include <cmath>
 
 #define TILE_M      128
-#define TILE_N      128
+#define TILE_N      256
 #define TILE_K      64
-#define TILE_N_HALF 64
+#define TILE_NQ     64             /* each B quarter: 64 N-elements = 128B swizzle */
+#define NUM_NQ      4              /* 4 quarters of 64 = 256 */
 #define WG_SIZE     128
 #define NUM_WG      3
 #define THREADS     (NUM_WG * WG_SIZE)   /* 384 */
-#define STAGES      6
+#define STAGES      4
 
 #define A_BYTES       (TILE_M * TILE_K * 2)       /* 16384 */
-#define B_HALF_BYTES  (TILE_N_HALF * TILE_K * 2)  /* 8192 */
-#define B_BYTES       (2 * B_HALF_BYTES)          /* 16384 */
-#define STAGE_BYTES   (A_BYTES + B_BYTES)         /* 32768 */
+#define BQ_BYTES      (TILE_NQ * TILE_K * 2)      /* 8192 per quarter */
+#define B_BYTES       (NUM_NQ * BQ_BYTES)         /* 32768 total */
+#define STAGE_BYTES   (A_BYTES + B_BYTES)         /* 49152 */
 #define MBAR_FULL_OFFSET  (STAGES * STAGE_BYTES)
 #define MBAR_EMPTY_OFFSET (MBAR_FULL_OFFSET + 128)
 #define SMEM_TOTAL        (MBAR_EMPTY_OFFSET + 128)
 
-/* Per-stage SMEM offset macros (avoids stack-allocated pointer arrays) */
-#define SA(s)  (smem + (s) * STAGE_BYTES)
-#define SBL(s) (smem + (s) * STAGE_BYTES + A_BYTES)
-#define SBR(s) (smem + (s) * STAGE_BYTES + A_BYTES + B_HALF_BYTES)
+/* Per-stage SMEM offset macros */
+#define SA(s)   (smem + (s) * STAGE_BYTES)
+#define SBQ(s,q) (smem + (s) * STAGE_BYTES + A_BYTES + (q) * BQ_BYTES)
 
 /* =========================================================================
  * PTX helpers
@@ -248,20 +248,17 @@ matmul_wgmma_tma(
             for (int s = 0; s < prefill; s++) {
                 mbarrier_arrive_expect_tx(&mbar_full[s], A_BYTES + B_BYTES);
                 tma_load_2d(SA(s), &tma_A, s * TILE_K, ctaRow, &mbar_full[s]);
-                tma_load_2d(SBL(s), &tma_B, ctaCol, s * TILE_K, &mbar_full[s]);
-                tma_load_2d(SBR(s), &tma_B, ctaCol + TILE_N_HALF, s * TILE_K, &mbar_full[s]);
+                for (int q = 0; q < NUM_NQ; q++)
+                    tma_load_2d(SBQ(s,q), &tma_B, ctaCol + q * TILE_NQ, s * TILE_K, &mbar_full[s]);
             }
 
             for (int kt = STAGES; kt < numK; kt++) {
                 int stage = kt % STAGES;
-                /* Wait for both consumers to release this stage.
-                 * try_wait.parity(P) returns true when current parity ≠ P.
-                 * We pass the OLD parity so it returns when phase advances. */
                 mbarrier_wait_parity(&mbar_empty[stage], ((kt / STAGES) + 1) & 1);
                 mbarrier_arrive_expect_tx(&mbar_full[stage], A_BYTES + B_BYTES);
                 tma_load_2d(SA(stage), &tma_A, kt * TILE_K, ctaRow, &mbar_full[stage]);
-                tma_load_2d(SBL(stage), &tma_B, ctaCol, kt * TILE_K, &mbar_full[stage]);
-                tma_load_2d(SBR(stage), &tma_B, ctaCol + TILE_N_HALF, kt * TILE_K, &mbar_full[stage]);
+                for (int q = 0; q < NUM_NQ; q++)
+                    tma_load_2d(SBQ(stage,q), &tma_B, ctaCol + q * TILE_NQ, kt * TILE_K, &mbar_full[stage]);
             }
         }
 
@@ -269,69 +266,72 @@ matmul_wgmma_tma(
         /* =============================================================
          * CONSUMER (WG1 = rows 0-63, WG2 = rows 64-127)
          *
-         * Each consumer: wait mbar_full → WGMMA × 4 k-substeps on its
-         * M-half (left + right N-halves) → signal mbar_empty for prev stage.
+         * Each consumer handles 64×256: 4 N-quarters × 4 k-substeps
+         * = 16 WGMMA per K-tile. More compute per sync → less overhead.
          * ============================================================= */
         asm volatile("setmaxnreg.inc.sync.aligned.u32 240;\n");
 
-        int consumer_id = wg_id - 1;  /* 0 or 1 */
+        int consumer_id = wg_id - 1;
         int local_tid = tid - wg_id * WG_SIZE;
 
-        float accL[32], accR[32];
+        /* 4 accumulators for 4 N-quarters of 64 each */
+        float acc0[32], acc1[32], acc2[32], acc3[32];
         #pragma unroll
-        for (int i = 0; i < 32; i++) { accL[i] = 0.0f; accR[i] = 0.0f; }
+        for (int i = 0; i < 32; i++) {
+            acc0[i] = 0.0f; acc1[i] = 0.0f;
+            acc2[i] = 0.0f; acc3[i] = 0.0f;
+        }
 
-        /* A row offset: consumer_id * 64 rows * TILE_K * 2 bytes */
         int a_row_offset = consumer_id * 64 * TILE_K * 2;
 
         for (int kt = 0; kt < numK; kt++) {
             int stage = kt % STAGES;
             int parity = (kt / STAGES) & 1;
 
-            /* 1. Wait for TMA load */
             mbarrier_wait_parity(&mbar_full[stage], parity);
 
-            /* 2. Build descriptors and issue WGMMA */
             uint64_t da  = make_desc(SA(stage) + a_row_offset, TILE_K);
-            uint64_t dbL = make_desc(SBL(stage), TILE_N_HALF);
-            uint64_t dbR = make_desc(SBR(stage), TILE_N_HALF);
+            uint64_t db0 = make_desc(SBQ(stage,0), TILE_NQ);
+            uint64_t db1 = make_desc(SBQ(stage,1), TILE_NQ);
+            uint64_t db2 = make_desc(SBQ(stage,2), TILE_NQ);
+            uint64_t db3 = make_desc(SBQ(stage,3), TILE_NQ);
 
             int sd = (kt == 0) ? 0 : 1;
             wgmma_fence();
             #pragma unroll
             for (int ks = 0; ks < 4; ks++) {
                 uint64_t dak  = desc_advance(da,  ks * 2);
-                uint64_t dbLk = desc_advance(dbL, ks * 128);
-                uint64_t dbRk = desc_advance(dbR, ks * 128);
+                uint64_t db0k = desc_advance(db0, ks * 128);
+                uint64_t db1k = desc_advance(db1, ks * 128);
+                uint64_t db2k = desc_advance(db2, ks * 128);
+                uint64_t db3k = desc_advance(db3, ks * 128);
                 int s = (ks == 0) ? sd : 1;
-                wgmma_m64n64k16(accL, dak, dbLk, s);
-                wgmma_m64n64k16(accR, dak, dbRk, s);
+                wgmma_m64n64k16(acc0, dak, db0k, s);
+                wgmma_m64n64k16(acc1, dak, db1k, s);
+                wgmma_m64n64k16(acc2, dak, db2k, s);
+                wgmma_m64n64k16(acc3, dak, db3k, s);
             }
             wgmma_commit();
 
-            /* 3. Wait for previous WGMMA group, release previous stage */
             if (kt >= 1) {
                 wgmma_wait1();
                 if (local_tid == 0) {
-                    int prev_stage = (kt - 1) % STAGES;
-                    mbarrier_arrive(&mbar_empty[prev_stage]);
+                    mbarrier_arrive(&mbar_empty[(kt - 1) % STAGES]);
                 }
             }
         }
 
-        /* Drain all outstanding WGMMA */
         wgmma_wait0();
 
-        /* Release last stage */
         if (numK >= 1 && local_tid == 0) {
-            int last_stage = (numK - 1) % STAGES;
-            mbarrier_arrive(&mbar_empty[last_stage]);
+            mbarrier_arrive(&mbar_empty[(numK - 1) % STAGES]);
         }
 
-        /* Epilogue: store results */
         int consumer_row = ctaRow + consumer_id * 64;
-        store_acc_n64(C, accL, consumer_row, ctaCol,               M, N, local_tid);
-        store_acc_n64(C, accR, consumer_row, ctaCol + TILE_N_HALF, M, N, local_tid);
+        store_acc_n64(C, acc0, consumer_row, ctaCol,                  M, N, local_tid);
+        store_acc_n64(C, acc1, consumer_row, ctaCol + TILE_NQ,        M, N, local_tid);
+        store_acc_n64(C, acc2, consumer_row, ctaCol + 2 * TILE_NQ,    M, N, local_tid);
+        store_acc_n64(C, acc3, consumer_row, ctaCol + 3 * TILE_NQ,    M, N, local_tid);
     }
 }
 
@@ -394,12 +394,12 @@ extern "C" int kernel_run(
         if (r != CUDA_SUCCESS) return -2;
     }
     {
-        /* B is K×N row-major (N contiguous). TMA dims [N, K], box [64, TILE_K].
+        /* B is K×N row-major (N contiguous). TMA dims [N, K], box [TILE_NQ=64, TILE_K].
          * 128B swizzle: 64 bf16 × 2 bytes = 128 bytes ✓
-         * Two TMA loads per stage: one for left N-half, one for right N-half. */
+         * Four TMA loads per stage: one per N-quarter. */
         cuuint64_t dims[2] = {(cuuint64_t)N, (cuuint64_t)K};
         cuuint64_t str[1]  = {(cuuint64_t)(N * 2)};
-        cuuint32_t box[2]  = {(cuuint32_t)TILE_N_HALF, (cuuint32_t)TILE_K};
+        cuuint32_t box[2]  = {(cuuint32_t)TILE_NQ, (cuuint32_t)TILE_K};
         cuuint32_t el[2]   = {1, 1};
         CUresult r = s_encodeTiled(&tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
             (void*)B, dims, str, box, el,

@@ -111,15 +111,15 @@ class SessionLog:
         elif isinstance(event, ToolCallEvent):
             inp = str(event.tool_input)
             if len(inp) > 500:
-                inp = inp[:500] + "..."
+                inp = inp[:1000] + "..."
             self._storage.append_transcript(f"**[{ts}] Tool: {event.tool_name}**")
             self._storage.append_transcript(f"> {inp}\n")
         elif isinstance(event, ToolResultEvent):
             status = "ERROR" if event.is_error else "OK"
-            self._storage.append_transcript(f"**[{ts}] Result ({status}):** {event.result_summary[:500]}\n")
+            self._storage.append_transcript(f"**[{ts}] Result ({status}):** {event.result_summary[:1000]}\n")
         elif isinstance(event, TextOutputEvent):
             self._storage.append_transcript(f"**[{ts}] Agent:**")
-            self._storage.append_transcript(f"> {event.text[:500]}\n")
+            self._storage.append_transcript(f"> {event.text[:1000]}\n")
         elif isinstance(event, AskEvent):
             self._storage.append_transcript(f"**[{ts}] Ask → Supervisor:** {event.question}\n")
         elif isinstance(event, SubagentEvent):

@@ -214,7 +214,7 @@ class AgentRunner:
 
             summary = str(tool_response)
             if len(summary) > 500:
-                summary = summary[:500] + "..."
+                summary = summary[:1000] + "..."
 
             event = ToolResultEvent(
                 tool_name=tool_name,
@@ -233,7 +233,7 @@ class AgentRunner:
             event = ToolResultEvent(
                 tool_name=tool_name,
                 tool_use_id=tool_use_id or "",
-                result_summary=str(error)[:500],
+                result_summary=str(error)[:1000],
                 is_error=True,
             )
             if log:
@@ -412,7 +412,7 @@ class AgentRunner:
                                 elif isinstance(block, ThinkingBlock):
                                     thinking_text = getattr(block, "thinking", "")
                                     if thinking_text:
-                                        event = TextOutputEvent(text=f"[thinking] {thinking_text[:500]}")
+                                        event = TextOutputEvent(text=f"[thinking] {thinking_text[:1000]}")
                                         result.log.append(event)
                             # Accumulate usage
                             if message.usage:
@@ -426,7 +426,7 @@ class AgentRunner:
                             result.stop_reason = getattr(message, "stop_reason", "end_turn")
                             stop_event = StopEvent(
                                 reason=result.stop_reason,
-                                result_text=result.result_text[:500],
+                                result_text=result.result_text[:1000],
                             )
                             result.log.append(stop_event)
                             await self.handler.on_stop(stop_event)
@@ -498,8 +498,8 @@ class AgentRunner:
             self._storage.write_meta({
                 "session_id": result.session_id,
                 "agent": self.agent_config.name,
-                "task": prompt[:500],
-                "system_prompt": self.agent_config.system_prompt[:500],
+                "task": prompt[:1000],
+                "system_prompt": self.agent_config.system_prompt[:1000],
                 "model": self.agent_config.model,
                 "permission_mode": self.agent_config.permission_mode,
                 "tools": self.agent_config.all_tools,

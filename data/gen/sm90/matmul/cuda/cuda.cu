@@ -33,9 +33,11 @@
 #define BQ_BYTES      (TILE_NQ * TILE_K * 2)      /* 8192 per quarter */
 #define B_BYTES       (NUM_NQ * BQ_BYTES)         /* 32768 total */
 #define STAGE_BYTES   (A_BYTES + B_BYTES)         /* 49152 */
-#define MBAR_FULL_OFFSET  (STAGES * STAGE_BYTES)
-#define MBAR_EMPTY_OFFSET (MBAR_FULL_OFFSET + 128)
-#define SMEM_TOTAL        (MBAR_EMPTY_OFFSET + 128)
+#define MBAR_FULL_OFFSET   (STAGES * STAGE_BYTES)
+#define MBAR_EMPTY_OFFSET  (MBAR_FULL_OFFSET + 128)
+#define MBAR_TREADY_OFFSET (MBAR_EMPTY_OFFSET + 128)
+#define TILE_INFO_OFFSET   (MBAR_TREADY_OFFSET + 16)
+#define SMEM_TOTAL         (TILE_INFO_OFFSET + 16)
 
 /* Per-stage SMEM offset macros */
 #define SA(s)   (smem + (s) * STAGE_BYTES)
@@ -195,143 +197,189 @@ matmul_wgmma_tma(
     __nv_bfloat16* __restrict__ C, int M, int N, int K,
     const __grid_constant__ CUtensorMap tma_A,
     const __grid_constant__ CUtensorMap tma_B,
-    int grid_m, int grid_n)
+    int grid_m, int grid_n, int total_tiles, unsigned* tile_counter)
 {
     extern __shared__ char smem[];
 
-    uint64_t* mbar_full  = (uint64_t*)(smem + MBAR_FULL_OFFSET);
-    uint64_t* mbar_empty = (uint64_t*)(smem + MBAR_EMPTY_OFFSET);
+    uint64_t* mbar_full   = (uint64_t*)(smem + MBAR_FULL_OFFSET);
+    uint64_t* mbar_empty  = (uint64_t*)(smem + MBAR_EMPTY_OFFSET);
+    uint64_t* mbar_tready = (uint64_t*)(smem + MBAR_TREADY_OFFSET);
+    int*      tile_info   = (int*)(smem + TILE_INFO_OFFSET);
 
     int tid = threadIdx.x;
     int wg_id = tid / WG_SIZE;
     int numK = (K + TILE_K - 1) / TILE_K;
-
-    /* CTA swizzle for L2 reuse — same approach as CuTe DSL.
-     * Groups of GROUP_M consecutive M-tiles share the same N-column,
-     * so B data stays in L2 across the group.
-     * Linear blockIdx → swizzled (pid_m, pid_n). */
-    int pid_m, pid_n;
-    {
-        const int GROUP_M = 12;
-        int linear_id = blockIdx.x + blockIdx.y * gridDim.x;
-        int group_id  = linear_id / (GROUP_M * grid_n);
-        int first_m   = group_id * GROUP_M;
-        int group_sz  = (first_m + GROUP_M <= grid_m) ? GROUP_M : (grid_m - first_m);
-        int local_id  = linear_id % (GROUP_M * grid_n);
-        pid_m = first_m + local_id % group_sz;
-        pid_n = local_id / group_sz;
-    }
-    int ctaRow = pid_m * TILE_M;
-    int ctaCol = pid_n * TILE_N;
+    int phases_per_tile = (numK + STAGES - 1) / STAGES;
 
     /* Init mbarriers (thread 0 only) */
     if (tid == 0) {
         for (int s = 0; s < STAGES; s++) {
-            mbarrier_init(&mbar_full[s], 1);  /* 1 TMA transaction set */
-            mbarrier_init(&mbar_empty[s], 2); /* 2 consumer arrives */
+            mbarrier_init(&mbar_full[s], 1);
+            mbarrier_init(&mbar_empty[s], 2);
         }
+        mbarrier_init(mbar_tready, 1);
     }
     __syncthreads();
 
     if (wg_id == 0) {
         /* =============================================================
-         * PRODUCER (WG0): TMA loads only
-         *
-         * Prefill stages 0..min(STAGES,numK)-1, then main loop:
-         * wait mbar_empty → issue TMA → mbar_full auto-completes via TX.
-         * Only thread 0 issues TMA; other producer threads idle.
+         * PRODUCER — persistent tile loop
          * ============================================================= */
         asm volatile("setmaxnreg.dec.sync.aligned.u32 24;\n");
 
-        if (tid == 0) {
-            int prefill = (numK < STAGES) ? numK : STAGES;
-            for (int s = 0; s < prefill; s++) {
-                mbarrier_arrive_expect_tx(&mbar_full[s], A_BYTES + B_BYTES);
-                tma_load_2d(SA(s), &tma_A, s * TILE_K, ctaRow, &mbar_full[s]);
-                for (int q = 0; q < NUM_NQ; q++)
-                    tma_load_2d(SBQ(s,q), &tma_B, ctaCol + q * TILE_NQ, s * TILE_K, &mbar_full[s]);
+        for (int tile = 0; ; tile++) {
+            if (tid != 0) {
+                /* Non-zero producer threads: wait for tile ready, check exit */
+                mbarrier_wait_parity(mbar_tready, tile & 1);
+                if (tile_info[2] >= total_tiles) break;
+                continue;
             }
 
-            for (int kt = STAGES; kt < numK; kt++) {
-                int stage = kt % STAGES;
-                mbarrier_wait_parity(&mbar_empty[stage], ((kt / STAGES) + 1) & 1);
-                mbarrier_arrive_expect_tx(&mbar_full[stage], A_BYTES + B_BYTES);
-                tma_load_2d(SA(stage), &tma_A, kt * TILE_K, ctaRow, &mbar_full[stage]);
-                for (int q = 0; q < NUM_NQ; q++)
-                    tma_load_2d(SBQ(stage,q), &tma_B, ctaCol + q * TILE_NQ, kt * TILE_K, &mbar_full[stage]);
+            /* tid == 0: get next tile, setup, prefill */
+
+            /* Wait for consumers to finish previous tile's SMEM usage.
+             * Only need to wait on the LAST mbar_empty (drain signal).
+             * By the time consumer signals drain, all earlier stages are already free. */
+            if (tile > 0) {
+                int prev_phase_base = (tile - 1) * phases_per_tile;
+                int last_stage = (numK - 1) % STAGES;
+                int last_phase = (prev_phase_base + (numK - 1) / STAGES) & 1;
+                mbarrier_wait_parity(&mbar_empty[last_stage], last_phase);
+            }
+
+            /* Get next tile via atomic counter */
+            int tile_id = atomicAdd(tile_counter, 1);
+
+            /* CTA swizzle */
+            int pid_m, pid_n;
+            {
+                const int GROUP_M = 12;
+                int group_id  = tile_id / (GROUP_M * grid_n);
+                int first_m   = group_id * GROUP_M;
+                int group_sz  = (first_m + GROUP_M <= grid_m) ? GROUP_M : (grid_m - first_m);
+                int local_id  = tile_id % (GROUP_M * grid_n);
+                pid_m = first_m + local_id % group_sz;
+                pid_n = local_id / group_sz;
+            }
+            tile_info[0] = pid_m * TILE_M;  /* ctaRow */
+            tile_info[1] = pid_n * TILE_N;  /* ctaCol */
+            tile_info[2] = tile_id;
+
+            /* Prefill TMA for this tile */
+            if (tile_id < total_tiles) {
+                int ctaRow = tile_info[0];
+                int ctaCol = tile_info[1];
+                int prefill = (numK < STAGES) ? numK : STAGES;
+                for (int s = 0; s < prefill; s++) {
+                    mbarrier_arrive_expect_tx(&mbar_full[s], A_BYTES + B_BYTES);
+                    tma_load_2d(SA(s), &tma_A, s * TILE_K, ctaRow, &mbar_full[s]);
+                    for (int q = 0; q < NUM_NQ; q++)
+                        tma_load_2d(SBQ(s,q), &tma_B, ctaCol + q * TILE_NQ, s * TILE_K, &mbar_full[s]);
+                }
+            }
+
+            /* Signal consumers: tile ready */
+            mbarrier_arrive(mbar_tready);
+
+            if (tile_id >= total_tiles) break;
+
+            /* Producer K-loop */
+            {
+                int ctaRow = tile_info[0];
+                int ctaCol = tile_info[1];
+                int phase_base = tile * phases_per_tile;
+                for (int kt = STAGES; kt < numK; kt++) {
+                    int stage = kt % STAGES;
+                    int empty_parity = (phase_base + (kt / STAGES) + 1) & 1;
+                    mbarrier_wait_parity(&mbar_empty[stage], empty_parity);
+                    mbarrier_arrive_expect_tx(&mbar_full[stage], A_BYTES + B_BYTES);
+                    tma_load_2d(SA(stage), &tma_A, kt * TILE_K, ctaRow, &mbar_full[stage]);
+                    for (int q = 0; q < NUM_NQ; q++)
+                        tma_load_2d(SBQ(stage,q), &tma_B, ctaCol + q * TILE_NQ, kt * TILE_K, &mbar_full[stage]);
+                }
             }
         }
 
     } else {
         /* =============================================================
-         * CONSUMER (WG1 = rows 0-63, WG2 = rows 64-127)
-         *
-         * Each consumer handles 64×256: 4 N-quarters × 4 k-substeps
-         * = 16 WGMMA per K-tile. More compute per sync → less overhead.
+         * CONSUMER — persistent tile loop
          * ============================================================= */
         asm volatile("setmaxnreg.inc.sync.aligned.u32 240;\n");
 
         int consumer_id = wg_id - 1;
         int local_tid = tid - wg_id * WG_SIZE;
-
-        /* 4 accumulators for 4 N-quarters of 64 each */
-        float acc0[32], acc1[32], acc2[32], acc3[32];
-        #pragma unroll
-        for (int i = 0; i < 32; i++) {
-            acc0[i] = 0.0f; acc1[i] = 0.0f;
-            acc2[i] = 0.0f; acc3[i] = 0.0f;
-        }
-
         int a_row_offset = consumer_id * 64 * TILE_K * 2;
 
-        for (int kt = 0; kt < numK; kt++) {
-            int stage = kt % STAGES;
-            int parity = (kt / STAGES) & 1;
+        for (int tile = 0; ; tile++) {
+            /* Wait for producer to signal tile ready */
+            mbarrier_wait_parity(mbar_tready, tile & 1);
 
-            mbarrier_wait_parity(&mbar_full[stage], parity);
+            if (tile_info[2] >= total_tiles) break;
 
-            uint64_t da  = make_desc(SA(stage) + a_row_offset, TILE_K);
-            uint64_t db0 = make_desc(SBQ(stage,0), TILE_NQ);
-            uint64_t db1 = make_desc(SBQ(stage,1), TILE_NQ);
-            uint64_t db2 = make_desc(SBQ(stage,2), TILE_NQ);
-            uint64_t db3 = make_desc(SBQ(stage,3), TILE_NQ);
+            int ctaRow = tile_info[0];
+            int ctaCol = tile_info[1];
+            int phase_base = tile * phases_per_tile;
 
-            int sd = (kt == 0) ? 0 : 1;
-            wgmma_fence();
+            /* Zero accumulators */
+            float acc0[32], acc1[32], acc2[32], acc3[32];
             #pragma unroll
-            for (int ks = 0; ks < 4; ks++) {
-                uint64_t dak  = desc_advance(da,  ks * 2);
-                uint64_t db0k = desc_advance(db0, ks * 128);
-                uint64_t db1k = desc_advance(db1, ks * 128);
-                uint64_t db2k = desc_advance(db2, ks * 128);
-                uint64_t db3k = desc_advance(db3, ks * 128);
-                int s = (ks == 0) ? sd : 1;
-                wgmma_m64n64k16(acc0, dak, db0k, s);
-                wgmma_m64n64k16(acc1, dak, db1k, s);
-                wgmma_m64n64k16(acc2, dak, db2k, s);
-                wgmma_m64n64k16(acc3, dak, db3k, s);
+            for (int i = 0; i < 32; i++) {
+                acc0[i] = 0.0f; acc1[i] = 0.0f;
+                acc2[i] = 0.0f; acc3[i] = 0.0f;
             }
-            wgmma_commit();
 
-            if (kt >= 1) {
-                wgmma_wait1();
-                if (local_tid == 0) {
-                    mbarrier_arrive(&mbar_empty[(kt - 1) % STAGES]);
+            /* K-loop */
+            for (int kt = 0; kt < numK; kt++) {
+                int stage = kt % STAGES;
+                int parity = (phase_base + kt / STAGES) & 1;
+
+                mbarrier_wait_parity(&mbar_full[stage], parity);
+
+                uint64_t da  = make_desc(SA(stage) + a_row_offset, TILE_K);
+                uint64_t db0 = make_desc(SBQ(stage,0), TILE_NQ);
+                uint64_t db1 = make_desc(SBQ(stage,1), TILE_NQ);
+                uint64_t db2 = make_desc(SBQ(stage,2), TILE_NQ);
+                uint64_t db3 = make_desc(SBQ(stage,3), TILE_NQ);
+
+                int sd = (kt == 0) ? 0 : 1;
+                wgmma_fence();
+                #pragma unroll
+                for (int ks = 0; ks < 4; ks++) {
+                    uint64_t dak  = desc_advance(da,  ks * 2);
+                    uint64_t db0k = desc_advance(db0, ks * 128);
+                    uint64_t db1k = desc_advance(db1, ks * 128);
+                    uint64_t db2k = desc_advance(db2, ks * 128);
+                    uint64_t db3k = desc_advance(db3, ks * 128);
+                    int s = (ks == 0) ? sd : 1;
+                    wgmma_m64n64k16(acc0, dak, db0k, s);
+                    wgmma_m64n64k16(acc1, dak, db1k, s);
+                    wgmma_m64n64k16(acc2, dak, db2k, s);
+                    wgmma_m64n64k16(acc3, dak, db3k, s);
+                }
+                wgmma_commit();
+
+                if (kt >= 1) {
+                    wgmma_wait1();
+                    if (local_tid == 0) {
+                        mbarrier_arrive(&mbar_empty[(kt - 1) % STAGES]);
+                    }
                 }
             }
+
+            /* Drain */
+            wgmma_wait0();
+            if (local_tid == 0) {
+                if (numK >= 1)
+                    mbarrier_arrive(&mbar_empty[(numK - 1) % STAGES]);
+            }
+
+            /* Epilogue (SMEM is now free — producer can start prefilling next tile) */
+            int consumer_row = ctaRow + consumer_id * 64;
+            store_acc_n64(C, acc0, consumer_row, ctaCol,                  M, N, local_tid);
+            store_acc_n64(C, acc1, consumer_row, ctaCol + TILE_NQ,        M, N, local_tid);
+            store_acc_n64(C, acc2, consumer_row, ctaCol + 2 * TILE_NQ,    M, N, local_tid);
+            store_acc_n64(C, acc3, consumer_row, ctaCol + 3 * TILE_NQ,    M, N, local_tid);
         }
-
-        wgmma_wait0();
-
-        if (numK >= 1 && local_tid == 0) {
-            mbarrier_arrive(&mbar_empty[(numK - 1) % STAGES]);
-        }
-
-        int consumer_row = ctaRow + consumer_id * 64;
-        store_acc_n64(C, acc0, consumer_row, ctaCol,                  M, N, local_tid);
-        store_acc_n64(C, acc1, consumer_row, ctaCol + TILE_NQ,        M, N, local_tid);
-        store_acc_n64(C, acc2, consumer_row, ctaCol + 2 * TILE_NQ,    M, N, local_tid);
-        store_acc_n64(C, acc3, consumer_row, ctaCol + 3 * TILE_NQ,    M, N, local_tid);
     }
 }
 
@@ -408,16 +456,26 @@ extern "C" int kernel_run(
         if (r != CUDA_SUCCESS) return -3;
     }
 
-    /* Launch with 1D grid + CTA swizzle inside kernel */
+    /* Persistent launch: 1 block per SM */
+    int num_sms = 0;
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+    if (num_sms <= 0) num_sms = 132;
+
     int grid_m = (M + TILE_M - 1) / TILE_M;
     int grid_n = (N + TILE_N - 1) / TILE_N;
     int total_tiles = grid_m * grid_n;
-    dim3 block(THREADS);
-    dim3 grid(total_tiles);
+    int num_blocks = (total_tiles < num_sms) ? total_tiles : num_sms;
+
+    /* Tile counter (allocated once, reset per launch) */
+    static unsigned* s_tile_counter = nullptr;
+    if (!s_tile_counter) cudaMalloc(&s_tile_counter, sizeof(unsigned));
+    cudaMemsetAsync(s_tile_counter, 0, sizeof(unsigned), stream);
+
     cudaFuncSetAttribute(matmul_wgmma_tma,
         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
-    matmul_wgmma_tma<<<grid, block, SMEM_TOTAL, stream>>>(
-        C, M, N, K, tma_A, tma_B, grid_m, grid_n);
+    matmul_wgmma_tma<<<num_blocks, THREADS, SMEM_TOTAL, stream>>>(
+        C, M, N, K, tma_A, tma_B,
+        grid_m, grid_n, total_tiles, s_tile_counter);
 
     return 0;
 }

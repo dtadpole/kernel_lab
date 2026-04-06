@@ -2,28 +2,38 @@
 
 Runs as an independent asyncio task alongside the agent.
 Detects: idle timeout, total timeout, tool call loops.
+Can interrupt or inject guidance into the running Solver.
 """
 
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from agents.config import MonitorConfig
-from agents.events import EventHandler, MonitorAlert
+from agents.events import EventHandler, InjectEvent, MonitorAlert, TextOutputEvent
 from agents.session_log import SessionLog
+
+if TYPE_CHECKING:
+    from agents.runner import AgentRunner
 
 
 class AgentMonitor:
-    """Async watchdog — runs alongside the agent, checks SessionLog periodically."""
+    """Async watchdog — runs alongside the agent, checks SessionLog periodically.
+
+    Has a reference to the AgentRunner so it can interrupt or inject guidance.
+    """
 
     def __init__(
         self,
         log: SessionLog,
         handler: EventHandler,
+        runner: AgentRunner | None = None,
         config: MonitorConfig | None = None,
     ):
         self.log = log
         self.handler = handler
+        self.runner = runner
         self.config = config or MonitorConfig()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -52,9 +62,56 @@ class AgentMonitor:
             if alert:
                 self.log.append(alert)
                 action = await self.handler.on_monitor_alert(alert)
-                if action == "interrupt":
-                    self._running = False
-                    break
+                await self._execute_action(action, alert)
+
+    async def _execute_action(self, action: str, alert: MonitorAlert) -> None:
+        """Execute the action returned by the Supervisor."""
+        if action == "continue":
+            # Log that we checked and decided to continue
+            return
+
+        elif action == "interrupt":
+            # Log and interrupt the Solver
+            event = TextOutputEvent(
+                text=f"[monitor] INTERRUPT — {alert.alert_type}: {alert.details}"
+            )
+            self.log.append(event)
+            if self.runner:
+                await self.runner.interrupt()
+            self._running = False
+
+        elif action.startswith("inject:"):
+            # Extract guidance, log it, interrupt + resume
+            guidance = action[len("inject:"):]
+            event = InjectEvent(
+                guidance=guidance,
+                source=f"monitor_{alert.alert_type}",
+            )
+            self.log.append(event)
+
+            if self.runner and self.runner._client:
+                # Interrupt current execution, then resume with guidance
+                try:
+                    await self.runner.interrupt()
+                    # Small delay to let the interrupt settle
+                    await asyncio.sleep(1)
+                    # Resume with the injected guidance
+                    if self.runner._session_id:
+                        await self.runner._client.query(
+                            f"[Supervisor guidance]: {guidance}"
+                        )
+                except Exception as e:
+                    error_event = TextOutputEvent(
+                        text=f"[monitor] inject failed: {e}"
+                    )
+                    self.log.append(error_event)
+
+        else:
+            # Unknown action — log it
+            event = TextOutputEvent(
+                text=f"[monitor] unknown action: {action}"
+            )
+            self.log.append(event)
 
     def _check_health(self) -> MonitorAlert | None:
         """Check for anomalies. Returns an alert or None."""

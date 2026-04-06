@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from agents.events import (
     AgentEvent,
     AskEvent,
+    InjectEvent,
     StartEvent,
     StopEvent,
     SubagentEvent,
@@ -91,6 +92,8 @@ class SessionLog:
             elif isinstance(event, TextOutputEvent):
                 text = event.text[:120] + "..." if len(event.text) > 120 else event.text
                 parts.append(f"  [{ts}] Output: {text}")
+            elif isinstance(event, InjectEvent):
+                parts.append(f"  [{ts}] INJECT ({event.source}): {event.guidance[:100]}")
             elif isinstance(event, AskEvent):
                 parts.append(f"  [{ts}] Ask: {event.question[:100]}")
             elif isinstance(event, StopEvent):
@@ -122,6 +125,8 @@ class SessionLog:
             self._storage.append_transcript(f"> {event.text[:1000]}\n")
         elif isinstance(event, AskEvent):
             self._storage.append_transcript(f"**[{ts}] Ask → Supervisor:** {event.question}\n")
+        elif isinstance(event, InjectEvent):
+            self._storage.append_transcript(f"\n**[{ts}] ⚡ INJECT ({event.source}):**\n> {event.guidance}\n")
         elif isinstance(event, SubagentEvent):
             self._storage.append_transcript(f"**[{ts}] Subagent {event.action}:** {event.agent_type} ({event.agent_id})\n")
         elif isinstance(event, StopEvent):

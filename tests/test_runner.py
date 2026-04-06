@@ -175,7 +175,7 @@ def test_monitor_idle_detection():
     log._start_time = old_event.timestamp
 
     handler = DefaultHandler()
-    monitor = AgentMonitor(log, handler, MonitorConfig(idle_timeout=300))
+    monitor = AgentMonitor(log, handler, config=MonitorConfig(idle_timeout=300))
     alert = monitor._check_health()
     assert alert is not None
     assert alert.alert_type == "idle_timeout"
@@ -189,7 +189,7 @@ def test_monitor_loop_detection():
         log.events.append(ToolCallEvent(tool_name="Bash", tool_input={}, tool_use_id=f"t{i}"))
 
     handler = DefaultHandler()
-    monitor = AgentMonitor(log, handler, MonitorConfig(loop_threshold=5))
+    monitor = AgentMonitor(log, handler, config=MonitorConfig(loop_threshold=5))
     alert = monitor._check_health()
     assert alert is not None
     assert alert.alert_type == "loop_detected"
@@ -202,7 +202,7 @@ def test_monitor_no_alert_when_healthy():
     log.append(ToolCallEvent(tool_name="Edit", tool_input={}, tool_use_id="t2"))
 
     handler = DefaultHandler()
-    monitor = AgentMonitor(log, handler, MonitorConfig())
+    monitor = AgentMonitor(log, handler, config=MonitorConfig())
     alert = monitor._check_health()
     assert alert is None
 

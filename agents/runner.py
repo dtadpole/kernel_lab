@@ -390,8 +390,8 @@ class AgentRunner:
                 self._client = client
                 await client.query(prompt)
 
-                # Start monitor
-                monitor = AgentMonitor(result.log, self.handler, self.monitor_config)
+                # Start monitor (with runner reference for interrupt/inject)
+                monitor = AgentMonitor(result.log, self.handler, runner=self, config=self.monitor_config)
                 self._monitor = monitor
                 await monitor.start()
 

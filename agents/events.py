@@ -103,6 +103,13 @@ class MonitorAlert(AgentEvent):
     details: str = ""
 
 
+@dataclass
+class InjectEvent(AgentEvent):
+    """Supervisor injected guidance into the Solver."""
+    guidance: str = ""
+    source: str = ""  # monitor_stuck | monitor_time_limit | user
+
+
 # ── Handler protocol ──
 
 class EventHandler(Protocol):

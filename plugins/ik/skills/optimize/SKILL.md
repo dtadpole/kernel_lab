@@ -29,18 +29,19 @@ code is modified during optimization.
 | `gpu` | GPU index | no | from CLAUDE.md | GPU device index (sets `CUDA_VISIBLE_DEVICES`). Uses host assignment from CLAUDE.md if omitted |
 
 The `gen=` and `ref=` values are short names (file stems, not full slugs).
-They map to files in `data/gen/{arch}/{kernel}/` and `data/ref/{kernel}/`:
+They map to files in `data/ref/{kernel}/` (in kernel_lab) and
+`~/kernel_lab_kb/runs/run_<latest>/gen/{arch}/{kernel}/` (in kernel_lab_kb):
 
 **Directory layout and available names:**
 ```
-data/ref/                          data/gen/sm90/
-  matmul/                            matmul/
-    cublas.py      → ref=cublas        cuda.cu       → gen=cuda
-  fa4/                                 cutedsl.py    → gen=cutedsl
-    cudnn.py       → ref=cudnn       fa4/
-    cutedsl.py     → ref=cutedsl       cuda.cu       → gen=cuda
-  vecadd/                            vecadd/
-    cublas.py      → ref=cublas        cuda.cu       → gen=cuda
+data/ref/                          kernel_lab_kb gen/ (per-run scratch):
+  matmul/                            sm90/matmul/
+    cublas.py      → ref=cublas        cuda/cuda.cu  → gen=cuda
+  fa4/                               sm90/fa4/
+    cudnn.py       → ref=cudnn         cuda/cuda.cu  → gen=cuda
+    cutedsl.py     → ref=cutedsl
+  vecadd/
+    cublas.py      → ref=cublas
 ```
 
 **Slug mapping**: `gen=cuda` → slug `gen-cuda`, `ref=cublas` → slug `ref-cublas`
@@ -87,10 +88,11 @@ Before starting, know where things live:
 
 | What | Path |
 |------|------|
-| Reference impls | `data/ref/{kernel}/` → slugs `ref-{stem}` |
-| Generated impls | `data/gen/{arch}/{kernel}/` → slugs `gen-{stem}` |
-| Configs | `data/configs/{kernel}.json` |
-| Results | `results/{arch}/{gpu_name}/{kernel}/` |
+| Reference impls | `data/ref/{kernel}/` (in kernel_lab) → slugs `ref-{stem}` |
+| Generated impls | `~/kernel_lab_kb/runs/run_<active>/gen/{arch}/{kernel}/` → slugs `gen-{stem}` |
+| Latest gem (seed) | `~/kernel_lab_kb/runs/run_<latest>/gems/{slug}/v00N/gen/` |
+| Configs | `data/configs/{kernel}.json` (in kernel_lab) |
+| Results | `~/kernel_lab_kb/runs/run_<ts>/impls/<bench_ts>/` |
 | Roofline specs | `docs/roofline/` |
 | NVIDIA docs (local) | Use `/ik:docs` to search indexed CUDA Toolkit docs |
 | NVIDIA docs (online) | Web search for official NVIDIA docs, PTX ISA, tuning guides |
@@ -273,14 +275,13 @@ idea to implement first.
 
 ### Phase 4: Plan and Implement
 
-1. **Snapshot baseline** — before modifying any code, save the current file:
+1. **Snapshot baseline** — the gen/ scratch in the active run IS the working
+   copy. The baseline is the gem that seeded it. To revert:
    ```bash
-   # For gen-* impl (e.g. gen-cuda → data/gen/{arch}/{kernel}/cuda.cu)
-   cp data/gen/{arch}/{kernel}/{name}.cu data/gen/{arch}/{kernel}/{name}.cu.baseline
-   # For ref-* impl (e.g. ref-cublas → data/ref/{kernel}/cublas.py)
-   cp data/ref/{kernel}/{name}.py data/ref/{kernel}/{name}.py.baseline
+   # Re-seed from latest gem:
+   cp ~/kernel_lab_kb/runs/run_<active>/gems/gen-cuda/latest/gen/{arch}/{kernel}/{name}.cu \
+      ~/kernel_lab_kb/runs/run_<active>/gen/{arch}/{kernel}/{name}.cu
    ```
-   This enables clean revert if the attempt fails.
 2. **Write a plan** — describe exactly what code changes are needed, which
    files to modify, and what the expected effect is. Include:
    - Which NCU metric you expect to improve and by how much

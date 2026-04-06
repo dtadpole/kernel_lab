@@ -427,52 +427,41 @@ Results are stored under `results/<arch>/<device>/matmul/` (or other kernel fami
 ### 11. Data directory layout
 
 ```text
-data/
-├── configs/            # Benchmark configs — arch-agnostic, one per kernel
-│   ├── matmul.json     # 6 size configs (256–8192)
-│   ├── fa4.json        # 6 causal/noncausal configs
-│   ├── vecadd.json
-│   └── matmul_rtx5090.json  # device-specific config variants
+kernel_lab/
+├── data/
+│   ├── configs/            # Benchmark configs — arch-agnostic, one per kernel
+│   │   ├── matmul.json
+│   │   ├── fa4.json
+│   │   └── vecadd.json
+│   └── ref/                # Reference implementations — arch-agnostic library code
+│       ├── matmul/cublas/cublas.py
+│       ├── fa4/cudnn/cudnn.py
+│       └── fa4/cutedsl/cutedsl.py
 │
-├── ref/                # Reference implementations — arch-agnostic library code
-│   ├── matmul/
-│   │   └── cublas.py   # torch.mm() → cuBLAS baseline
-│   ├── fa4/
-│   │   ├── cudnn.py    # torch SDPA → cuDNN/flash baseline
-│   │   └── cutedsl.py  # flash_attn.cute library (FA4 CuTe DSL)
-│   └── vecadd/
-│       └── cublas.py
+├── legacy/gen/             # Archived gen code (moved to kernel_lab_kb)
 │
-├── gen/                # Generated implementations — arch-specific
-│   ├── sm90/
-│   │   ├── matmul/
-│   │   │   ├── cutedsl.py       # CuTe DSL WGMMA kernel (SM90-specific)
-│   │   │   ├── cute_gemm_sm90.py  # helper module
-│   │   │   └── cuda.cu          # hand-written CUDA+PTX WGMMA
-│   │   └── fa4/
-│   │       └── cuda.cu
-│   └── sm120/
-│       ├── matmul/
-│       │   ├── cutedsl.py       # CuTe DSL mma.sync kernel (SM120-specific)
-│       │   └── cuda.cu
-│       ├── fa4/
-│       │   ├── cutedsl.py
-│       │   └── cuda.cu
-│       └── vecadd/
-│           ├── cutedsl.py
-│           └── cuda.cu
-│
-└── nvidia-docs/        # Cached NVIDIA documentation
+└── nvidia-docs/            # Cached NVIDIA documentation
 
-.worktrees/             # Git worktrees for isolated development (git-ignored)
+kernel_lab_kb/              # Knowledge base — optimization artifacts
+└── runs/
+    └── run_<YYYYMMDD_HHMMSS>/
+        ├── gen/<arch>/<kernel>/<impl>/  # Solver scratch (mutable)
+        ├── ref/<kernel>/               # Reference snapshot (immutable)
+        ├── configs/<kernel>.json       # Config snapshot (immutable)
+        ├── impls/<bench_ts>/           # Formal bench output (immutable)
+        │   ├── gen/                    # Frozen code snapshot
+        │   └── <impl_slug>/            # Compile + results per impl
+        ├── gems/<impl_slug>/v00N/      # Per-run best implementations
+        ├── journal/                    # Optimization session log
+        └── command.json
 ```
 
 **Layout rules:**
-- `ref/` = arch-agnostic library implementations. Same code runs on any GPU.
-- `gen/` = arch-specific code we wrote. Contains arch instructions (WGMMA, mma.sync).
-- `configs/` = benchmark configs. Shape/size data, no arch dependency.
+- `data/ref/` = arch-agnostic library implementations in kernel_lab. Same code runs on any GPU.
+- `data/configs/` = benchmark configs in kernel_lab. Shape/size data, no arch dependency.
+- Generated implementations live in `kernel_lab_kb/runs/run_*/gen/`. Each run is a solver session.
+- `legacy/gen/` = archived gen code from before the KB migration. Not used by new code paths.
 - Harness auto-detects by extension: `.py` → Python harness, `.cu` → C harness.
-- Old `data/fixtures/` and `data/generated/` directories have been removed.
 
 ### 12. Benchmarking rules
 

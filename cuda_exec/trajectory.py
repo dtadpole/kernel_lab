@@ -437,10 +437,37 @@ def prepare_run(
     if ref_src.exists():
         shutil.copytree(ref_src, ref_dst)
 
-    # 3. Snapshot data/gen/<arch>/<kernel>/ → gen/<arch>/<kernel>/
-    gen_src = PROJECT_ROOT / "data" / "gen" / arch / kernel
+    # 3. Snapshot gen code → gen/<arch>/<kernel>/
+    #    Priority: latest KB gem → legacy/gen/ → data/gen/ (deprecated)
     gen_dst = run_dir / "gen" / arch / kernel
-    if gen_src.exists():
+    gen_src = None
+    # Try latest gem from most recent KB run
+    kb_runs = sorted((repo / "runs").glob("run_*")) if (repo / "runs").exists() else []
+    for prev_run in reversed(kb_runs):
+        if prev_run == run_dir:
+            continue
+        gem_base = prev_run / "gems"
+        if gem_base.exists():
+            for slug_dir in gem_base.iterdir():
+                gem_versions = sorted(slug_dir.glob("v*"))
+                if gem_versions:
+                    candidate = gem_versions[-1] / "gen" / arch / kernel
+                    if candidate.exists():
+                        gen_src = candidate
+                        break
+        if gen_src:
+            break
+    # Fallback: legacy/gen/
+    if not gen_src:
+        legacy = PROJECT_ROOT / "legacy" / "gen" / arch / kernel
+        if legacy.exists():
+            gen_src = legacy
+    # Fallback: data/gen/ (deprecated)
+    if not gen_src:
+        deprecated = PROJECT_ROOT / "data" / "gen" / arch / kernel
+        if deprecated.exists():
+            gen_src = deprecated
+    if gen_src:
         shutil.copytree(gen_src, gen_dst)
 
     # 4. Snapshot data/configs/<kernel>.json → configs/<kernel>.json

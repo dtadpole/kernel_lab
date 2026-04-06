@@ -26,6 +26,8 @@ from typing import Any, Dict, List
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_DATA_ROOT = _PROJECT_ROOT / "data"
+_LEGACY_GEN_ROOT = _PROJECT_ROOT / "legacy" / "gen"
+_KB_REPO = Path.home() / "kernel_lab_kb"
 
 
 def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
@@ -33,7 +35,30 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
 
 
 def _gen_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
-    return (data_root or _DEFAULT_DATA_ROOT) / "gen" / arch / kernel
+    """Resolve gen directory. Priority:
+    1. Explicit data_root (from bench run snapshot)
+    2. Latest KB run's gen/ folder
+    3. Legacy gen/ folder (fallback)
+    """
+    if data_root:
+        return data_root / "gen" / arch / kernel
+
+    # Try latest KB run
+    runs_dir = _KB_REPO / "runs"
+    if runs_dir.exists():
+        run_dirs = sorted(runs_dir.glob("run_*"))
+        for run_dir in reversed(run_dirs):
+            gen_path = run_dir / "gen" / arch / kernel
+            if gen_path.exists():
+                return gen_path
+
+    # Fallback to legacy
+    legacy = _LEGACY_GEN_ROOT / arch / kernel
+    if legacy.exists():
+        return legacy
+
+    # Original path (won't exist but keeps old behavior)
+    return _DEFAULT_DATA_ROOT / "gen" / arch / kernel
 
 
 def resolve_impl(

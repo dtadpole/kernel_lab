@@ -326,7 +326,10 @@ void flash_attention_2wg(
     const int bid = blockIdx.x;
     const int num_q_blocks = cdiv(len_q, BLOCK_Q);
     const int bs_id = bid / num_q_blocks;
-    const int q_block_id = bid % num_q_blocks;
+    /* LPT scheduling: reverse q_block order for causal so heaviest blocks run first */
+    const int q_block_id = IS_CAUSAL
+        ? (num_q_blocks - 1 - (bid % num_q_blocks))
+        : (bid % num_q_blocks);
     const int batch_id = bs_id / H;
     const int head_id  = bs_id % H;
 
@@ -652,8 +655,10 @@ void flash_attention_2wg(
         v_stage ^= 1;
         if (v_stage == 0) v_full_phase ^= 1;
 
+        /* Conditional rescale: causal only (noncausal diverges on the branch) */
         #pragma unroll
         for (int half = 0; half < 2; half++) {
+            if (IS_CAUSAL && o_rescale[half] == 1.0f) continue;
             #pragma unroll
             for (int p4 = 0; p4 < 8; p4++) {
                 O_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];

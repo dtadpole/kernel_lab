@@ -333,16 +333,21 @@ def main() -> int:
                     try:
                         input_size = int(trial_config.get("input_size", 0))
                         shape = [int(v) for v in trial_config.get("shape", [])]
-                        num_inputs = len(generate_inputs(trial_config, device))
+                        ref_inputs = generate_inputs(trial_config, device)
 
                         with torch.no_grad(), torch.cuda.device(device):
+                            # Replace tensor inputs with harness-generated BF16
+                            # tensors (matching C harness fill_random_bf16), but
+                            # keep non-tensor args (e.g. causal bool) as-is.
                             harness_inputs = []
-                            for j in range(num_inputs):
-                                t = _harness_fill_random_bf16(input_size, j + 1)
-                                if isinstance(t, torch.Tensor):
+                            tensor_idx = 0
+                            for item in ref_inputs:
+                                if isinstance(item, torch.Tensor):
+                                    t = _harness_fill_random_bf16(input_size, tensor_idx + 1)
                                     harness_inputs.append(t.to(device).reshape(shape))
+                                    tensor_idx += 1
                                 else:
-                                    harness_inputs.append(t)
+                                    harness_inputs.append(item)
                             model_cls = getattr(golden_module, "Model")
                             get_init = getattr(golden_module, "get_init_inputs", None)
                             init_args = list(get_init()) if get_init else []

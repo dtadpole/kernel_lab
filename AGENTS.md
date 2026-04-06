@@ -338,13 +338,19 @@ This applies to **both h8_3 and h8_4** identically. See `conf/hosts/default.yaml
 
 **When running benchmarks locally**, always set `CUDA_VISIBLE_DEVICES=4` (or `5`).
 
-**cuDNN requires `libnvrtc.so.12`** for JIT-compiling flash attention kernels.
-On h8_3/h8_4, this library is at `/usr/local/cuda-12.8/lib64/` but not on the
-default `LD_LIBRARY_PATH`. Without it, cuDNN SDPA silently falls back to a
-much slower kernel (181 TFLOPS instead of 600+ TFLOPS). Always set both:
+**cuDNN requires `libnvrtc.so`** for JIT-compiling flash attention kernels.
+On h8_3 (driver 595, CUDA 13.2), `libnvrtc.so.13` is registered in
+`ldconfig` and found automatically — no `LD_LIBRARY_PATH` needed.
+On h8_4 (driver 580, CUDA 13.0), `libnvrtc.so` is at `/usr/local/cuda-13.0/lib64/`.
+Without it, cuDNN SDPA silently falls back to a much slower kernel
+(181 TFLOPS instead of 600+ TFLOPS).
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH python bench_script.py
+# h8_3: no LD_LIBRARY_PATH needed (CUDA 13.2 in ldconfig)
+CUDA_VISIBLE_DEVICES=4 python bench_script.py
+
+# h8_4: still needs LD_LIBRARY_PATH
+CUDA_VISIBLE_DEVICES=4 LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:$LD_LIBRARY_PATH python bench_script.py
 ```
 
 ### 10. Plugin: `ik`

@@ -1,0 +1,121 @@
+# Agent framework configuration
+# See docs/SYSTEM_DESIGN.md for architecture details.
+
+defaults:
+  cwd: /home/zhenc/kernel_lab
+  model: claude-sonnet-4-6
+  permission_mode: acceptEdits
+  max_turns: 50
+  max_budget_usd: 5.0
+
+monitor:
+  idle_timeout: 900            # 15 min — triggers Steward progress check
+  total_timeout: 14400         # 4 hours — triggers Steward time_limit review
+  hard_limit: 21600            # 6 hours — unconditional kill
+  check_interval: 60           # check every 1 min
+  loop_threshold: 5            # same tool 5x in a row
+  progress_check_interval: 900 # 15 min — periodic progress check
+
+steward:
+  model: claude-sonnet-4-6
+  max_tokens: 2000
+
+storage:
+  kb_root: ~/kernel_lab_kb
+  journal_dir: agent_journal
+  log_dir: ~/.kernel_lab/logs
+  max_sessions: 200
+
+agents:
+  solver:
+    description: "生成和修改 kernel 代码"
+    model: claude-sonnet-4-6
+    permission_mode: acceptEdits
+    max_turns: 100
+    tools:
+      builtin:
+        - Read
+        - Edit
+        - Write
+        - Bash
+        - Glob
+        - Grep
+        - WebSearch
+        - WebFetch
+      custom:
+        - ask_supervisor
+        - request_formal_bench
+    tool_rules:
+      - tool: Bash
+        allow: true
+        constraint: |
+          允许: ik:exec (compile/trial/profile), ik:docs (find/read/browse), ik:optimize,
+          所有 CUDA Toolkit 工具 (nvcc, ptxas, cuobjdump, nvdisasm, ncu, nsys, cuda-gdb,
+          compute-sanitizer, cuda-memcheck, nvprof, nvprune, cu++filt 等全部允许),
+          ssh localhost (用于网络访问), curl/wget (下载文档/资料)
+          禁止: ik:bench, ik:env, ik:index — 这些由 Supervisor 管理
+          禁止: 通过 Bash 编辑或写入 data/gen/ 和 ~/.cuda_exec/<run_tag>/ 之外的任何文件
+          禁止: 修改 CUDA_VISIBLE_DEVICES 环境变量 — GPU 分配由 Supervisor 管理
+      - tool: Edit
+        allow: true
+        constraint: "仅允许编辑 data/gen/ 和 ~/.cuda_exec/<run_tag>/ 目录下的文件，禁止编辑其他任何位置的文件"
+      - tool: Write
+        allow: true
+        constraint: "仅允许写入 data/gen/ 和 ~/.cuda_exec/<run_tag>/ 目录下的文件，禁止写入其他任何位置"
+      - tool: Read
+        allow: true
+        constraint: "允许读取所有文件，包括 ~/.cuda_exec/<run_tag>/ 下的中间产物"
+    system_prompt_file: prompts/solver.md
+
+  rigger:
+    description: "Harness Engineering — 修改 configs, reference impls, cuda_exec 基础设施"
+    permission_mode: acceptEdits
+    max_turns: 50
+    tools:
+      builtin:
+        - Read
+        - Edit
+        - Write
+        - Bash
+        - Glob
+        - Grep
+      custom:
+        - ask_supervisor
+    tool_rules:
+      - tool: Edit
+        allow: true
+        constraint: "允许编辑 data/configs/, data/ref/, cuda_exec/, plugins/ik/，禁止编辑 data/gen/（那是 Solver 的地盘）"
+      - tool: Write
+        allow: true
+        constraint: "允许写入 data/configs/, data/ref/, cuda_exec/, plugins/ik/，禁止写入 data/gen/"
+      - tool: Bash
+        allow: true
+        constraint: |
+          允许: 运行测试 (pytest), ik:exec (验证 harness 改动), ik:docs,
+          CUDA Toolkit 工具, ssh localhost, Python 脚本
+          禁止: ik:bench (由 Supervisor 管理), ik:env, ik:index
+          禁止: 修改 CUDA_VISIBLE_DEVICES 环境变量
+    system_prompt_file: prompts/rigger.md
+
+  benchmarker:
+    description: "运行 ik:bench 正式 benchmark，只读评测"
+    permission_mode: acceptEdits
+    max_turns: 10
+    max_budget_usd: 2.0
+    tools:
+      builtin:
+        - Bash
+        - Read
+        - Glob
+        - Grep
+      custom: []
+    tool_rules:
+      - tool: Bash
+        allow: true
+        constraint: "仅允许运行 .venv/bin/python -m cuda_exec.formal bench.kernel=... 命令，不允许其他命令"
+      - tool: Edit
+        allow: false
+      - tool: Write
+        allow: false
+    system_prompt_file: prompts/benchmarker.md
+

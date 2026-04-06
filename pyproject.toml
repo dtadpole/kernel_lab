@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["cuda_agent", "cuda_exec", "doc_retrieval"]
+packages = ["agents", "cuda_agent", "cuda_exec", "doc_retrieval"]
 
 [project]
 name = "kernel-lab"
@@ -45,7 +45,7 @@ cutlass = ["nvidia-cutlass-dsl"]
 dev = ["pytest>=8.0", "pyyaml>=6.0"]
 
 [tool.pytest.ini_options]
-testpaths = ["plugins", "cuda_agent/tests", "cuda_exec/tests", "doc_retrieval/tests"]
+testpaths = ["tests", "plugins", "cuda_agent/tests", "cuda_exec/tests", "doc_retrieval/tests"]
 markers = [
     "quick: fast tests, no remote access, under 5 seconds",
     "integration: requires remote GPU hosts via SSH",

@@ -98,14 +98,20 @@ kernel_lab_kb/
 1. Create run:        runs/run_<timestamp>/
 2. Snapshot:          ref/, configs/ copied from kernel_lab/data/
 3. Seed gen/:         clear gen/, copy from seed gem
-4. Modify gen/:       solver edits gen/sm90/matmul/cuda/cuda.cu
-5. Compile + trial:   snapshot gen/ → impls/<timestamp>/gen/
-                      compile artifacts → impls/<timestamp>/compile/
-                      results → impls/<timestamp>/results.json
+4. Solver loop:       modify gen/ → compile → trial → iterate
+                      (all scratch in gen/ — nothing goes to impls/)
+5. Formal bench:      ik:bench snapshots gen/ → impls/<timestamp>/
+                      compile artifacts + bench results recorded
+                      ONLY formal bench writes to impls/
 6. Evaluate:          if improvement → gems/gen-cuda/v00N/ → impls/<timestamp>
-7. Loop:              back to step 4
+7. Continue:          back to step 4
 8. Re-init:           clear gen/, re-seed from latest gem → back to step 4
 ```
+
+**Key rule:** `impls/` only contains formal `ik:bench` output. Intermediate
+compile/trial during solver iteration stays in `gen/` scratch space and is
+not preserved. This keeps `impls/` clean — every entry is an authoritative,
+formally benchmarked record.
 
 ## Changes Required
 

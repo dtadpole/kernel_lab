@@ -463,6 +463,16 @@ kernel_lab_kb/              # Knowledge base — optimization artifacts
 - `legacy/gen/` = archived gen code from before the KB migration. Not used by new code paths.
 - Harness auto-detects by extension: `.py` → Python harness, `.cu` → C harness.
 
+**Run tag naming convention:**
+
+| Context | Run tag format | Example |
+|---------|---------------|---------|
+| Solver agent | `run_<YYYYMMDD_HHMMSS>` | `run_20260406_101426` |
+| Claude Code (interactive) | `run_<host_slug>` | `run_h8_3` |
+
+- **Solver agent**: uses timestamp because multiple runs may happen autonomously in sequence.
+- **Claude Code**: uses the host slug (e.g., `h8_3`, `h8_4`) because interactive sessions are tied to a specific machine and typically produce one active run at a time. The host slug makes it easy to find the run for the current machine.
+
 ### 12. Benchmarking rules
 
 #### All benchmarks must go through the unified eval harness

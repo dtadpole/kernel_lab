@@ -21,16 +21,16 @@ A **slug** has the format `{source}-{name}`:
 
 | Source | Directory | Example slug | Example path |
 |--------|-----------|--------------|--------------|
-| `ref` | `data/ref/{kernel}/` | `ref-cublas` | `data/ref/matmul/cublas.py` |
-| `gen` | `data/gen/{arch}/{kernel}/` | `gen-cuda` | `data/gen/sm90/matmul/cuda.cu` |
+| `ref` | `ref/{kernel}/` | `ref-cublas` | `ref/matmul/cublas.py` |
+| `gen` | `gen/{arch}/{kernel}/` | `gen-cuda` | `gen/sm90/matmul/cuda.cu` |
 
 **Forward resolution** (slug → files): `resolve_impl(kernel, arch, slug)`
 - Tries `{name}.py` first, then `{name}.cu` in the source directory
 - Auto-includes helper files (`.py` helpers for `.py` entry points, `.h`/`.cuh` for `.cu`)
 
 **Reverse discovery** (directory → all slugs): `list_impls(kernel, arch)`
-- Scans `data/ref/{kernel}/` — every `.py` or `.cu` file becomes `ref-{stem}`
-- Scans `data/gen/{arch}/{kernel}/` — `.cu` files become `gen-{stem}`, `.py` files with `class Model` become `gen-{stem}`
+- Scans `ref/{kernel}/` — every `.py` or `.cu` file becomes `ref-{stem}`
+- Scans `gen/{arch}/{kernel}/` — `.cu` files become `gen-{stem}`, `.py` files with `class Model` become `gen-{stem}`
 
 When `impls` is `all` (default), both directions are used: reverse discovery
 finds all slugs, then forward resolution loads their files.
@@ -94,12 +94,12 @@ cd /home/zhenc/kernel_lab
 ### kernel_lab_kb (git repo, text only)
 
 ```
-ik_bench/
+runs/
   runs/<kernel>/<arch>/<YYYYMMDD_HHMMSS>/
     command.json                    # invocation parameters
-    data/ref/<kernel>/              # snapshot of source files
-    data/gen/<arch>/<kernel>/
-    data/configs/<kernel>.json
+    ref/<kernel>/              # snapshot of source files
+    gen/<arch>/<kernel>/
+    configs/<kernel>.json
     impls/<impl_slug>/
       compile/                      # ptxas + resource usage text
       results.json                  # structured results (compact)

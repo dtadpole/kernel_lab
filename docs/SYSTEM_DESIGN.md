@@ -76,7 +76,7 @@ kernel_lab_kb/
 ├── ik_bench/                # benchmark 执行记录
 │   ├── runs/                  每次 bench run
 │   └── gems/                  只存突破性结果
-├── agent_journal/           # agent session 完整轨迹
+├── runs/.../journal/           # agent session 完整轨迹
 │   └── <agent>/<task_slug>/<session_id>/
 │       ├── meta.json            元数据
 │       ├── events.jsonl         结构化事件流
@@ -111,12 +111,12 @@ kernel_lab_kb/
 #### 执行记录 vs 知识的关系
 
 ```
-agent_journal/  ──→  Reflector  ──→  episodic/     (摘要)
+runs/.../journal/  ──→  Reflector  ──→  episodic/     (摘要)
 (原始轨迹)            (提炼)    ──→  declarative/  (新概念)
                                ──→  procedural/   (新策略)
 ```
 
-- `agent_journal/` = 原始数据，每次 session 无条件记录
+- `runs/.../journal/` = 原始数据，每次 session 无条件记录
 - `episodic/` = 消化后的摘要和 insights，由 Reflector 或 knowledge agent 产出
 - 两者是上下游关系，不是重复
 
@@ -135,7 +135,7 @@ title: WGMMA 要求 Interleaved SMEM Layout
 type: declarative                      # declarative | procedural | episodic | journal
 created: 2026-04-05
 sources:                               # backlink 到原始证据
-  - agent_journal/solver/matmul_wgmma/s001_20260405_143000/transcript.md
+  - runs/.../journal/solver/matmul_wgmma/s001_20260405_143000/transcript.md
   - ik_bench/gems/matmul/sm90/gen-cuda/v002_20260405_021157/report.md
 tags: [wgmma, smem, layout, sm90]
 ---
@@ -164,10 +164,10 @@ WGMMA 指令（见 [[sm90-wgmma]]）要求操作数 B 在 SMEM 中按 interleave
 
 | 知识层 | 必须 backlink 到 | 示例 |
 |--------|-----------------|------|
-| `episodic/` 摘要 | `agent_journal/` 原始轨迹 | `sources: [agent_journal/solver/matmul_wgmma/s001_.../transcript.md]` |
+| `episodic/` 摘要 | `runs/.../journal/` 原始轨迹 | `sources: [runs/.../journal/solver/matmul_wgmma/s001_.../transcript.md]` |
 | `declarative/` 概念 | 文档来源 或 发现该概念的 session | `sources: [data/nvidia-docs/ptx-isa.html#wgmma]` |
-| `procedural/` 策略 | 验证该策略的 benchmark 或 session | `sources: [ik_bench/gems/.../report.md, agent_journal/.../transcript.md]` |
-| `procedural/` 偏好 | 用户原话所在的 session | `sources: [agent_journal/.../transcript.md#L42]` |
+| `procedural/` 策略 | 验证该策略的 benchmark 或 session | `sources: [ik_bench/gems/.../report.md, runs/.../journal/.../transcript.md]` |
+| `procedural/` 偏好 | 用户原话所在的 session | `sources: [runs/.../journal/.../transcript.md#L42]` |
 
 Backlink 使用相对于 KB repo 根目录的路径。可以精确到文件内的行号（`#L42`）或章节（`#section-name`）。
 
@@ -182,7 +182,7 @@ declarative/sm90-wgmma.md
         └── sources: ik_bench/gems/...  → 执行记录（backlink）
 
 episodic/2026-04-05-wgmma-session.md
-  ├── sources: agent_journal/solver/... → 执行记录（backlink）
+  ├── sources: runs/.../journal/solver/... → 执行记录（backlink）
   ├── [[sm90-wgmma]]                   → declarative/（forward link）
   └── [[wgmma-optimization-strategy]]  → procedural/（forward link）
 ```

@@ -438,7 +438,7 @@ kernel_lab/
 │       ├── fa4/cudnn/cudnn.py
 │       └── fa4/cutedsl/cutedsl.py
 │
-├── legacy/gen/             # Archived gen code (moved to kernel_lab_kb)
+├── legacy/                 # Archived code from before KB migration (not used)
 │
 └── nvidia-docs/            # Cached NVIDIA documentation
 
@@ -460,7 +460,7 @@ kernel_lab_kb/              # Knowledge base — optimization artifacts
 - `data/ref/` = arch-agnostic library implementations in kernel_lab. Same code runs on any GPU.
 - `data/configs/` = benchmark configs in kernel_lab. Shape/size data, no arch dependency.
 - Generated implementations live in `kernel_lab_kb/runs/run_*/gen/`. Each run is a solver session.
-- `legacy/gen/` = archived gen code from before the KB migration. Not used by new code paths.
+- `legacy/` = archived code from before the KB migration. Not referenced by any code path.
 - Harness auto-detects by extension: `.py` → Python harness, `.cu` → C harness.
 
 **Run tag naming convention:**

@@ -26,7 +26,6 @@ from typing import Any, Dict, List
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_DATA_ROOT = _PROJECT_ROOT / "data"
-_LEGACY_GEN_ROOT = _PROJECT_ROOT / "legacy" / "gen"
 _KB_REPO = Path.home() / "kernel_lab_kb"
 
 
@@ -34,31 +33,120 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
     return (data_root or _DEFAULT_DATA_ROOT) / "ref" / kernel
 
 
+def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
+                     kb_repo: Path | None = None) -> Path | None:
+    """Find the latest gem's gen code across all KB runs."""
+    repo = kb_repo or _KB_REPO
+    runs_dir = repo / "runs"
+    if not runs_dir.exists():
+        return None
+    for run_dir in sorted(runs_dir.glob("run_*"), reverse=True):
+        gem_base = run_dir / "gems" / f"gen-{impl_name}"
+        if not gem_base.exists():
+            continue
+        versions = sorted(gem_base.glob("v*"), reverse=True)
+        for ver in versions:
+            candidate = ver / "gen" / arch / kernel
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _ensure_gen_dir(kernel: str, arch: str, *,
+                    run_tag: str | None = None,
+                    kb_repo: Path | None = None) -> Path:
+    """Get or create the gen/ scratch dir in the active KB run.
+
+    If the gen dir doesn't exist yet, seed it from the latest gem.
+    If no gem exists, creates an empty directory.
+
+    Args:
+        kernel: kernel name (matmul, fa4, etc.)
+        arch: target arch (sm90, sm120, etc.)
+        run_tag: run folder name (e.g. run_h8_3). If None, auto-detects from host config.
+        kb_repo: path to kernel_lab_kb repo.
+
+    Returns:
+        Path to gen/<arch>/<kernel>/ in the active run.
+    """
+    import shutil
+    repo = kb_repo or _KB_REPO
+    runs_dir = repo / "runs"
+
+    # Find or create the active run
+    if run_tag:
+        run_dir = runs_dir / run_tag
+    else:
+        # Auto-detect host slug from conf/hosts/default.yaml
+        host_slug = _detect_host_slug()
+        run_tag = f"run_{host_slug}"
+        run_dir = runs_dir / run_tag
+
+    if not run_dir.exists():
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    gen_path = run_dir / "gen" / arch / kernel
+    if gen_path.exists():
+        return gen_path
+
+    # Seed from latest gem in kernel_lab_kb
+    gem_src = _find_latest_gem(kernel, arch, kb_repo=repo)
+    if gem_src:
+        shutil.copytree(gem_src, gen_path)
+        return gen_path
+
+    # Nothing to seed from — return empty dir
+    gen_path.mkdir(parents=True, exist_ok=True)
+    return gen_path
+
+
+def _detect_host_slug() -> str:
+    """Detect host slug from conf/hosts/default.yaml matching current hostname.
+
+    Uses simple string parsing if PyYAML is not available.
+    """
+    import socket
+    fqdn = socket.getfqdn()
+    hostname = socket.gethostname()
+    cfg_path = _PROJECT_ROOT / "conf" / "hosts" / "default.yaml"
+    if not cfg_path.exists():
+        return hostname.split(".")[0]
+
+    try:
+        import yaml
+        cfg = yaml.safe_load(cfg_path.read_text())
+        for slug, host_cfg in cfg.get("hosts", {}).items():
+            ssh_host = host_cfg.get("ssh_host", "")
+            if fqdn.startswith(ssh_host.rstrip(".")) or hostname in ssh_host:
+                return slug
+    except ImportError:
+        # No PyYAML — parse manually: find lines like "  h8_3:" followed by "ssh_host: ..."
+        import re
+        text = cfg_path.read_text()
+        for m in re.finditer(r"^\s{2}(\w+):\s*$", text, re.MULTILINE):
+            slug = m.group(1)
+            # Find ssh_host in the next few lines
+            block = text[m.end():m.end() + 200]
+            ssh_match = re.search(r"ssh_host:\s*['\"]?([^'\"#\n]+)", block)
+            if ssh_match:
+                ssh_host = ssh_match.group(1).strip()
+                if fqdn.startswith(ssh_host.rstrip(".")) or hostname in ssh_host:
+                    return slug
+    except Exception:
+        pass
+    return hostname.split(".")[0]
+
+
 def _gen_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
-    """Resolve gen directory. Priority:
-    1. Explicit data_root (from bench run snapshot)
-    2. Latest KB run's gen/ folder
-    3. Legacy gen/ folder (fallback)
+    """Resolve gen directory.
+
+    1. Explicit data_root (from bench run snapshot) — use directly
+    2. Default: active KB run's gen/ folder, seeded from latest gem if needed
     """
     if data_root:
         return data_root / "gen" / arch / kernel
 
-    # Try latest KB run
-    runs_dir = _KB_REPO / "runs"
-    if runs_dir.exists():
-        run_dirs = sorted(runs_dir.glob("run_*"))
-        for run_dir in reversed(run_dirs):
-            gen_path = run_dir / "gen" / arch / kernel
-            if gen_path.exists():
-                return gen_path
-
-    # Fallback to legacy
-    legacy = _LEGACY_GEN_ROOT / arch / kernel
-    if legacy.exists():
-        return legacy
-
-    # Original path (won't exist but keeps old behavior)
-    return _DEFAULT_DATA_ROOT / "gen" / arch / kernel
+    return _ensure_gen_dir(kernel, arch)
 
 
 def resolve_impl(

@@ -89,13 +89,18 @@ Before starting, know where things live:
 | What | Path |
 |------|------|
 | Reference impls | `data/ref/{kernel}/` (in kernel_lab) → slugs `ref-{stem}` |
-| Generated impls | `~/kernel_lab_kb/runs/run_<active>/gen/{arch}/{kernel}/` → slugs `gen-{stem}` |
-| Latest gem (seed) | `~/kernel_lab_kb/runs/run_<latest>/gems/{slug}/v00N/gen/` |
+| Generated impls | `~/kernel_lab_kb/runs/run_<host>/gen/{arch}/{kernel}/` → slugs `gen-{stem}` |
+| Latest gem (seed) | `~/kernel_lab_kb/runs/run_*/gems/{slug}/v00N/gen/` |
 | Configs | `data/configs/{kernel}.json` (in kernel_lab) |
 | Results | `~/kernel_lab_kb/runs/run_<ts>/impls/<bench_ts>/` |
 | Roofline specs | `docs/roofline/` |
 | NVIDIA docs (local) | Use `/ik:docs` to search indexed CUDA Toolkit docs |
 | NVIDIA docs (online) | Web search for official NVIDIA docs, PTX ISA, tuning guides |
+
+**Gen code resolution**: `cuda_exec/impls.py` auto-resolves gen code from:
+1. Active KB run's `gen/` folder (`~/kernel_lab_kb/runs/run_<host>/gen/`)
+2. If gen/ doesn't exist, seeds it from the latest gem across all KB runs
+3. The run tag defaults to `run_<host_slug>` (auto-detected from `conf/hosts/default.yaml`)
 
 ## The Loop
 

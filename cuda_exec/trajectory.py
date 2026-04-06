@@ -438,10 +438,10 @@ def prepare_run(
         shutil.copytree(ref_src, ref_dst)
 
     # 3. Snapshot gen code → gen/<arch>/<kernel>/
-    #    Priority: latest KB gem → legacy/gen/ → data/gen/ (deprecated)
+    #    Source: latest KB gem. gen code lives in kernel_lab_kb, not kernel_lab.
     gen_dst = run_dir / "gen" / arch / kernel
     gen_src = None
-    # Try latest gem from most recent KB run
+    # Find latest gem from most recent KB run
     kb_runs = sorted((repo / "runs").glob("run_*")) if (repo / "runs").exists() else []
     for prev_run in reversed(kb_runs):
         if prev_run == run_dir:
@@ -457,16 +457,15 @@ def prepare_run(
                         break
         if gen_src:
             break
-    # Fallback: legacy/gen/
+    # Also check: active run's gen/ might already be seeded (e.g. by _ensure_gen_dir)
     if not gen_src:
-        legacy = PROJECT_ROOT / "legacy" / "gen" / arch / kernel
-        if legacy.exists():
-            gen_src = legacy
-    # Fallback: data/gen/ (deprecated)
-    if not gen_src:
-        deprecated = PROJECT_ROOT / "data" / "gen" / arch / kernel
-        if deprecated.exists():
-            gen_src = deprecated
+        for prev_run in reversed(kb_runs):
+            if prev_run == run_dir:
+                continue
+            candidate = prev_run / "gen" / arch / kernel
+            if candidate.exists():
+                gen_src = candidate
+                break
     if gen_src:
         shutil.copytree(gen_src, gen_dst)
 

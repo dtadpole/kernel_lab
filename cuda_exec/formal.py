@@ -300,7 +300,7 @@ def formal_benchmark(
     try:
         from cuda_exec.trajectory import prepare_run
         run_dir = prepare_run(kernel, arch, impls, timeout_seconds, kb_repo=kb_repo_path)
-        snapshot_data = run_dir / "data"
+        snapshot_data = run_dir
         logger.info("Snapshot done [%s] → %s", datetime.now().strftime(_ts_fmt), run_dir)
     except Exception as exc:
         logger.warning("Snapshot failed [%s]: %s — falling back to original data/", datetime.now().strftime(_ts_fmt), exc)

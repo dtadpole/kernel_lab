@@ -19,8 +19,7 @@ from typing import Any, Dict, List
 
 
 KB_REPO = Path.home() / "kernel_lab_kb"
-RUNS_DIR = KB_REPO / "ik_bench" / "runs"
-GEMS_DIR = KB_REPO / "ik_bench" / "gems"
+RUNS_DIR = KB_REPO / "runs"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Gem thresholds — both must be exceeded for a config to count as improved
@@ -399,17 +398,23 @@ def prepare_run(
 ) -> Path:
     """Create run dir, snapshot sources + configs. Returns run_dir path.
 
-    Call this BEFORE compile/trial. The snapshot in run_dir/data/ is the
+    Call this BEFORE compile/trial. The snapshot in run_dir is the
     canonical source for all subsequent resolve_impls/load_configs calls.
+
+    Structure: runs/run_<YYYYMMDD_HHMMSS>/
+        gen/<arch>/<kernel>/    — solver scratch (mutable)
+        ref/<kernel>/           — reference snapshot (immutable)
+        configs/<kernel>.json   — config snapshot (immutable)
+        command.json            — run metadata
     """
     repo = kb_repo or KB_REPO
     if not repo.exists():
         raise FileNotFoundError(f"kernel_lab_kb not found at {repo}")
 
-    runs_dir = repo / "ik_bench" / "runs"
+    runs_dir = repo / "runs"
     ts = datetime.now()
     ts_str = ts.strftime("%Y%m%d_%H%M%S")
-    run_dir = runs_dir / kernel / arch / ts_str
+    run_dir = runs_dir / f"run_{ts_str}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Write command.json
@@ -426,21 +431,21 @@ def prepare_run(
     }
     (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n")
 
-    # 2. Snapshot data/ref/<kernel>/
+    # 2. Snapshot data/ref/<kernel>/ → ref/<kernel>/
     ref_src = PROJECT_ROOT / "data" / "ref" / kernel
-    ref_dst = run_dir / "data" / "ref" / kernel
+    ref_dst = run_dir / "ref" / kernel
     if ref_src.exists():
         shutil.copytree(ref_src, ref_dst)
 
-    # 3. Snapshot data/gen/<arch>/<kernel>/
+    # 3. Snapshot data/gen/<arch>/<kernel>/ → gen/<arch>/<kernel>/
     gen_src = PROJECT_ROOT / "data" / "gen" / arch / kernel
-    gen_dst = run_dir / "data" / "gen" / arch / kernel
+    gen_dst = run_dir / "gen" / arch / kernel
     if gen_src.exists():
         shutil.copytree(gen_src, gen_dst)
 
-    # 4. Snapshot data/configs/<kernel>.json
+    # 4. Snapshot data/configs/<kernel>.json → configs/<kernel>.json
     cfg_src = PROJECT_ROOT / "data" / "configs" / f"{kernel}.json"
-    cfg_dst = run_dir / "data" / "configs" / f"{kernel}.json"
+    cfg_dst = run_dir / "configs" / f"{kernel}.json"
     cfg_dst.parent.mkdir(parents=True, exist_ok=True)
     if cfg_src.exists():
         shutil.copy2(cfg_src, cfg_dst)
@@ -453,32 +458,44 @@ def prepare_run(
 # ---------------------------------------------------------------------------
 
 def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = None, runtime_root: Path | None = None) -> dict:
-    """Write per-impl results + check gems after bench completes.
+    """Write bench results to impls/<timestamp>/ and check per-run gems.
+
+    Only formal bench output goes to impls/. Each call creates one
+    timestamped impl entry with a frozen code snapshot + compile + results.
 
     Returns a dict of impl_slug -> gem_info for impls that set a new gem,
     or an empty dict if no improvements were found.
     """
     repo = kb_repo or KB_REPO
-    gems_dir = repo / "ik_bench" / "gems"
     kernel = bench_result["kernel"]
     arch = bench_result["arch"]
-    ts_str = run_dir.name
+    bench_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     new_gems: dict[str, dict] = {}
 
     # Load command.json for metadata
     cmd = json.loads((run_dir / "command.json").read_text())
 
+    # Create timestamped impl entry for this formal bench
+    impl_ts_dir = run_dir / "impls" / bench_ts
+    impl_ts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot current gen/ code into this impl entry
+    gen_src = run_dir / "gen"
+    gen_dst = impl_ts_dir / "gen"
+    if gen_src.exists():
+        shutil.copytree(gen_src, gen_dst)
+
     for impl_slug, impl_data in bench_result.get("results", {}).items():
         if impl_data.get("compile_ok") is None:
             continue
 
-        impl_dir = run_dir / "impls" / impl_slug
-        impl_dir.mkdir(parents=True, exist_ok=True)
+        slug_dir = impl_ts_dir / impl_slug
+        slug_dir.mkdir(parents=True, exist_ok=True)
 
         # Write compile logs
         compile_result = impl_data.get("compile_result")
         if compile_result:
-            _copy_compile_logs(runtime_root, compile_result, impl_dir / "compile")
+            _copy_compile_logs(runtime_root, compile_result, slug_dir / "compile")
 
         # Build results.json
         compile_info = _extract_compile_info(compile_result) if compile_result else {"ok": False}
@@ -490,6 +507,7 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
             "arch": arch,
             "impl": impl_slug,
             "timestamp": cmd["timestamp"],
+            "bench_timestamp": bench_ts,
             "git_commit": cmd["git_commit"],
             "git_branch": cmd["git_branch"],
             "device": cmd["device"],
@@ -497,40 +515,29 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
             "compile": compile_info,
             "configs": config_results,
         }
-        (impl_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+        (slug_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
 
         # Generate report.md
         report = _generate_report(results)
-        (impl_dir / "report.md").write_text(report)
+        (slug_dir / "report.md").write_text(report)
 
-        # Check gem
-        gem_base = gems_dir / kernel / arch / impl_slug
+        # Check gem (per-run: gems live inside this run)
+        gem_base = run_dir / "gems" / impl_slug
         gem_info = _check_gem(config_results, gem_base)
         if gem_info:
             ver = _next_gem_version(gem_base)
-            gem_dir_name = f"v{ver:03d}_{ts_str}"
+            gem_dir_name = f"v{ver:03d}_{bench_ts}"
             gem_info["version"] = ver
+            gem_info["source_impl"] = f"impls/{bench_ts}"
             new_gems[impl_slug] = gem_info
             gem_dir = gem_base / gem_dir_name
             gem_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy snapshot sources to gem
-            snapshot_data = run_dir / "data"
-            for subdir in ("ref", "gen", "configs"):
-                src = snapshot_data / subdir
-                dst = gem_dir / "data" / subdir
-                if src.exists():
-                    if src.is_dir():
-                        shutil.copytree(src, dst)
-                    else:
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src, dst)
+            # Copy gen code to gem for easy seed access
+            if gen_dst.exists():
+                shutil.copytree(gen_dst, gem_dir / "gen")
 
-            # Copy compile info to gem
-            if compile_result:
-                _copy_compile_logs(runtime_root, compile_result, gem_dir / "compile")
-
-            # Write gem results.json with gem metadata
+            # Write gem results.json
             gem_results = {**results, "gem": gem_info}
             (gem_dir / "results.json").write_text(json.dumps(gem_results, indent=2) + "\n")
 
@@ -538,7 +545,7 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
             gem_report = _generate_report(gem_results, gem_info)
             (gem_dir / "report.md").write_text(gem_report)
 
-    _auto_commit(repo, kernel, arch, ts_str)
+    _auto_commit(repo, kernel, arch, bench_ts)
 
     return new_gems
 

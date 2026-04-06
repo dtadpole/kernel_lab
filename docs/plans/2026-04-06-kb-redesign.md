@@ -103,15 +103,17 @@ kernel_lab_kb/
 5. Formal bench:      ik:bench snapshots gen/ → impls/<timestamp>/
                       compile artifacts + bench results recorded
                       ONLY formal bench writes to impls/
-6. Evaluate:          if improvement → gems/gen-cuda/v00N/ → impls/<timestamp>
-7. Continue:          back to step 4
+6. If improvement:    write to gems/gen-cuda/v00N/ → impls/<timestamp>
+                      END current solver cycle (solver stops)
+7. If no improvement: loop back to step 4 (solver keeps trying)
 8. Re-init:           clear gen/, re-seed from latest gem → back to step 4
 ```
 
-**Key rule:** `impls/` only contains formal `ik:bench` output. Intermediate
-compile/trial during solver iteration stays in `gen/` scratch space and is
-not preserved. This keeps `impls/` clean — every entry is an authoritative,
-formally benchmarked record.
+**Key rules:**
+- `impls/` only contains formal `ik:bench` output. Intermediate compile/trial
+  during solver iteration stays in `gen/` scratch and is not preserved.
+- Improvement = solver success → stop. No improvement = keep iterating.
+- Solver cycle ends on gem creation. Next cycle starts with re-init from gem.
 
 ## Changes Required
 

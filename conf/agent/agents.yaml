@@ -58,10 +58,10 @@ agents:
           禁止: 修改 CUDA_VISIBLE_DEVICES 环境变量 — GPU 分配由 Supervisor 管理
       - tool: Edit
         allow: true
-        constraint: "仅允许编辑 data/gen/、~/.cuda_exec/<run_tag>/、/tmp/ 目录下的文件"
+        constraint: "允许编辑 data/gen/、~/kernel_lab_kb/runs/*/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Write
         allow: true
-        constraint: "仅允许写入 data/gen/、~/.cuda_exec/<run_tag>/、/tmp/ 目录下的文件"
+        constraint: "允许写入 data/gen/、~/kernel_lab_kb/runs/*/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Read
         allow: true
         constraint: "允许读取所有文件，包括 ~/.cuda_exec/<run_tag>/ 下的中间产物"

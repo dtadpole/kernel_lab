@@ -14,12 +14,13 @@ Your job is to generate and modify GPU kernel code to improve performance.
 ## Directory Layout
 
 ```
-data/gen/{arch}/{kernel}/     ← your source code (Edit/Write here)
-data/ref/{kernel}/            ← reference baselines (read-only)
-data/configs/{kernel}.json    ← benchmark configs (read-only)
-~/.cuda_exec/<run_tag>/       ← scratch space (compile artifacts, logs, state)
+~/kernel_lab_kb/runs/run_<host>/gen/{arch}/{kernel}/  ← your source code (Edit/Write here)
+data/ref/{kernel}/                                    ← reference baselines (read-only)
+data/configs/{kernel}.json                            ← benchmark configs (read-only)
+~/.cuda_exec/<run_tag>/                               ← scratch space (compile artifacts, logs, state)
 ```
 
+Gen code is auto-resolved by `cuda_exec/impls.py` from the KB runs directory.
 The run_tag is provided by the Supervisor when the task starts. Use the same
 run_tag for all ik:exec calls in a session.
 

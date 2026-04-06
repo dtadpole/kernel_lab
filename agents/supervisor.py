@@ -110,17 +110,21 @@ class Supervisor(DefaultHandler):
         """
         session_number = 0
         session_history: list[dict] = []
+        now = datetime.now()
+        run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
+
+        # Set run_tag on storage config so all agents inherit it
+        self.config.storage.run_tag = run_tag
 
         print(f"\n{'='*60}")
         print(f"[Supervisor] CONTINUOUS MODE — will run indefinitely")
         print(f"[Supervisor] Kernel: {kernel}")
+        print(f"[Supervisor] Run tag: {run_tag}")
         print(f"[Supervisor] Kill with Ctrl+C or hard_limit to stop")
         print(f"{'='*60}\n")
 
         while True:
             session_number += 1
-            now = datetime.now()
-            run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
 
             # Build prompt with history from previous sessions
             session_prompt = self._build_continuous_prompt(
@@ -208,7 +212,7 @@ class Supervisor(DefaultHandler):
         return "\n".join(parts)
 
     def _save_continuous_log(self, kernel: str, history: list[dict]) -> None:
-        """Save the continuous session history to a log file."""
+        """Save the continuous session history to the run's journal."""
         import json
         log_path = self.config.storage.journal_path / f"continuous_{kernel}.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +239,10 @@ class Supervisor(DefaultHandler):
         task_slug = _slugify(task)
         if run_tag is None:
             run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
+
+        # Set run_tag on storage so journal goes under runs/<run_tag>/journal/
+        # and CUDA_EXEC_RUN_TAG env var is propagated to all agents
+        self.config.storage.run_tag = run_tag
 
         self.state = SupervisorState(
             phase="planning",

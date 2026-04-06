@@ -188,14 +188,48 @@ async def _handle_steward_response(self, response: StewardResponse):
             # 不再 resume
 ```
 
-## run_tag 管理
+## run_tag 管理与环境变量传播
 
-每次 `run_task()` 生成一个 run_tag，注入到 Solver 的 prompt 中：
+### run_tag 生成
+
+- **Supervisor 模式：** `supervisor_run_YYYYMMDD_HHMMSS`（每次 run_task 或 run_continuous 生成）
+- **手动模式：** `run_<host_slug>`（cuda_exec 自动检测）
+
+### 环境变量传播
+
+Supervisor 通过 `CUDA_EXEC_RUN_TAG` 环境变量将 run_tag 传递给所有 agent：
 
 ```
-run_tag = supervisor_run_YYYYMMDD_HHMMSS
+Supervisor
+  └── 设置 config.storage.run_tag = "supervisor_run_20260406_121526"
+        │
+        ├── AgentRunner (Solver)
+        │     env: CUDA_EXEC_RUN_TAG=supervisor_run_20260406_121526
+        │     → cuda_exec/impls.py 的 _resolve_run_tag() 读取此环境变量
+        │     → gen code 写入 ~/kernel_lab_kb/runs/supervisor_run_20260406_121526/gen/
+        │
+        ├── AgentRunner (Benchmarker)
+        │     env: CUDA_EXEC_RUN_TAG=supervisor_run_20260406_121526
+        │     → ik:bench 读取同一个 run 下的 gen code
+        │
+        └── AgentRunner (Steward)
+              env: CUDA_EXEC_RUN_TAG=supervisor_run_20260406_121526
 ```
 
-Solver 使用这个 run_tag 调用所有 `ik:exec` 命令。Scratch 目录在 `~/.cuda_exec/<run_tag>/`。
+### Journal 位置
+
+Journal 放在 run 目录下，与 gen/gems 同级：
+
+```
+~/kernel_lab_kb/runs/<run_tag>/
+  ├── gen/{arch}/{kernel}/       ← Solver 写的代码
+  ├── gems/{slug}/v00N/          ← ik:bench 产出的 gem
+  ├── impls/<bench_ts>/          ← ik:bench per-impl 结果
+  └── journal/                   ← agent trajectory
+      ├── solver/<session_id>/
+      ├── steward_stuck/<session_id>/
+      ├── benchmarker/<session_id>/
+      └── continuous_matmul.jsonl
+```
 
 run_tag 在 `SupervisorState` 中记录，可通过 `get_status()` 查询。

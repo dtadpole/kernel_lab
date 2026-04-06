@@ -22,9 +22,10 @@ steward:
 
 storage:
   kb_root: ~/kernel_lab_kb
-  journal_dir: agent_journal
   log_dir: ~/.kernel_lab/logs
   max_sessions: 200
+  # run_tag: auto-detected from host, or set by Supervisor
+  # journal goes to: ~/kernel_lab_kb/runs/<run_tag>/journal/
 
 agents:
   solver:

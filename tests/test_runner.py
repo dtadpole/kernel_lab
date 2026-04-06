@@ -82,7 +82,7 @@ def test_event_to_dict():
 @pytest.mark.quick
 def test_storage_creates_session_dir():
     with tempfile.TemporaryDirectory() as tmpdir:
-        sc = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        sc = StorageConfig(kb_root=tmpdir, run_tag="test_run")
         storage = SessionStorage(sc, "solver", "test_task")
         assert storage.session_dir.exists()
         assert storage.session_dir.parent.name == "test_task"
@@ -92,7 +92,7 @@ def test_storage_creates_session_dir():
 @pytest.mark.quick
 def test_storage_append_event():
     with tempfile.TemporaryDirectory() as tmpdir:
-        sc = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        sc = StorageConfig(kb_root=tmpdir, run_tag="test_run")
         storage = SessionStorage(sc, "solver", "test_task")
         storage.append_event({"type": "test", "ts": "now"})
         storage.append_event({"type": "test2", "ts": "now2"})
@@ -105,7 +105,7 @@ def test_storage_append_event():
 @pytest.mark.quick
 def test_storage_transcript():
     with tempfile.TemporaryDirectory() as tmpdir:
-        sc = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        sc = StorageConfig(kb_root=tmpdir, run_tag="test_run")
         storage = SessionStorage(sc, "solver", "matmul_opt")
         storage.init_transcript("solver", "Optimize matmul kernel")
 
@@ -145,7 +145,7 @@ def test_session_log_summary():
 @pytest.mark.quick
 def test_session_log_with_storage():
     with tempfile.TemporaryDirectory() as tmpdir:
-        sc = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        sc = StorageConfig(kb_root=tmpdir, run_tag="test_run")
         storage = SessionStorage(sc, "solver", "test")
         storage.init_transcript("solver", "test task")
 
@@ -225,7 +225,7 @@ def test_runner_simple():
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        storage_config = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        storage_config = StorageConfig(kb_root=tmpdir, run_tag="test_run")
 
         runner = AgentRunner(
             agent_config=agent_config,
@@ -241,7 +241,7 @@ def test_runner_simple():
         assert result.log.events  # events were recorded
 
         # Check journal files exist
-        journal_dir = Path(tmpdir) / "agent_journal" / "test_solver" / "test_run"
+        journal_dir = Path(tmpdir) / "runs" / "test_run" / "journal" / "test_solver" / "test_run"
         sessions = list(journal_dir.iterdir())
         assert len(sessions) == 1
         session_dir = sessions[0]
@@ -286,7 +286,7 @@ def test_runner_with_hooks():
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        storage_config = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        storage_config = StorageConfig(kb_root=tmpdir, run_tag="test_run")
 
         runner = AgentRunner(
             agent_config=agent_config,

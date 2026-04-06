@@ -281,7 +281,7 @@ def test_monitor_config_for_steward():
 def test_steward_router_uses_storage_config():
     """ResponseRouter should accept and pass storage_config."""
     from agents.response_router import ResponseRouter
-    sc = StorageConfig(kb_root="/tmp/test_kb", journal_dir="agent_journal")
+    sc = StorageConfig(kb_root="/tmp/test_kb", run_tag="test_run")
     router = ResponseRouter(
         prompts_dir="conf/agent/response_prompts",
         storage_config=sc,
@@ -369,7 +369,7 @@ def test_supervisor_simple_task():
 
     # Override for test: use tmpdir for journal, short timeouts
     with tempfile.TemporaryDirectory() as tmpdir:
-        config.storage = StorageConfig(kb_root=tmpdir, journal_dir="agent_journal")
+        config.storage = StorageConfig(kb_root=tmpdir, run_tag="test_run")
         config.monitor = MonitorConfig(
             idle_timeout=60, total_timeout=120, hard_limit=180,
             check_interval=10, loop_threshold=5,

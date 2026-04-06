@@ -73,14 +73,30 @@ class StewardConfig:
 class StorageConfig:
     """Runtime storage paths."""
     kb_root: str = "~/kernel_lab_kb"
-    journal_dir: str = "agent_journal"
+    run_tag: str = ""            # auto-detected from host if empty
     log_dir: str = "~/.kernel_lab/logs"
-    session_id_format: str = "{date}_{time}_{agent}_{hash}"
     max_sessions: int = 200
 
     @property
     def journal_path(self) -> Path:
-        return Path(self.kb_root).expanduser() / self.journal_dir
+        """Journal lives under runs/<run_tag>/journal/."""
+        tag = self.run_tag or self._auto_run_tag()
+        return Path(self.kb_root).expanduser() / "runs" / tag / "journal"
+
+    @property
+    def resolved_run_tag(self) -> str:
+        """Get the run_tag, auto-detecting from host if not set."""
+        return self.run_tag or self._auto_run_tag()
+
+    @staticmethod
+    def _auto_run_tag() -> str:
+        """Auto-detect run_tag from cuda_exec, matching run_<host_slug>."""
+        try:
+            from cuda_exec.impls import _resolve_run_tag
+            return _resolve_run_tag()
+        except ImportError:
+            import socket
+            return f"run_{socket.gethostname().split('.')[0]}"
 
     @property
     def log_path(self) -> Path:

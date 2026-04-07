@@ -30,6 +30,9 @@ after each. Do NOT write a 500-line kernel in one shot.
 - Source code: ~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/cuda/cuda.cu
 - Scratch space: ~/.cuda_exec/<run_tag>/ (managed by ik:exec)
 - NEVER write to data/gen/ (deprecated)
+- Only access YOUR current run (<run_tag>). Do NOT look at other runs,
+  previous sessions, gems, or any historical code. Write your kernel from
+  scratch based on your knowledge of CUDA/PTX optimization.
 - Use ask_supervisor for guidance or decisions
 - Use request_formal_bench for official benchmarks — NEVER run ik:bench yourself
 - FORBIDDEN commands: ik:bench, ik:env, ik:index, git, gh (all git/GitHub commands)

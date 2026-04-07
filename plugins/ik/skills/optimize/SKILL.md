@@ -89,7 +89,9 @@ Stop after 4 failed ideas — write findings summary.
 ## Key Principles
 
 - **ik:bench is sole authority** — only bench results are official
-- **Correctness first** — never sacrifice for performance
+- **Correctness first** — if ANY config shows ✗ in benchmark, STOP optimizing
+  and fix correctness. Performance is meaningless without correctness.
+  Do NOT request another bench until all configs pass ✓.
 - **One change at a time** — isolate variables
 - **Stop on improvement** — bench, print, stop
 - **Keep trying on failure** — revert and try next idea immediately

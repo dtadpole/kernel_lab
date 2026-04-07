@@ -407,18 +407,23 @@ class AgentRunner:
         return False
 
     # Commands that read file contents — block these from accessing blocked paths
+    # Also catches ssh-wrapped reads like: ssh localhost "cat ~/blocked/file"
     _READ_COMMANDS = re.compile(
         r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|wc)\b'
+    )
+    _SSH_READ_PATTERN = re.compile(
+        r'ssh\s+\S+\s+["\'].*\b(cat|head|tail|less|more|strings|xxd|od|hexdump)\b'
     )
 
     def _extract_read_paths_from_command(self, command: str) -> list[str]:
         """Extract file paths from read-like commands in a Bash command string.
 
-        Only scans commands that read file contents (cat, head, tail, etc.).
+        Only scans commands that read file contents (cat, head, tail, etc.),
+        including ssh-wrapped reads like: ssh localhost "cat ~/blocked/file".
         Ignores execution commands (python, nvcc, etc.) so ik:exec can run.
         """
         import os
-        if not self._READ_COMMANDS.search(command):
+        if not self._READ_COMMANDS.search(command) and not self._SSH_READ_PATTERN.search(command):
             return []
         paths = []
         # Match absolute paths and ~/paths in the command

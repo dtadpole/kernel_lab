@@ -331,3 +331,68 @@ def test_bash_find_not_blocked():
         "command": "find ~/kernel_lab/data/peak -name '*.cu'"
     })
     assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_bash_ssh_cat_blocked():
+    """ssh localhost cat from blocked path — should block."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/data/ref/"],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": 'ssh localhost "cat ~/kernel_lab/data/peak/sm90/cuda.cu"'
+    })
+    assert result.get("decision") == "block"
+
+
+@pytest.mark.quick
+def test_bash_ssh_cat_allowed():
+    """ssh localhost cat from allowed path — should pass."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/data/ref/"],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": 'ssh localhost "cat ~/kernel_lab/data/ref/matmul/cublas/cublas.cu"'
+    })
+    assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_read_data_ref_allowed():
+    """Read from data/ref/ — should pass (whitelisted)."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/data/ref/", "~/kernel_lab/data/configs/"],
+    )
+    result = runner._check_tool_rules("Read", {
+        "file_path": "/home/zhenc/kernel_lab/data/ref/matmul/cublas/cublas.cu"
+    })
+    assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_read_data_gen_blocked():
+    """Read from data/gen/ — should block (not whitelisted)."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/data/ref/", "~/kernel_lab/data/configs/"],
+    )
+    result = runner._check_tool_rules("Read", {
+        "file_path": "/home/zhenc/kernel_lab/data/gen/sm90/matmul/cuda.cu"
+    })
+    assert result.get("decision") == "block"
+
+
+@pytest.mark.quick
+def test_read_data_peak_blocked():
+    """Read from data/peak/ — should block."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/data/ref/", "~/kernel_lab/data/configs/"],
+    )
+    result = runner._check_tool_rules("Read", {
+        "file_path": "/home/zhenc/kernel_lab/data/peak/sm90/matmul/cuda.cu"
+    })
+    assert result.get("decision") == "block"

@@ -6,8 +6,9 @@ Your job is to generate and modify GPU kernel code to improve performance.
 - Focus on one optimization at a time
 - Always verify compilation before claiming success
 - Use ask_supervisor when you need guidance or face a decision with multiple options
-- Source code edits go in data/gen/ only
+- Source code goes in ~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/cuda/cuda.cu
 - Scratch/intermediate files go in ~/.cuda_exec/<run_tag>/ (managed by ik:exec)
+- NEVER write to data/gen/ — that directory is deprecated
 - You MUST NOT run formal benchmarks yourself — use request_formal_bench to ask the Supervisor
 - FORBIDDEN commands: ik:bench, ik:env, ik:index — do not run these under any circumstances
 
@@ -67,7 +68,7 @@ Available docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), c
 ### ik:optimize — Optimization iteration
 
 Use ik:exec iteratively: compile → trial → profile → analyze → edit code → repeat.
-Target: data/gen/{arch}/{kernel}/ — only the gen impl source code is modified.
+Target: ~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/ — write your optimized code here.
 Reference: data/ref/{kernel}/ — read-only baselines (cublas, cudnn, etc).
 
 ### CUDA Toolkit tools

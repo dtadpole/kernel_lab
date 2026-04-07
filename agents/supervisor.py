@@ -115,7 +115,7 @@ class Supervisor(DefaultHandler):
         """Run Solver sessions in an infinite loop until manually stopped.
 
         Each session is a fresh Solver with a new run_tag, picking up from
-        the current state of data/gen/. Sessions accumulate experience —
+        the current state of the KB gen directory. Sessions accumulate experience —
         each new Solver gets a summary of what previous sessions tried.
         """
         session_number = 0

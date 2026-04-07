@@ -4,17 +4,17 @@ Shared utility that maps implementation slugs to source files.
 Used by compile, trial, bench, and any future tool.
 
 Slug format: {source}-{name}
-  - source: "ref" (data/ref/{kernel}/), "gen" (data/gen/{arch}/{kernel}/),
+  - source: "ref" (data/ref/{kernel}/), "gen" (~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/),
             or "peak" (.peak/{arch}/{kernel}/)
   - name: file stem (e.g., "cublas", "cutedsl", "cuda")
 
 Full identifier: {kernel}/{impl_slug}  (e.g., "matmul/ref-pytorch")
 
 File resolution: slug → try .py first, then .cu
-  - ref-pytorch  → data/ref/matmul/cublas.py
-  - gen-cutedsl → data/gen/sm90/matmul/cutedsl.py
-  - gen-cuda    → data/gen/sm90/matmul/cuda.cu
-  - peak-cuda   → .peak/sm90/fa4/cuda.cu
+  - ref-pytorch  → data/ref/matmul/pytorch/pytorch.py
+  - gen-cuda     → ~/kernel_lab_kb/runs/<run_tag>/gen/sm90/matmul/cuda/cuda.cu
+  - gen-cutedsl  → ~/kernel_lab_kb/runs/<run_tag>/gen/sm90/matmul/cutedsl/cutedsl.py
+  - peak-cuda    → .peak/sm90/fa4/cuda/cuda.cu
 
 Helper files (dependencies of an entry point) are auto-discovered:
   - .py entry points: all other .py files in the same directory are included
@@ -284,9 +284,9 @@ def resolve_impl(
     """Resolve an implementation slug to its source files and metadata.
 
     Each impl lives in its own subdirectory:
-        ref-pytorch  → data/ref/{kernel}/cublas/
-        gen-cuda    → data/gen/{arch}/{kernel}/cuda/
-        gen-cutedsl → data/gen/{arch}/{kernel}/cutedsl/
+        ref-pytorch  → data/ref/{kernel}/pytorch/
+        gen-cuda     → ~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/cuda/
+        gen-cutedsl  → ~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/cutedsl/
 
     Entry point: {name}.py or {name}.cu inside the subdir.
     Helpers: all other files in the same subdir.

@@ -14,7 +14,7 @@ plugins/ik/             ← skill definitions
 
 ## Rules
 - You modify harness infrastructure, NOT kernel optimization code
-- NEVER touch data/gen/ — that is Solver's domain
+- NEVER touch ~/kernel_lab_kb/runs/*/gen/ — that is Solver's domain
 - After modifying cuda_exec/ or plugins/ik/, run the relevant tests to verify
 - After modifying data/configs/, verify with a quick ik:exec trial
 - After adding a new reference impl, verify it compiles and runs correctly

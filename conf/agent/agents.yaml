@@ -56,7 +56,7 @@ agents:
           compute-sanitizer, cuda-memcheck, nvprof, nvprune, cu++filt 等全部允许),
           ssh localhost (用于网络访问), curl/wget (下载文档/资料)
           禁止: ik:bench, ik:env, ik:index — 这些由 Supervisor 管理
-          禁止: 通过 Bash 编辑或写入 data/gen/ 和 ~/.cuda_exec/<run_tag>/ 之外的任何文件
+          禁止: 通过 Bash 编辑或写入 ~/kernel_lab_kb/runs/<run_tag>/ 和 ~/.cuda_exec/<run_tag>/ 之外的任何文件
           禁止: 修改 CUDA_VISIBLE_DEVICES 环境变量 — GPU 分配由 Supervisor 管理
         blocked_paths:
           - ~/kernel_lab/
@@ -77,10 +77,10 @@ agents:
           - ~/.cuda_exec/<run_tag>/
       - tool: Edit
         allow: true
-        constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
+        constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Write
         allow: true
-        constraint: "允许写入 ~/kernel_lab_kb/runs/<run_tag>/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
+        constraint: "允许写入 ~/kernel_lab_kb/runs/<run_tag>/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Read
         allow: true
         constraint: "只允许读白名单中的路径"
@@ -171,10 +171,10 @@ agents:
     tool_rules:
       - tool: Edit
         allow: true
-        constraint: "允许编辑 data/configs/, data/ref/, cuda_exec/, plugins/ik/，禁止编辑 data/gen/（那是 Solver 的地盘）"
+        constraint: "允许编辑 data/configs/, data/ref/, cuda_exec/, plugins/ik/"
       - tool: Write
         allow: true
-        constraint: "允许写入 data/configs/, data/ref/, cuda_exec/, plugins/ik/，禁止写入 data/gen/"
+        constraint: "允许写入 data/configs/, data/ref/, cuda_exec/, plugins/ik/"
       - tool: Bash
         allow: true
         constraint: |

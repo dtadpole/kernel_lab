@@ -179,14 +179,19 @@ def _resolve_run_home(run_tag: str | None = None,
 
     Priority:
       1. Explicit run_tag argument
-      2. IK_RUN_HOME env var — direct path to a run directory
-      3. Fallback: kernel_lab_kb/runs/run_{host_slug}
+      2. CUDA_EXEC_RUN_TAG env var — set by Supervisor's AgentRunner
+      3. IK_RUN_HOME env var — direct path to a run directory
+      4. Fallback: kernel_lab_kb/runs/run_{host_slug}
     """
     import os
     repo = kb_repo or _KB_REPO
 
     if run_tag:
         return repo / "runs" / run_tag
+
+    env_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
+    if env_tag:
+        return repo / "runs" / env_tag
 
     env_home = os.environ.get("IK_RUN_HOME")
     if env_home:

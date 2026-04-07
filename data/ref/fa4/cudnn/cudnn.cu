@@ -53,6 +53,7 @@ static struct {
     std::shared_ptr<fe::graph::Graph> graph;
     void *workspace = nullptr;
     size_t ws_size = 0;
+    void *stats_buf = nullptr;
     int64_t B = 0, S = 0, H = 0, D = 0;
     bool causal = false, ready = false;
 
@@ -78,25 +79,41 @@ static struct {
         auto opts = fe::graph::SDPA_attributes().set_name("sdpa")
             .set_attn_scale(1.0f / sqrtf((float)D)).set_causal_mask(causal);
         auto [O, Stats] = graph->sdpa(Q, K, V, opts);
-        (void)Stats;
 
         O->set_output(true).set_dim({B,H,S,D}).set_stride({str[0],str[1],str[2],str[3]})
           .set_uid(4).set_data_type(fe::DataType_t::BFLOAT16);
 
-        auto e = graph->validate();          if (e.is_bad()) { fprintf(stderr,"validate: %s\n", e.get_message().c_str()); return false; }
-        e = graph->build_operation_graph(handle); if (e.is_bad()) { fprintf(stderr,"build: %s\n", e.get_message().c_str()); return false; }
-        e = graph->create_execution_plans({fe::HeurMode_t::A}); if (e.is_bad()) { fprintf(stderr,"plans: %s\n", e.get_message().c_str()); return false; }
-        e = graph->build_plans(handle);      if (e.is_bad()) { fprintf(stderr,"build_plans: %s\n", e.get_message().c_str()); return false; }
+        /* Stats tensor: cuDNN may require it even in inference mode */
+        if (Stats) {
+            Stats->set_output(true).set_dim({B,H,S,1}).set_stride({H*S, S, 1, 1})
+                  .set_uid(5).set_data_type(fe::DataType_t::FLOAT);
+        }
+
+        auto e = graph->validate();
+        if (e.is_bad()) { fprintf(stderr,"validate: %s\n", e.get_message().c_str()); return false; }
+        e = graph->build_operation_graph(handle);
+        if (e.is_bad()) { fprintf(stderr,"build_op_graph: %s\n", e.get_message().c_str()); return false; }
+        e = graph->create_execution_plans({fe::HeurMode_t::A});
+        if (e.is_bad()) { fprintf(stderr,"create_plans: %s\n", e.get_message().c_str()); return false; }
+        e = graph->check_support(handle);
+        if (e.is_bad()) { fprintf(stderr,"check_support: %s\n", e.get_message().c_str()); return false; }
+        e = graph->build_plans(handle);
+        if (e.is_bad()) { fprintf(stderr,"build_plans: %s\n", e.get_message().c_str()); return false; }
 
         auto need = graph->get_workspace_size();
         if (need > ws_size) { if (workspace) cudaFree(workspace); cudaMalloc(&workspace, need); ws_size = need; }
+
+        /* Stats buffer */
+        if (stats_buf) cudaFree(stats_buf);
+        cudaMalloc(&stats_buf, B * H * S * sizeof(float));
+
         ready = true; return true;
     }
 
     int run(void *Q, void *K, void *V, void *O, cudaStream_t s) {
         if (!ready) { fprintf(stderr, "cuDNN: not ready\n"); return -1; }
         cudnnSetStream(handle, s);
-        std::unordered_map<int64_t,void*> vp = {{1,Q},{2,K},{3,V},{4,O}};
+        std::unordered_map<int64_t,void*> vp = {{1,Q},{2,K},{3,V},{4,O},{5,stats_buf}};
         auto e = graph->execute(handle, vp, workspace);
         if (e.is_bad()) { fprintf(stderr, "cuDNN execute: %s\n", e.get_message().c_str()); return -2; }
         return 0;

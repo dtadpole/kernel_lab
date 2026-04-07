@@ -87,6 +87,24 @@ def _detect_gpu_arch() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_cudnn_symlink(lib_dir: Path) -> None:
+    """Create libcudnn.so → libcudnn.so.9 if the unversioned symlink is missing.
+
+    The pip nvidia-cudnn package only ships versioned .so.9 files.
+    The linker needs the unversioned libcudnn.so to resolve -lcudnn.
+    """
+    unversioned = lib_dir / "libcudnn.so"
+    if unversioned.exists():
+        return
+    versioned = lib_dir / "libcudnn.so.9"
+    if versioned.exists():
+        try:
+            unversioned.symlink_to(versioned.name)
+            logger.debug("Created symlink %s → %s", unversioned, versioned.name)
+        except OSError as exc:
+            logger.warning("Cannot create libcudnn.so symlink: %s", exc)
+
+
 @functools.lru_cache(maxsize=1)
 def resolve_host_env() -> Dict[str, str]:
     """Resolve CUDA environment variables for the current host.
@@ -117,6 +135,13 @@ def resolve_host_env() -> Dict[str, str]:
         default_cuda = Path("/usr/local/cuda")
         if default_cuda.exists():
             env["CUDA_HOME"] = str(default_cuda.resolve())
+
+    # Ensure CUDA_HOME/bin is at the front of PATH so nvcc matches CUDA_HOME
+    if "CUDA_HOME" in env:
+        import os
+        cuda_bin = str(Path(env["CUDA_HOME"]) / "bin")
+        current_path = os.environ.get("PATH", "")
+        env["PATH"] = cuda_bin + ":" + current_path
 
     # Collect extra include dirs and libs from host config
     if entry:
@@ -160,8 +185,10 @@ def resolve_host_env() -> Dict[str, str]:
             if Path(expanded).is_dir():
                 lib_dirs.append(expanded)
                 libs.append("cudnn")
-                # Also set LD_LIBRARY_PATH so runtime finds libcudnn
+                # Set LD_LIBRARY_PATH so runtime finds libcudnn
                 env["LD_LIBRARY_PATH"] = expanded
+                # Ensure unversioned libcudnn.so symlink exists for the linker
+                _ensure_cudnn_symlink(Path(expanded))
 
         if include_dirs:
             env["NVCC_INCLUDE_DIRS"] = " ".join(include_dirs)

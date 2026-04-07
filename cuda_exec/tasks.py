@@ -494,6 +494,12 @@ def run_compile_task(
                 cu_slug = slug
                 cu_files = copied
                 break
+        if not cu_slug:
+            for slug, copied in all_copied.items():
+                if any(p.suffix == ".cu" for p in copied):
+                    cu_slug = slug
+                    cu_files = copied
+                    break
 
         # Legacy compat: also stage to inputs/reference/ and inputs/generated/
         # so trial.py can find them via the old paths

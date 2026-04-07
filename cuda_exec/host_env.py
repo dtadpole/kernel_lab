@@ -123,7 +123,7 @@ def resolve_host_env() -> Dict[str, str]:
         host_env = entry.get("env", {})
         include_dirs: list[str] = []
         lib_dirs: list[str] = []
-        libs: list[str] = ["cuda"]  # always link libcuda
+        libs: list[str] = ["cuda", "cublas"]  # always link libcuda + libcublas
 
         def _expand(path: str) -> str:
             """Expand @venv and @uv_cache placeholders."""

@@ -449,7 +449,7 @@ class AgentRunner:
     )
     # Commands that are always forbidden regardless of path
     _FORBIDDEN_COMMANDS = re.compile(
-        r'\bgit\b'
+        r'\b(git|gh)\b'
     )
 
     def _extract_paths_from_command(self, command: str) -> list[str]:

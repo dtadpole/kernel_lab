@@ -374,7 +374,8 @@ class Supervisor(DefaultHandler):
 
     def _build_initial_prompt(self, task: str, run_tag: str, kernel: str) -> str:
         template = _load_prompt("supervisor_initial")
-        return template.format(run_tag=run_tag, kernel=kernel, task=task)
+        result = template.format(run_tag=run_tag, kernel=kernel, task=task)
+        return result.replace("<run_tag>", run_tag)
 
     def _build_continue_prompt(self, verdict: StewardResponse) -> str:
         """Build the resume prompt for CONTINUE — injected into the same session."""

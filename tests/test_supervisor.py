@@ -27,16 +27,16 @@ from agents.supervisor import Supervisor, SupervisorState, _slugify
 
 @pytest.mark.quick
 def test_verdict_parse_accept():
-    v = ResponseVerdict.parse("ACCEPT\nWork looks good.")
-    assert v.action == "ACCEPT"
+    v = ResponseVerdict.parse("SUCCESS\nWork looks good.")
+    assert v.action == "SUCCESS"
     assert v.detail == ""
     assert "looks good" in v.reasoning
 
 
 @pytest.mark.quick
 def test_verdict_parse_reject_with_detail():
-    v = ResponseVerdict.parse("REJECT:Missing benchmark results\nNeed to run ik:bench")
-    assert v.action == "REJECT"
+    v = ResponseVerdict.parse("ABORT:Missing benchmark results\nNeed to run ik:bench")
+    assert v.action == "ABORT"
     assert v.detail == "Missing benchmark results"
     assert "ik:bench" in v.reasoning
 
@@ -163,7 +163,7 @@ def test_steward_response_levels():
 
 @pytest.mark.quick
 def test_steward_response_inline():
-    sr = StewardResponse(action="ACCEPT", detail="", reasoning="ok", intervention_level=1)
+    sr = StewardResponse(action="SUCCESS", detail="", reasoning="ok", intervention_level=1)
     assert not sr.needs_solver_interrupt
     assert not sr.needs_solver_restart
     assert not sr.needs_solver_kill
@@ -178,7 +178,7 @@ def test_steward_response_inject():
 
 @pytest.mark.quick
 def test_steward_response_restart():
-    sr = StewardResponse(action="REJECT", detail="missing bench", reasoning="", intervention_level=3)
+    sr = StewardResponse(action="ABORT", detail="missing bench", reasoning="", intervention_level=3)
     assert sr.needs_solver_interrupt
     assert sr.needs_solver_restart
     assert not sr.needs_solver_kill
@@ -291,7 +291,7 @@ def test_steward_router_uses_storage_config():
 
 @pytest.mark.quick
 def test_slugify():
-    assert _slugify("Optimize matmul kernel for SM90") == "optimize_matmul_kernel_for_sm90"
+    assert _slugify("Optimize matmul kernel for SM90") == "optimize_matmul_kern"
     assert _slugify("Hello, World!  Test") == "hello_world_test"
 
 
@@ -352,7 +352,7 @@ def test_response_router_session_end():
             "error_count": "0",
             "session_summary": "Tool: Read agents/__init__.py → empty file. Agent reported contents.",
         })
-        assert verdict.action in ("ACCEPT", "REJECT", "RETRY")
+        assert verdict.action in ("SUCCESS", "CONTINUE", "ABORT")
         print(f"  Verdict: {verdict.action}:{verdict.detail}")
         print(f"  Reasoning: {verdict.reasoning[:200]}")
         return verdict

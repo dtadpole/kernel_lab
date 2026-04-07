@@ -123,7 +123,7 @@ AgentMonitor._run_loop()  (并行 asyncio task，每 check_interval 秒执行一
 | `on_text` | Message stream | — | 记录（无动作） |
 | `on_ask` | ask_supervisor MCP | `answer_question()` | 返回答案（inline） |
 | `on_permission` | PermissionRequest hook | `check_permission()` | ALLOW / DENY |
-| `on_stop` | ResultMessage | `review_session_end()` | ACCEPT / REJECT / RETRY |
+| `on_stop` | ResultMessage | `review_session_end()` | SUCCESS / CONTINUE / ABORT |
 | `on_monitor_alert` | AgentMonitor | `handle_stuck()` / `handle_time_limit()` | CONTINUE / INJECT / INTERRUPT / EXTEND / WRAP_UP / KILL |
 
 ## 决策循环
@@ -150,14 +150,14 @@ run_task(task, run_tag)
     ├── phase = "deciding"
     │   └── 读取 _pending_verdict
     │       │
-    │       ├── ACCEPT (level 1)
+    │       ├── SUCCESS (level 1)
     │       │     → phase = "done", break
     │       │
-    │       ├── REJECT (level 3)
-    │       │     → 构建新 prompt（含拒绝原因），继续循环
-    │       │
-    │       ├── RETRY (level 3)
+    │       ├── CONTINUE (level 2)
     │       │     → 构建新 prompt（含具体指导），继续循环
+    │       │
+    │       ├── ABORT (level 3)
+    │       │     → phase = "done", break
     │       │
     │       └── other
     │             → phase = "done", break

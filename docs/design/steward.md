@@ -185,7 +185,7 @@ Monitor 检测到 Solver 停滞（idle 或循环）。
 Solver 声称完成任务（最关键的场景）。
 
 **触发方式：** StopEvent (Solver 停止运行)
-**Intervention Level：** 1 (ACCEPT) / 3 (REJECT/RETRY)
+**Intervention Level：** 1 (SUCCESS) / 2 (CONTINUE) / 3 (ABORT)
 
 **Supervisor → Steward：**
 - task_description: 原始任务
@@ -212,17 +212,17 @@ Solver 声称完成任务（最关键的场景）。
 
 回答格式：
 第一行必须是以下之一：
-- ACCEPT — 确认完成，工作符合要求
-- REJECT:<原因> — 不接受，说明缺失或错误
-- RETRY:<具体指导> — 让 Solver 带着具体指导重试
+- SUCCESS — formal benchmark 显示改进（new gem），session 完成
+- CONTINUE:<具体指导> — 让 Solver 带着具体指导继续
+- ABORT:<原因> — 停止（思路耗尽、卡死、超时）
 
 第二行起是详细评估。
 ```
 
 **Steward → Supervisor：**
-- ACCEPT → intervention_level=1, Supervisor 标记 task 完成
-- REJECT:\<reason\> → intervention_level=3, Supervisor 构建新 prompt（含拒绝原因），启动新 Solver iteration
-- RETRY:\<guidance\> → intervention_level=3, Supervisor 构建新 prompt（含具体指导），启动新 Solver iteration
+- SUCCESS → intervention_level=1, Supervisor 标记 task 完成
+- CONTINUE:\<guidance\> → intervention_level=2, Supervisor 构建新 prompt（含具体指导），启动新 Solver iteration
+- ABORT:\<reason\> → intervention_level=3, Supervisor 停止任务
 
 ---
 
@@ -313,17 +313,18 @@ Level 1: Inline      无中断
          ├── ask_question → 答案
          ├── permission → ALLOW/DENY
          ├── stuck → CONTINUE
-         ├── session_end → ACCEPT
+         ├── session_end → SUCCESS
          ├── time_limit → EXTEND
          └── progress_check → ON_TRACK
 
-Level 2: Inject      interrupt Solver → resume with new context
+Level 2: Inject/Continue  interrupt Solver → resume with new context
+         ├── session_end → CONTINUE:<guidance>
          ├── stuck → INJECT:<guidance>
          ├── time_limit → WRAP_UP
          └── progress_check → DRIFTING/REDIRECT
 
-Level 3: Restart     当前 session 结束，启动新 iteration
-         └── session_end → REJECT/RETRY
+Level 3: Abort       当前任务停止
+         └── session_end → ABORT:<reason>
 
 Level 4: Kill        立即终止
          ├── stuck → INTERRUPT

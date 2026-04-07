@@ -88,7 +88,7 @@ class ResponseScenario:
 @dataclass
 class ResponseVerdict:
     """Parsed response from the Steward."""
-    action: str        # ACCEPT, REJECT, RETRY, ALLOW, DENY, CONTINUE, INJECT, INTERRUPT, EXTEND, WRAP_UP, KILL
+    action: str        # SUCCESS, CONTINUE, ABORT, ALLOW, DENY, INJECT, INTERRUPT, EXTEND, WRAP_UP, KILL
     detail: str        # text after the colon (if any)
     reasoning: str     # full text after the first line
 
@@ -236,6 +236,7 @@ class ResponseRouter:
             model=config.model,
             permission_mode="acceptEdits",
             max_turns=config.max_turns,
+            max_budget_usd=5.0,
             builtin_tools=steward_tools,
             system_prompt=config.system_prompt,
         )

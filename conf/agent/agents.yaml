@@ -33,6 +33,7 @@ agents:
     model: claude-sonnet-4-6
     permission_mode: acceptEdits
     max_turns: 2000
+    max_budget_usd: 50.0
     tools:
       builtin:
         - Read
@@ -71,7 +72,8 @@ agents:
   rigger:
     description: "Harness Engineering — 修改 configs, reference impls, cuda_exec 基础设施"
     permission_mode: acceptEdits
-    max_turns: 50
+    max_turns: 500
+    max_budget_usd: 10.0
     tools:
       builtin:
         - Read
@@ -101,8 +103,8 @@ agents:
   benchmarker:
     description: "运行 ik:bench 正式 benchmark，只读评测"
     permission_mode: acceptEdits
-    max_turns: 10
-    max_budget_usd: 2.0
+    max_turns: 20
+    max_budget_usd: 5.0
     tools:
       builtin:
         - Bash

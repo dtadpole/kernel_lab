@@ -30,7 +30,7 @@ from agents.response_router import ResponseRouter, ResponseVerdict
 @dataclass
 class StewardResponse:
     """Steward's decision with explicit intervention level."""
-    action: str              # e.g. ACCEPT, REJECT, INJECT, KILL, ON_TRACK
+    action: str              # e.g. SUCCESS, CONTINUE, ABORT, INJECT, KILL, ON_TRACK
     detail: str              # text after colon (guidance, reason, minutes)
     reasoning: str           # full analysis text
     intervention_level: int  # 1=inline, 2=inject, 3=restart, 4=kill
@@ -52,12 +52,12 @@ class StewardResponse:
 
 _ACTION_LEVELS = {
     # Level 1: inline
-    "ALLOW": 1, "DENY": 1, "CONTINUE": 1, "ACCEPT": 1,
+    "ALLOW": 1, "DENY": 1, "SUCCESS": 1,
     "EXTEND": 1, "ON_TRACK": 1,
-    # Level 2: inject
-    "INJECT": 2, "WRAP_UP": 2, "DRIFTING": 2, "REDIRECT": 2,
-    # Level 3: restart
-    "REJECT": 3, "RETRY": 3,
+    # Level 2: inject / continue
+    "CONTINUE": 2, "INJECT": 2, "WRAP_UP": 2, "DRIFTING": 2, "REDIRECT": 2,
+    # Level 3: abort
+    "ABORT": 3,
     # Level 4: kill
     "INTERRUPT": 4, "KILL": 4,
 }
@@ -156,7 +156,7 @@ class Steward:
         total_tool_calls: int,
         error_count: int,
     ) -> StewardResponse:
-        """Review whether Solver truly finished. Returns ACCEPT/REJECT/RETRY (intervention_level=1/3)."""
+        """Review whether Solver truly finished. Returns SUCCESS/CONTINUE/ABORT (intervention_level=1/2/3)."""
         verdict = await self.router.respond("session_end", {
             "transcript_path": transcript_path,
             "result_text": result_text,

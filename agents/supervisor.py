@@ -38,7 +38,7 @@ from agents.steward import Steward, StewardResponse
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^\w\s-]", "", text.lower())
     slug = re.sub(r"[\s_]+", "_", slug)
-    return slug[:60].strip("_")
+    return slug[:20].strip("_")
 
 
 @dataclass
@@ -77,7 +77,7 @@ class Supervisor(DefaultHandler):
     def __init__(
         self,
         config: SystemConfig,
-        max_iterations: int = 0,  # 0 = unlimited (run until ACCEPT or hard_limit)
+        max_iterations: int = 0,  # 0 = unlimited (run until SUCCESS or hard_limit)
         response_prompts_dir: str | Path = "conf/agent/response_prompts",
     ):
         self.config = config
@@ -260,7 +260,7 @@ class Supervisor(DefaultHandler):
         solver_prompt = self._build_initial_prompt(task, run_tag, kernel)
 
         iteration = 0
-        while True:  # run until ACCEPT or hard_limit
+        while True:  # run until SUCCESS or hard_limit
             if self.max_iterations > 0 and iteration >= self.max_iterations:
                 break
             self.state.iteration = iteration
@@ -309,12 +309,12 @@ class Supervisor(DefaultHandler):
                 verdict = None
 
             if verdict is None or not verdict.action:
-                # No verdict or empty action — default to RETRY so we don't
+                # No verdict or empty action — default to CONTINUE so we don't
                 # silently accept incomplete work
                 verdict = StewardResponse(
-                    action="RETRY", detail="Steward could not produce a verdict",
-                    reasoning="No verdict available — retrying with fresh approach",
-                    intervention_level=3,
+                    action="CONTINUE", detail="Steward could not produce a verdict",
+                    reasoning="No verdict available — continuing with fresh approach",
+                    intervention_level=2,
                 )
 
             self.state.verdict_history.append({
@@ -326,10 +326,13 @@ class Supervisor(DefaultHandler):
 
             print(f"\n[Supervisor] Iteration {iteration} verdict: {verdict.action}")
 
-            if verdict.action == "ACCEPT":
+            if verdict.action == "SUCCESS":
                 self.state.phase = "done"
                 break
-            elif verdict.action in ("RETRY", "REJECT"):
+            elif verdict.action == "ABORT":
+                self.state.phase = "done"
+                break
+            elif verdict.action == "CONTINUE":
                 solver_prompt = self._build_retry_prompt(
                     task, run_tag, kernel, verdict, iteration,
                 )
@@ -344,7 +347,7 @@ class Supervisor(DefaultHandler):
         elapsed = (datetime.now() - self.state.started_at).total_seconds() if self.state.started_at else 0
 
         return TaskResult(
-            success=(verdict.action == "ACCEPT") if verdict else False,
+            success=(verdict.action == "SUCCESS") if verdict else False,
             result_text=last_result.result_text if last_result else "",
             iterations=self.state.iteration + 1,
             total_tool_calls=self.state.turns_completed,

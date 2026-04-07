@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import signal
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -117,7 +119,29 @@ async def run_single(args: argparse.Namespace) -> TaskResult:
     return result
 
 
+def _setup_process_group():
+    """Create a new process group so all children can be killed together.
+
+    When this process is killed (SIGTERM/SIGINT), the signal handler
+    kills the entire process group, ensuring no orphan Claude CLI
+    or MCP server processes are left behind.
+    """
+    os.setpgrp()  # become process group leader
+
+    def _kill_group(signum, frame):
+        print(f"\n[Main] Received signal {signum}, killing process group...")
+        try:
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, _kill_group)
+    signal.signal(signal.SIGINT, _kill_group)
+
+
 def main():
+    _setup_process_group()
     parser = argparse.ArgumentParser(description="Run Supervisor → Solver → Benchmarker loop")
     parser.add_argument("--kernel", default="matmul", choices=["matmul", "fa4", "vecadd"],
                         help="Kernel to optimize (default: matmul)")

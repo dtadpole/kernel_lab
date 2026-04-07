@@ -125,16 +125,8 @@ def enrich_result(bench_result: dict, configs: dict) -> dict:
     kernel = bench_result["kernel"]
     peak = resolve_gpu_peak_tflops()
     gpu_name = resolve_gpu_name()
-    # Golden = first .py ref (must match formal_benchmark's primary_ref selection)
-    golden = None
-    for ref_slug in bench_result.get("refs", []):
-        impl_result = bench_result.get("results", {}).get(ref_slug, {})
-        # .py refs have compile_ok=None (not compiled); .cu refs have compile_ok=True/False
-        if impl_result.get("compile_ok") is None:
-            golden = ref_slug
-            break
-    if not golden:
-        golden = bench_result["refs"][0] if bench_result.get("refs") else None
+    # Golden = first ref (alphabetical, matches formal_benchmark's primary_ref)
+    golden = bench_result["refs"][0] if bench_result.get("refs") else None
     impl_order = bench_result.get("impls_requested", [])
 
     raw = _extract_impl_metrics(bench_result, configs)
@@ -353,13 +345,10 @@ def formal_benchmark(
     refs = [r for r in resolved if r["source"] in ("ref", "peak")]
     gens = [r for r in resolved if r["source"] == "gen"]
 
-    # Golden must be a .py ref — .cu and .py impls use different input
-    # generation (C harness PRNG vs Python torch.randn), so correctness
-    # comparison only works when golden is .py (shared generate_inputs()).
-    py_refs = [r for r in refs if r["file_type"] == "py"]
-    if not py_refs:
-        raise ValueError("At least one .py reference impl is required as golden")
-    primary_ref = py_refs[0]
+    # Golden = first ref (alphabetical). Used for speedup ratios.
+    # Correctness is only valid between impls sharing the same input
+    # generation path (.cu↔.cu via C harness, .py↔.py via generate_inputs).
+    primary_ref = refs[0]
 
     results: Dict[str, dict] = {}
 

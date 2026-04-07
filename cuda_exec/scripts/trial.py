@@ -310,6 +310,10 @@ def main() -> int:
         # For .cu impls: C harness used fill_random_bf16(seed=1,2,...) as inputs.
         #   We must run the golden model with those SAME inputs to get a fair reference.
         golden_impl = next((im for im in impls if im["slug"] == golden_slug), None)
+        golden_is_cu = golden_impl and golden_impl["type"] == "cu"
+
+        # Load golden .py module (needed when golden is .py and impl is .cu,
+        # OR when golden is .cu and impl is .py — to re-run .py with C inputs)
         golden_module = None
         if golden_impl and golden_impl["type"] == "py":
             old_path = list(sys.path)
@@ -318,6 +322,32 @@ def main() -> int:
                 golden_module = load_reference_module(golden_impl["entry"])
             finally:
                 sys.path[:] = old_path
+
+        # Helper: generate C harness inputs (matching eval_harness.cu's fill_random_bf16)
+        def _make_harness_inputs():
+            input_size = int(trial_config.get("input_size", 0))
+            shape = [int(v) for v in trial_config.get("shape", [])]
+            ref_inputs = generate_inputs(trial_config, device)
+            harness_inputs = []
+            tensor_idx = 0
+            for item in ref_inputs:
+                if isinstance(item, torch.Tensor):
+                    t = _harness_fill_random_bf16(input_size, tensor_idx + 1)
+                    harness_inputs.append(t.to(device).reshape(shape))
+                    tensor_idx += 1
+                else:
+                    harness_inputs.append(item)
+            return harness_inputs
+
+        # Helper: run a .py module with given inputs, return output tensor
+        def _run_py_model(module, inputs):
+            model_cls = getattr(module, "Model")
+            get_init = getattr(module, "get_init_inputs", None)
+            init_args = list(get_init()) if get_init else []
+            model = model_cls(*init_args).cuda(device)
+            out = model(*inputs)
+            torch.cuda.synchronize(device)
+            return out.float().cpu().flatten() if hasattr(out, 'float') else None
 
         for slug, r in impl_results.items():
             if slug == golden_slug:
@@ -329,38 +359,32 @@ def main() -> int:
                 impl_tensor = r.get("output_tensor")
 
                 if impl_info and impl_info["type"] == "cu" and golden_module is not None:
-                    # .cu impl: reproduce C harness inputs, run golden model with them
+                    # .cu impl vs .py golden: re-run golden with C harness inputs
                     try:
-                        input_size = int(trial_config.get("input_size", 0))
-                        shape = [int(v) for v in trial_config.get("shape", [])]
-                        ref_inputs = generate_inputs(trial_config, device)
-
                         with torch.no_grad(), torch.cuda.device(device):
-                            # Replace tensor inputs with harness-generated BF16
-                            # tensors (matching C harness fill_random_bf16), but
-                            # keep non-tensor args (e.g. causal bool) as-is.
-                            harness_inputs = []
-                            tensor_idx = 0
-                            for item in ref_inputs:
-                                if isinstance(item, torch.Tensor):
-                                    t = _harness_fill_random_bf16(input_size, tensor_idx + 1)
-                                    harness_inputs.append(t.to(device).reshape(shape))
-                                    tensor_idx += 1
-                                else:
-                                    harness_inputs.append(item)
-                            model_cls = getattr(golden_module, "Model")
-                            get_init = getattr(golden_module, "get_init_inputs", None)
-                            init_args = list(get_init()) if get_init else []
-                            model = model_cls(*init_args).cuda(device)
-                            ref_out = model(*harness_inputs)
-                            torch.cuda.synchronize(device)
-
-                        ref_tensor = ref_out.float().cpu().flatten() if hasattr(ref_out, 'float') else None
+                            ref_tensor = _run_py_model(golden_module, _make_harness_inputs())
                         r["correctness"] = _check_correctness(ref_tensor, impl_tensor)
                     except Exception as exc:
                         r["correctness"] = {"passed": None, "reason": f"cu correctness error: {exc}"}
+
+                elif impl_info and impl_info["type"] == "py" and golden_is_cu:
+                    # .py impl vs .cu golden: re-run .py impl with C harness inputs,
+                    # compare against golden's output (which also used C harness inputs)
+                    try:
+                        old_path = list(sys.path)
+                        sys.path.insert(0, str(impl_info["dir"]))
+                        try:
+                            impl_module = load_reference_module(impl_info["entry"])
+                        finally:
+                            sys.path[:] = old_path
+                        with torch.no_grad(), torch.cuda.device(device):
+                            impl_out = _run_py_model(impl_module, _make_harness_inputs())
+                        r["correctness"] = _check_correctness(golden_tensor, impl_out)
+                    except Exception as exc:
+                        r["correctness"] = {"passed": None, "reason": f"py vs cu correctness error: {exc}"}
+
                 else:
-                    # .py impl: same inputs as golden → direct compare
+                    # .py impl vs .py golden: same inputs → direct compare
                     r["correctness"] = _check_correctness(golden_tensor, impl_tensor)
 
         # --- Build output (strip output_tensor, not JSON-serializable) ---

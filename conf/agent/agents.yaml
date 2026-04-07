@@ -77,10 +77,10 @@ agents:
           - ~/.cuda_exec/<run_tag>/
       - tool: Edit
         allow: true
-        constraint: "允许编辑 data/gen/、~/kernel_lab_kb/runs/<run_tag>/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
+        constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Write
         allow: true
-        constraint: "允许写入 data/gen/、~/kernel_lab_kb/runs/<run_tag>/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
+        constraint: "允许写入 ~/kernel_lab_kb/runs/<run_tag>/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Read
         allow: true
         constraint: "只允许读白名单中的路径"

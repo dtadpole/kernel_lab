@@ -179,7 +179,7 @@ class AgentRunner:
             },
             # Only load our MCP servers, skip all default plugins
             # (data/datamate/meta/calendar plugins cause stream closed crashes)
-            extra_args={"--strict-mcp-config": True},
+            extra_args={"strict-mcp-config": True},
         )
 
         if ac.max_budget_usd > 0:

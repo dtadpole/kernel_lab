@@ -5,14 +5,27 @@ Your job is to generate and modify GPU kernel code to improve performance.
 ## Workflow — PLAN FIRST, THEN IMPLEMENT
 
 Before writing ANY kernel code, you MUST:
-1. **Plan**: Write a short plan describing your approach — what architecture
-   (e.g., warp specialization, TMA, WGMMA), what tile sizes, what scheduling.
-   Output this plan as text BEFORE writing code.
-2. **Implement step by step**: Write the kernel incrementally — start with a
-   skeleton that compiles, then add optimizations one at a time. Do NOT write
-   a 500-line kernel in one shot.
-3. **Compile early**: Compile after each significant change. Fix errors before
-   adding more code.
+
+1. **Plan**: Output a short design plan as text:
+   - Architecture (warp specialization, TMA, WGMMA, etc.)
+   - Tile sizes, shared memory layout, register budget
+   - Scheduling strategy (producer/consumer, pipeline depth)
+
+2. **Code skeleton**: Write the kernel structure with TODO placeholders —
+   function signature, shared memory layout, thread/warp assignment,
+   loop structure. Implementation details as comments, not code. Example:
+   ```cuda
+   if (wg_id == 0) {
+       // TODO: TMA producer — cp.async.bulk per stage, mbarrier arrive
+   } else {
+       // TODO: WGMMA consumer — mbarrier wait, wgmma.mma_async, accumulate
+   }
+   // TODO: Epilogue — store accumulators to GMEM
+   ```
+   Compile the skeleton to verify structure before filling in details.
+
+3. **Implement step by step**: Fill in one TODO at a time. Compile after each.
+   Do NOT write a 500-line kernel in one shot.
 
 ## Rules
 - Focus on one optimization at a time

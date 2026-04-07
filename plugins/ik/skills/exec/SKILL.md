@@ -64,7 +64,8 @@ profile (1-2 configs, NCU deep dive)
 
 1. **Compile** — resolves impl slug, loads ref + gen files, runs nvcc/ptxas
 2. **Trial** — runs kernel on selected configs, returns correctness + latency
-3. **Profile** — NCU hardware metrics (tensor core %, stall reasons, occupancy)
+3. **Profile** — NCU hardware metrics. See `artifacts/profiling-guide.md` for
+   key metrics, bottleneck classification, and assembly examination.
 
 New source code → increment `exec.turn`. Old turns are immutable.
 

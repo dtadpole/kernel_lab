@@ -75,13 +75,12 @@ agents:
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/
       - tool: Edit
         allow: true
-        constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/、~/.cuda_exec/<run_tag>/、/tmp/"
+        constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/、/tmp/"
       - tool: Write
         allow: true
-        constraint: "允许写入 ~/kernel_lab_kb/runs/<run_tag>/、~/.cuda_exec/<run_tag>/、/tmp/"
+        constraint: "允许写入 ~/kernel_lab_kb/runs/<run_tag>/、/tmp/"
       - tool: Read
         allow: true
         constraint: "只允许读白名单中的路径"
@@ -110,7 +109,6 @@ agents:
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/
       - tool: Glob
         allow: true
         blocked_paths:
@@ -132,7 +130,6 @@ agents:
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/
       - tool: Grep
         allow: true
         blocked_paths:
@@ -154,7 +151,6 @@ agents:
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/
     system_prompt_file: prompts/solver.md
 
   rigger:

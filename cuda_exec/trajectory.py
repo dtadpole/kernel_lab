@@ -456,8 +456,8 @@ def prepare_run(
     if ref_src.exists():
         shutil.copytree(ref_src, ref_dst)
 
-    # 2b. Snapshot data/peak/<arch>/<kernel>/ → peak/<arch>/<kernel>/
-    peak_src = PROJECT_ROOT / "data" / "peak" / arch / kernel
+    # 2b. Snapshot .peak/<arch>/<kernel>/ → peak/<arch>/<kernel>/
+    peak_src = PROJECT_ROOT / ".peak" / arch / kernel
     peak_dst = run_dir / "peak" / arch / kernel
     if peak_src.exists() and not peak_dst.exists():
         shutil.copytree(peak_src, peak_dst)

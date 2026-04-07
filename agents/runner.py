@@ -409,16 +409,18 @@ class AgentRunner:
     def _extract_paths_from_command(self, command: str) -> list[str]:
         """Extract all file paths from a Bash command string.
 
-        Finds absolute paths (/...) and home paths (~/...) in the command.
-        All extracted paths are checked against blocked/allowed rules.
+        Finds absolute paths (/...), home paths (~/...), and relative paths
+        (e.g. data/peak/...) in the command. Relative paths are resolved
+        against cwd. All extracted paths are checked against blocked/allowed rules.
         """
         import os
         paths = []
-        for match in re.finditer(r'(?:~|/)[^\s;|>&<\'"()]+', command):
+        # Match ~/paths, absolute paths, and relative paths containing /
+        for match in re.finditer(r'(?:~/|/|[a-zA-Z0-9_.]+/)[a-zA-Z0-9_./<>\-]*', command):
             raw = match.group(0)
             resolved = os.path.expanduser(raw)
             if not os.path.isabs(resolved):
-                continue
+                resolved = os.path.join(self.cwd, resolved)
             paths.append(resolved)
         return paths
 

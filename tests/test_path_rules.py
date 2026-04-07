@@ -413,12 +413,12 @@ def test_read_data_gen_blocked():
 
 @pytest.mark.quick
 def test_read_data_peak_blocked():
-    """Read from data/peak/ — should block."""
+    """Read from .peak/ — should block."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
         allowed_paths=["~/kernel_lab/data/ref/", "~/kernel_lab/data/configs/"],
     )
     result = runner._check_tool_rules("Read", {
-        "file_path": "/home/zhenc/kernel_lab/data/peak/sm90/matmul/cuda.cu"
+        "file_path": "/home/zhenc/kernel_lab/.peak/sm90/matmul/cuda.cu"
     })
     assert result.get("decision") == "block"

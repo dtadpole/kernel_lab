@@ -5,7 +5,7 @@ Used by compile, trial, bench, and any future tool.
 
 Slug format: {source}-{name}
   - source: "ref" (data/ref/{kernel}/), "gen" (data/gen/{arch}/{kernel}/),
-            or "peak" (data/peak/{arch}/{kernel}/)
+            or "peak" (.peak/{arch}/{kernel}/)
   - name: file stem (e.g., "cublas", "cutedsl", "cuda")
 
 Full identifier: {kernel}/{impl_slug}  (e.g., "matmul/ref-pytorch")
@@ -14,7 +14,7 @@ File resolution: slug → try .py first, then .cu
   - ref-pytorch  → data/ref/matmul/cublas.py
   - gen-cutedsl → data/gen/sm90/matmul/cutedsl.py
   - gen-cuda    → data/gen/sm90/matmul/cuda.cu
-  - peak-cuda   → data/peak/sm90/fa4/cuda.cu
+  - peak-cuda   → .peak/sm90/fa4/cuda.cu
 
 Helper files (dependencies of an entry point) are auto-discovered:
   - .py entry points: all other .py files in the same directory are included
@@ -36,7 +36,10 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
 
 
 def _peak_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
-    return (data_root or _DEFAULT_DATA_ROOT) / "peak" / arch / kernel
+    if data_root:
+        # Bench snapshots still use data_root/peak/ (copied during snapshot)
+        return data_root / "peak" / arch / kernel
+    return _PROJECT_ROOT / ".peak" / arch / kernel
 
 
 def list_gems(kernel: str, arch: str, impl_name: str = "cuda",

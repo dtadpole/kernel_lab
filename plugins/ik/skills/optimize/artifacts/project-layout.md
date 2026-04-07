@@ -8,7 +8,7 @@ For KB directory structure and gem rules, see `artifacts/kb-layout.md`.
 | What | Path |
 |------|------|
 | Reference impls | `data/ref/{kernel}/` |
-| Peak impls | `data/peak/{arch}/{kernel}/` |
+| Peak impls | `.peak/{arch}/{kernel}/` |
 | Gen impls (scratch) | `~/kernel_lab_kb/runs/run_<host>/gen/{arch}/{kernel}/` |
 | Configs | `data/configs/{kernel}.json` |
 | Roofline specs | `docs/roofline/` |

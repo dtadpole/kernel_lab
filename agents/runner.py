@@ -591,7 +591,7 @@ class AgentRunner:
                             result.stop_reason = getattr(message, "stop_reason", "end_turn")
                             stop_event = StopEvent(
                                 reason=result.stop_reason,
-                                result_text=result.result_text[:1000],
+                                result_text=result.result_text[:5000],
                             )
                             result.log.append(stop_event)
                             await self.handler.on_stop(stop_event)

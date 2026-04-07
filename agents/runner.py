@@ -453,6 +453,8 @@ class AgentRunner:
     _NAV_COMMANDS = re.compile(
         r'^\s*(ls|mkdir|touch|dirname|basename|pwd)\b'
     )
+    # Recursive ls — blocked (would expose subdirectory contents)
+    _RECURSIVE_LS = re.compile(r'\bls\b.*\s+-\S*R')
     # Commands that read content or compile/execute — check blocked paths
     _DANGEROUS_COMMANDS = re.compile(
         r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|'
@@ -496,6 +498,8 @@ class AgentRunner:
                     command = tool_input.get("command", "")
                     if command and self._FORBIDDEN_COMMANDS.search(command):
                         return self._deny(f"Forbidden command detected in: {command[:100]}")
+                    if command and self._RECURSIVE_LS.search(command):
+                        return self._deny("Recursive ls (-R) is not allowed. Use ls <dir> instead.")
 
                 if not rule.blocked_paths:
                     # No path restrictions — just apply constraint

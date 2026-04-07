@@ -58,10 +58,12 @@ def do_compile(
     # IMPORTANT: put the target impl FIRST so run_compile_task selects it as
     # the .cu to compile (it picks the first .cu slug it encounters, and
     # ref-cudnn also has a .cu entry point which would otherwise shadow gen-cuda).
+    # Only stage target impl + ref impls (for harness comparison).
+    # Do NOT stage peak-* impls — Solver must not see peak source code.
     all_impls = resolve_impls(kernel, arch, "all", data_root=data_root)
     compile_impls = {impl_slug: dict(impl["files"])}
     for r in all_impls:
-        if r["slug"] not in compile_impls:
+        if r["slug"].startswith("ref-") and r["slug"] not in compile_impls:
             compile_impls[r["slug"]] = dict(r["files"])
 
     compile_req = CompileRequest(

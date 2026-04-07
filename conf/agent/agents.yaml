@@ -64,6 +64,7 @@ agents:
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
+          - ~/.cuda_exec_bench/
         allowed_paths:
           - ~/kernel_lab/.venv/
           - ~/kernel_lab/cuda_exec/
@@ -74,7 +75,7 @@ agents:
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/<run_tag>/
+          - ~/.cuda_exec/
       - tool: Edit
         allow: true
         constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/、~/.cuda_exec/<run_tag>/、/tmp/"
@@ -90,6 +91,7 @@ agents:
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
+          - ~/.cuda_exec_bench/
         allowed_paths:
           # 相对路径
           - cuda_exec/
@@ -108,7 +110,7 @@ agents:
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/<run_tag>/
+          - ~/.cuda_exec/
       - tool: Glob
         allow: true
         blocked_paths:
@@ -117,6 +119,7 @@ agents:
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
+          - ~/.cuda_exec_bench/
         allowed_paths:
           - cuda_exec/
           - plugins/
@@ -129,7 +132,7 @@ agents:
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/<run_tag>/
+          - ~/.cuda_exec/
       - tool: Grep
         allow: true
         blocked_paths:
@@ -138,6 +141,7 @@ agents:
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
+          - ~/.cuda_exec_bench/
         allowed_paths:
           - cuda_exec/
           - plugins/
@@ -150,7 +154,7 @@ agents:
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
-          - ~/.cuda_exec/<run_tag>/
+          - ~/.cuda_exec/
     system_prompt_file: prompts/solver.md
 
   rigger:

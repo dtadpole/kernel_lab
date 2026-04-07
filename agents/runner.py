@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -405,13 +406,20 @@ class AgentRunner:
                 return True
         return False
 
-    def _extract_paths_from_command(self, command: str) -> list[str]:
-        """Extract file paths from a Bash command string.
+    # Commands that read file contents — block these from accessing blocked paths
+    _READ_COMMANDS = re.compile(
+        r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|wc)\b'
+    )
 
-        Finds absolute paths (/...), home paths (~/...), and expands them.
+    def _extract_read_paths_from_command(self, command: str) -> list[str]:
+        """Extract file paths from read-like commands in a Bash command string.
+
+        Only scans commands that read file contents (cat, head, tail, etc.).
+        Ignores execution commands (python, nvcc, etc.) so ik:exec can run.
         """
         import os
-        import re
+        if not self._READ_COMMANDS.search(command):
+            return []
         paths = []
         # Match absolute paths and ~/paths in the command
         for match in re.finditer(r'(?:~|/)[^\s;|>&<\'"()]+', command):
@@ -459,11 +467,11 @@ class AgentRunner:
                                 "reason": f"Access denied: '{file_path}' is blocked.",
                             }
 
-                # ── Bash: scan command for blocked paths ──
+                # ── Bash: scan read-like commands for blocked paths ──
                 elif tool_name == "Bash":
                     command = tool_input.get("command", "")
                     if command:
-                        for path in self._extract_paths_from_command(command):
+                        for path in self._extract_read_paths_from_command(command):
                             if self._is_path_blocked(path, rule):
                                 return {
                                     "decision": "block",

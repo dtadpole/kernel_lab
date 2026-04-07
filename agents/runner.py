@@ -375,8 +375,20 @@ class AgentRunner:
         server = create_sdk_mcp_server("supervisor-tools", tools=tools_list)
         return {"supervisor-tools": server}
 
+    def _resolve_path_pattern(self, pattern: str) -> str:
+        """Resolve <run_tag> and ~ in path patterns."""
+        import os
+        run_tag = self.storage_config.resolved_run_tag
+        resolved = pattern.replace("<run_tag>", run_tag)
+        resolved = os.path.expanduser(resolved)
+        # Resolve relative paths against cwd
+        if not os.path.isabs(resolved):
+            resolved = os.path.join(self.cwd, resolved)
+        return resolved
+
     def _check_tool_rules(self, tool_name: str, tool_input: dict) -> dict:
         """Enforce tool_rules from config. Returns hook output dict."""
+        import os
         for rule in self.agent_config.tool_rules:
             if rule.tool == tool_name:
                 if not rule.allow:
@@ -384,6 +396,33 @@ class AgentRunner:
                         "decision": "block",
                         "reason": f"Tool '{tool_name}' is not allowed for this agent role.",
                     }
+                # Check blocked_paths / allowed_paths
+                if rule.blocked_paths:
+                    file_path = (
+                        tool_input.get("file_path", "")
+                        or tool_input.get("path", "")
+                    )
+                    if file_path and not file_path.startswith("{"):  # skip non-path inputs
+                        resolved = os.path.expanduser(file_path)
+                        if not os.path.isabs(resolved):
+                            resolved = os.path.join(self.cwd, resolved)
+                        # Normalize: ensure trailing / for directory prefix matching
+                        resolved_dir = resolved.rstrip("/") + "/"
+                        for blocked in rule.blocked_paths:
+                            blocked_resolved = self._resolve_path_pattern(blocked).rstrip("/") + "/"
+                            if resolved_dir.startswith(blocked_resolved) or resolved == blocked_resolved.rstrip("/"):
+                                # Check if an allowed_path overrides the block
+                                is_allowed = False
+                                for allowed in rule.allowed_paths:
+                                    allowed_resolved = self._resolve_path_pattern(allowed).rstrip("/") + "/"
+                                    if resolved_dir.startswith(allowed_resolved) or resolved == allowed_resolved.rstrip("/"):
+                                        is_allowed = True
+                                        break
+                                if not is_allowed:
+                                    return {
+                                        "decision": "block",
+                                        "reason": f"Access denied: '{file_path}' is blocked.",
+                                    }
                 if rule.constraint:
                     return {
                         "hookSpecificOutput": {
@@ -429,10 +468,9 @@ class AgentRunner:
                                     result.log.append(event)
                                     await self.handler.on_text(event)
                                 elif isinstance(block, ThinkingBlock):
-                                    thinking_text = getattr(block, "thinking", "")
-                                    if thinking_text:
-                                        event = TextOutputEvent(text=f"[thinking] {thinking_text[:1000]}")
-                                        result.log.append(event)
+                                    # Thinking serves as heartbeat (timestamp updated below)
+                                    # but content is NOT logged to journal/trajectory
+                                    pass
                             # Accumulate usage
                             if message.usage:
                                 for k, v in message.usage.items():

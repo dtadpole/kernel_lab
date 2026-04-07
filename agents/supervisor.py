@@ -34,6 +34,16 @@ from agents.runner import AgentRunner, RunResult
 from agents.session_log import SessionLog
 from agents.steward import Steward, StewardResponse
 
+PROMPTS_DIR = Path("conf/agent/prompts")
+
+
+def _load_prompt(name: str) -> str:
+    """Load a prompt template from conf/agent/prompts/<name>.md."""
+    path = PROMPTS_DIR / f"{name}.md"
+    if path.exists():
+        return path.read_text().strip()
+    raise FileNotFoundError(f"Prompt template not found: {path}")
+
 
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^\w\s-]", "", text.lower())
@@ -363,39 +373,14 @@ class Supervisor(DefaultHandler):
     # ── Prompt builders ──
 
     def _build_initial_prompt(self, task: str, run_tag: str, kernel: str) -> str:
-        return f"""Run tag for this session: {run_tag}
-Use this run_tag for ALL ik:exec commands (exec.run_tag={run_tag}).
-Scratch directory: ~/.cuda_exec/{run_tag}/
-Kernel: {kernel}
-
----
-
-{task}
-
----
-
-IMPORTANT: Your ik:exec trial results are preliminary — only the formal
-benchmark (request_formal_bench) produces official results. Call
-request_formal_bench(kernel="{kernel}", reason="...") as soon as your code
-compiles and passes correctness. Do not wait for perfection — benchmark
-early and often. If it shows no improvement, iterate. If it improves,
-a new gem is recorded.
-
-Keep optimizing until the formal benchmark shows improvement or you
-exhaust your ideas. Do not stop after a single attempt."""
+        template = _load_prompt("supervisor_initial")
+        return template.format(run_tag=run_tag, kernel=kernel, task=task)
 
     def _build_continue_prompt(self, verdict: StewardResponse) -> str:
         """Build the resume prompt for CONTINUE — injected into the same session."""
         guidance = verdict.detail or verdict.reasoning[:500]
-        return f"""[Supervisor — CONTINUE]
-
-The Steward reviewed your session and determined you should continue.
-
-Guidance: {guidance}
-
-Please continue working. Do not repeat what you already tried.
-If you haven't called request_formal_bench yet, do so as soon as
-your code compiles and passes correctness."""
+        template = _load_prompt("supervisor_continue")
+        return template.format(guidance=guidance)
 
     # ── Benchmarker dispatch ──
 
@@ -479,21 +464,10 @@ your code compiles and passes correctness."""
             })
 
             if improved:
-                return f"""BENCHMARK RESULT: IMPROVED ✓
-
-{bench_result.result_text[:1000]}
-
-Your optimization produced a new gem (beat previous best).
-You may continue optimizing for further improvements, or
-call request_formal_bench again when ready."""
+                template = _load_prompt("supervisor_bench_improved")
             else:
-                return f"""BENCHMARK RESULT: NO IMPROVEMENT
-
-{bench_result.result_text[:1000]}
-
-Your optimization did not beat the previous best.
-Please analyze the results, try a different approach,
-and call request_formal_bench when ready."""
+                template = _load_prompt("supervisor_bench_no_improvement")
+            return template.format(bench_result_text=bench_result.result_text[:1000])
 
         except Exception as e:
             return f"BENCHMARK ERROR: {e}\n\nPlease check your code compiles and runs correctly before requesting a benchmark."

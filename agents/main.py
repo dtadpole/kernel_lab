@@ -22,20 +22,15 @@ from agents.config import SystemConfig
 from agents.supervisor import Supervisor, TaskResult
 
 
-DEFAULT_TASKS = {
-    "matmul": (
-        "Optimize the CUDA matmul kernel in data/gen/sm90/matmul/cuda.cu. "
-        "Use ik:exec to compile, trial, and profile. "
-        "When you believe your optimization is ready, call request_formal_bench. "
-        "Target: beat the current best gem in kernel_lab_kb."
-    ),
-    "fa4": (
-        "Optimize the Flash Attention 4 kernel in data/gen/sm90/fa4/cuda.cu. "
-        "Use ik:exec to compile, trial, and profile. "
-        "When ready, call request_formal_bench. "
-        "Target: beat the current best gem."
-    ),
-}
+TASKS_DIR = Path("conf/agent/tasks")
+
+
+def _load_task(kernel: str) -> str:
+    """Load task description from conf/agent/tasks/<kernel>.md."""
+    task_file = TASKS_DIR / f"{kernel}.md"
+    if task_file.exists():
+        return task_file.read_text().strip()
+    raise FileNotFoundError(f"No task file for kernel '{kernel}' at {task_file}")
 
 
 def print_result(result: TaskResult) -> None:
@@ -69,7 +64,7 @@ async def run_continuous(args: argparse.Namespace) -> None:
         response_prompts_dir=args.prompts_dir,
     )
 
-    task = args.task or DEFAULT_TASKS.get(args.kernel, DEFAULT_TASKS["matmul"])
+    task = args.task or _load_task(args.kernel)
 
     print(f"[Main] Starting Supervisor — CONTINUOUS MODE")
     print(f"[Main] Kernel: {args.kernel}")
@@ -89,7 +84,7 @@ async def run_single(args: argparse.Namespace) -> TaskResult:
         response_prompts_dir=args.prompts_dir,
     )
 
-    task = args.task or DEFAULT_TASKS.get(args.kernel, DEFAULT_TASKS["matmul"])
+    task = args.task or _load_task(args.kernel)
 
     print(f"[Main] Starting Supervisor — SINGLE SESSION")
     print(f"[Main] Kernel: {args.kernel}")

@@ -17,6 +17,8 @@ class ToolRule:
     tool: str
     allow: bool = True
     constraint: str = ""
+    blocked_paths: list[str] = field(default_factory=list)  # path prefixes to block
+    allowed_paths: list[str] = field(default_factory=list)  # exceptions to blocked_paths
 
 
 @dataclass

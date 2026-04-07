@@ -66,7 +66,53 @@ agents:
         constraint: "允许写入 data/gen/、~/kernel_lab_kb/runs/*/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
       - tool: Read
         allow: true
-        constraint: "允许读取所有文件，包括 ~/.cuda_exec/<run_tag>/ 下的中间产物"
+        constraint: "只允许读白名单中的路径"
+        blocked_paths:
+          - ~/kernel_lab/                      # block 整个 repo
+          - ~/kernel_lab_kb/                   # block 整个 KB
+        allowed_paths:
+          # 相对路径
+          - cuda_exec/
+          - plugins/
+          - conf/
+          - DESIGN.md
+          - AGENTS.md
+          # 绝对路径
+          - ~/kernel_lab/cuda_exec/
+          - ~/kernel_lab/plugins/
+          - ~/kernel_lab/conf/
+          - ~/kernel_lab/DESIGN.md
+          - ~/kernel_lab/AGENTS.md
+          - ~/kernel_lab_kb/runs/<run_tag>/    # 当前 run（动态替换）
+          - ~/.cuda_exec/<run_tag>/            # 当前 run 的 scratch 目录
+      - tool: Glob
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/
+        allowed_paths:
+          - cuda_exec/
+          - plugins/
+          - conf/
+          - ~/kernel_lab/cuda_exec/
+          - ~/kernel_lab/plugins/
+          - ~/kernel_lab/conf/
+          - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
+      - tool: Grep
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/
+        allowed_paths:
+          - cuda_exec/
+          - plugins/
+          - conf/
+          - ~/kernel_lab/cuda_exec/
+          - ~/kernel_lab/plugins/
+          - ~/kernel_lab/conf/
+          - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
     system_prompt_file: prompts/solver.md
 
   rigger:

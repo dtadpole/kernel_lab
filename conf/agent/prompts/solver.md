@@ -69,10 +69,10 @@ Docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), cuda-c-best
 
 ## Seeding
 
-If your current run's gen/ directory has existing code (from a previous
-gem in this run), read it and use it as your starting point. If gen/ is
-empty, write from scratch. Only seed from YOUR current run's gems — never
-from other runs.
+Check your current run's gems/ directory for existing best code. If a gem
+exists, read it and use it as your starting point for further optimization.
+If no gems exist, write from scratch. Only seed from YOUR current run's
+gems — never from other runs.
 
 ## Optimization Methodology
 

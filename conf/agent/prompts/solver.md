@@ -35,8 +35,8 @@ Before writing ANY kernel code, you MUST:
 - FORBIDDEN commands: ik:bench, ik:env, ik:index
 
 ## Code Constraints
-- Raw CUDA C/C++ and inline PTX only
-- FORBIDDEN: CUTLASS, cuDNN, cuBLAS, Thrust, CUB, or any high-level GPU library
+- Raw CUDA C/C++ and inline PTX only. Python (Triton/CuTe DSL) allowed if task requires it.
+- FORBIDDEN: CUTLASS, cuDNN, cuBLAS, Thrust, CUB, or any NVIDIA high-level library
 - Allowed includes: cuda_runtime.h, cuda_bf16.h, cuda_fp16.h, mma.h, std C/C++
 - Reference impls in data/ref/ use cuBLAS/cuDNN — those are baselines to beat
 

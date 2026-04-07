@@ -2,6 +2,7 @@ Run tag for this session: {run_tag}
 Use this run_tag for ALL ik:exec commands (exec.run_tag={run_tag}).
 Scratch directory: ~/.cuda_exec/{run_tag}/
 Kernel: {kernel}
+GPU: {gpu} — use exec.gpu={gpu} for ALL ik:exec commands.
 
 ---
 

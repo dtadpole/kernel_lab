@@ -58,6 +58,7 @@ class SupervisorState:
     task_slug: str = ""
     run_tag: str = ""
     kernel: str = ""               # kernel name (matmul, fa4, etc.)
+    gpu: int = 4                   # GPU index for exec/trial/bench
     iteration: int = 0
     turns_completed: int = 0
     error_count: int = 0
@@ -111,6 +112,7 @@ class Supervisor(DefaultHandler):
         self,
         task: str,
         kernel: str = "matmul",
+        gpu: int = 4,
     ) -> None:
         """Run Solver sessions in an infinite loop until manually stopped.
 
@@ -129,6 +131,7 @@ class Supervisor(DefaultHandler):
         print(f"\n{'='*60}")
         print(f"[Supervisor] CONTINUOUS MODE — will run indefinitely")
         print(f"[Supervisor] Kernel: {kernel}")
+        print(f"[Supervisor] GPU: {gpu}")
         print(f"[Supervisor] Run tag: {run_tag}")
         print(f"[Supervisor] Kill with Ctrl+C or hard_limit to stop")
         print(f"{'='*60}\n")
@@ -154,6 +157,7 @@ class Supervisor(DefaultHandler):
                 result = await self.run_task(
                     task=session_prompt,
                     kernel=kernel,
+                    gpu=gpu,
                     run_tag=run_tag,
                 )
 
@@ -238,6 +242,7 @@ class Supervisor(DefaultHandler):
         self,
         task: str,
         kernel: str = "matmul",
+        gpu: int = 4,
         run_tag: str | None = None,
     ) -> TaskResult:
         """Run the full Solver → Benchmarker → decide loop.
@@ -268,6 +273,7 @@ class Supervisor(DefaultHandler):
             task_slug=task_slug,
             run_tag=run_tag,
             kernel=kernel,
+            gpu=gpu,
             started_at=now,
         )
 
@@ -284,7 +290,7 @@ class Supervisor(DefaultHandler):
             steward=None,
         )
 
-        solver_prompt = self._build_initial_prompt(task, run_tag, kernel)
+        solver_prompt = self._build_initial_prompt(task, run_tag, kernel, gpu)
 
         iteration = 0
         while True:  # run until SUCCESS or hard_limit
@@ -380,9 +386,9 @@ class Supervisor(DefaultHandler):
 
     # ── Prompt builders ──
 
-    def _build_initial_prompt(self, task: str, run_tag: str, kernel: str) -> str:
+    def _build_initial_prompt(self, task: str, run_tag: str, kernel: str, gpu: int = 4) -> str:
         template = _load_prompt("supervisor_initial")
-        result = template.format(run_tag=run_tag, kernel=kernel, task=task)
+        result = template.format(run_tag=run_tag, kernel=kernel, task=task, gpu=gpu)
         return result.replace("<run_tag>", run_tag)
 
     def _build_continue_prompt(self, verdict: StewardResponse) -> str:
@@ -404,10 +410,11 @@ class Supervisor(DefaultHandler):
             steward=None,
         )
 
-        print(f"\n[Supervisor] Dispatching Benchmarker for kernel={kernel}")
+        gpu = self.state.gpu
+        print(f"\n[Supervisor] Dispatching Benchmarker for kernel={kernel} gpu={gpu}")
 
         result = await bench_runner.run(
-            prompt=f"Run the formal benchmark for kernel={kernel}. Report the results.",
+            prompt=f"Run the formal benchmark for kernel={kernel}. Use GPU {gpu} (exec.gpu={gpu}). Report the results.",
             task_slug=f"bench_{kernel}",
         )
 
@@ -563,6 +570,7 @@ class Supervisor(DefaultHandler):
             "phase": self.state.phase,
             "task": self.state.task,
             "kernel": self.state.kernel,
+            "gpu": self.state.gpu,
             "run_tag": self.state.run_tag,
             "iteration": self.state.iteration,
             "turns": self.state.turns_completed,

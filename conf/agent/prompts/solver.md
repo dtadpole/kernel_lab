@@ -46,11 +46,11 @@ after each. Do NOT write a 500-line kernel in one shot.
 ```bash
 cd /home/zhenc/kernel_lab
 # Compile
-.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 # Trial
-.venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 # Profile
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 exec.run_tag=<RUN_TAG> 'exec.configs=[mat-8192x8192]' exec.side=generated
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[mat-8192x8192]' exec.side=generated
 ```
 
 ### ik:docs — NVIDIA CUDA documentation

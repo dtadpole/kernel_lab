@@ -3,10 +3,11 @@
 Usage:
     # Continuous mode (default) — runs forever, spawning new Solvers
     cd /home/zhenc/kernel_lab
-    .venv/bin/python -m agents.main --kernel matmul
+    .venv/bin/python -m agents.main --kernel matmul --gpu 4
+    .venv/bin/python -m agents.main --kernel fa4 --gpu 0
 
     # Single session mode
-    .venv/bin/python -m agents.main --kernel matmul --single
+    .venv/bin/python -m agents.main --kernel matmul --gpu 4 --single
 """
 
 from __future__ import annotations
@@ -70,10 +71,11 @@ async def run_continuous(args: argparse.Namespace) -> None:
 
     print(f"[Main] Starting Supervisor — CONTINUOUS MODE")
     print(f"[Main] Kernel: {args.kernel}")
+    print(f"[Main] GPU: {args.gpu}")
     print(f"[Main] Task: {task[:100]}...")
     print(f"[Main] Config: {args.config}")
 
-    await supervisor.run_continuous(task=task, kernel=args.kernel)
+    await supervisor.run_continuous(task=task, kernel=args.kernel, gpu=args.gpu)
 
 
 async def run_single(args: argparse.Namespace) -> TaskResult:
@@ -90,12 +92,14 @@ async def run_single(args: argparse.Namespace) -> TaskResult:
 
     print(f"[Main] Starting Supervisor — SINGLE SESSION")
     print(f"[Main] Kernel: {args.kernel}")
+    print(f"[Main] GPU: {args.gpu}")
     print(f"[Main] Task: {task[:100]}...")
     print(f"[Main] Config: {args.config}")
 
     result = await supervisor.run_task(
         task=task,
         kernel=args.kernel,
+        gpu=args.gpu,
         run_tag=args.run_tag,
     )
 
@@ -145,6 +149,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run Supervisor → Solver → Benchmarker loop")
     parser.add_argument("--kernel", default="matmul", choices=["matmul", "fa4", "vecadd"],
                         help="Kernel to optimize (default: matmul)")
+    parser.add_argument("--gpu", type=int, default=4,
+                        help="GPU index for exec/trial/bench (default: 4)")
     parser.add_argument("--task", default=None,
                         help="Custom task description (default: auto-generated)")
     parser.add_argument("--config", default="conf/agent/agents.yaml",

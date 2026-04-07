@@ -195,6 +195,16 @@ def _detect_env_versions() -> dict:
     except Exception:
         pass
     try:
+        import ctypes as _ct
+        _cublas = _ct.CDLL("libcublas.so")
+        _v = _ct.c_int()
+        _cublas.cublasGetProperty(0, _ct.byref(_v)); _maj = _v.value
+        _cublas.cublasGetProperty(1, _ct.byref(_v)); _min = _v.value
+        _cublas.cublasGetProperty(2, _ct.byref(_v)); _pat = _v.value
+        versions["cublas"] = f"{_maj}.{_min}.{_pat}"
+    except Exception:
+        pass
+    try:
         import importlib.metadata
         versions["flash_attn_4"] = importlib.metadata.version("flash-attn-4")
     except Exception:
@@ -224,11 +234,6 @@ def _detect_env_versions() -> dict:
     except Exception:
         pass
     try:
-        import importlib.metadata
-        versions["cublas"] = importlib.metadata.version("nvidia-cublas")
-    except Exception:
-        pass
-    try:
         from cuda_exec.impls import _detect_host_slug
         versions["host"] = _detect_host_slug()
     except Exception:
@@ -243,10 +248,10 @@ def _detect_env_versions() -> dict:
 
 def _impl_version_label(slug: str, versions: dict) -> str:
     """Generate a version label for an impl slug."""
-    if slug.endswith("-cudnn") or slug == "ref-cudnn":
+    if "cudnn" in slug:
         v = versions.get("cudnn", "")
         return f"cuDNN {v}" if v else ""
-    if slug.endswith("-cublas") or slug == "ref-cublas":
+    if "cublas" in slug:
         v = versions.get("cublas", "")
         return f"cuBLAS {v}" if v else ""
     if "cutedsl" in slug:
@@ -652,6 +657,31 @@ def cli_main() -> None:
     )
 
     bench_cfg = cfg.bench
+
+    # Validate required parameters before proceeding
+    from omegaconf.errors import MissingMandatoryValue
+    try:
+        _ = bench_cfg.kernel
+    except MissingMandatoryValue:
+        print(
+            "Usage: .venv/bin/python -m cuda_exec.formal bench.kernel=<KERNEL> [OPTIONS]\n"
+            "\n"
+            "Required:\n"
+            "  bench.kernel=<name>        Kernel to benchmark (fa4, matmul, vecadd, ...)\n"
+            "\n"
+            "Options:\n"
+            "  bench.gpu=<N>              GPU index (CUDA_VISIBLE_DEVICES)\n"
+            "  bench.arch=<smXX>          GPU arch (default: auto-detect)\n"
+            "  bench.impls=[i1,i2,...]    Impl slugs to bench, or 'all' (default: all)\n"
+            "  bench.timeout=<seconds>    Per-config timeout (default: 120)\n"
+            "\n"
+            "Examples:\n"
+            "  .venv/bin/python -m cuda_exec.formal bench.kernel=matmul\n"
+            "  .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.gpu=2\n"
+            "  .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 'bench.impls=[ref-cublas,gen-cuda]'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Set CUDA_VISIBLE_DEVICES: explicit gpu= > host config > env
     gpu = bench_cfg.get("gpu")

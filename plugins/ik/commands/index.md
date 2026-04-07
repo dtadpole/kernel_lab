@@ -1,1 +1,5 @@
-../skills/index/SKILL.md
+---
+description: Manage the CUDA documentation search index — download, build, rebuild, or nuke
+---
+
+Invoke the ik:index skill and follow it exactly as presented to you

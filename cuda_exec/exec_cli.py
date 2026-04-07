@@ -156,6 +156,36 @@ def cli_main() -> None:
 
     exec_cfg = cfg.exec
 
+    # Validate required parameters before proceeding
+    from omegaconf.errors import MissingMandatoryValue
+    missing = []
+    for field in ("action", "kernel", "impl", "run_tag"):
+        try:
+            getattr(exec_cfg, field)
+        except MissingMandatoryValue:
+            missing.append(field)
+    if missing:
+        print(
+            "Usage: .venv/bin/python -m cuda_exec.exec_cli exec.action=<ACTION> exec.kernel=<KERNEL> exec.impl=<IMPL> exec.run_tag=<TAG> [OPTIONS]\n"
+            "\n"
+            "Required:\n"
+            "  exec.action=<action>       compile, trial, or profile\n"
+            "  exec.kernel=<name>         Kernel name (fa4, matmul, vecadd, ...)\n"
+            "  exec.impl=<slug>           Impl slug (gen-cuda, ref-pytorch, ...)\n"
+            "  exec.run_tag=<tag>         Workspace isolation tag\n"
+            "\n"
+            "Options:\n"
+            "  exec.gpu=<N>               GPU index (CUDA_VISIBLE_DEVICES)\n"
+            "  exec.arch=<smXX>           GPU arch (default: auto-detect)\n"
+            "  exec.configs=[c1,c2,...]   Config slugs, or 'all' (default: all)\n"
+            "  exec.turn=<N>              Turn number (default: 1)\n"
+            "  exec.timeout=<seconds>     Per-action timeout (default: 120)\n"
+            "\n"
+            f"Missing: {', '.join(f'exec.{f}' for f in missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Set CUDA_VISIBLE_DEVICES: explicit gpu= > host config > env
     gpu = exec_cfg.get("gpu")
     if gpu is not None:

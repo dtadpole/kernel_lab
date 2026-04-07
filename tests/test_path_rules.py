@@ -250,16 +250,42 @@ def test_bash_cat_allowed_path():
 
 
 @pytest.mark.quick
-def test_bash_execution_not_blocked():
-    """Running python/nvcc from blocked dir — should NOT block (not a read)."""
+def test_bash_execution_venv_allowed():
+    """Running python from .venv/ — should pass (.venv/ whitelisted)."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
-        allowed_paths=[],
+        allowed_paths=["~/kernel_lab/.venv/"],
     )
     result = runner._check_tool_rules("Bash", {
         "command": "/home/zhenc/kernel_lab/.venv/bin/python -m cuda_exec.exec_cli exec.action=compile"
     })
     assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_bash_execution_data_gen_blocked():
+    """Running nvcc on data/gen/ — should block."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/.venv/"],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "nvcc /home/zhenc/kernel_lab/data/gen/sm90/matmul/cuda.cu -o output"
+    })
+    assert result.get("decision") == "block"
+
+
+@pytest.mark.quick
+def test_bash_execution_data_peak_blocked():
+    """Running nvcc on data/peak/ — should block."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/.venv/"],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "nvcc /home/zhenc/kernel_lab/data/peak/sm90/matmul/cuda.cu -o output"
+    })
+    assert result.get("decision") == "block"
 
 
 @pytest.mark.quick
@@ -308,8 +334,8 @@ def test_bash_head_blocked():
 
 
 @pytest.mark.quick
-def test_bash_ls_not_blocked():
-    """ls is not a read command — should pass even on blocked paths."""
+def test_bash_ls_blocked():
+    """ls on blocked path — now blocked (all commands checked)."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
         allowed_paths=[],
@@ -317,18 +343,18 @@ def test_bash_ls_not_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "ls ~/kernel_lab/data/"
     })
-    assert result.get("decision") != "block"
+    assert result.get("decision") == "block"
 
 
 @pytest.mark.quick
-def test_bash_find_not_blocked():
-    """find is not a read command — should pass."""
+def test_bash_ls_allowed():
+    """ls on allowed path — should pass."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
-        allowed_paths=[],
+        allowed_paths=["~/kernel_lab/cuda_exec/"],
     )
     result = runner._check_tool_rules("Bash", {
-        "command": "find ~/kernel_lab/data/peak -name '*.cu'"
+        "command": "ls ~/kernel_lab/cuda_exec/"
     })
     assert result.get("decision") != "block"
 

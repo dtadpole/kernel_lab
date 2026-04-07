@@ -406,27 +406,14 @@ class AgentRunner:
                 return True
         return False
 
-    # Commands that read file contents — block these from accessing blocked paths
-    # Also catches ssh-wrapped reads like: ssh localhost "cat ~/blocked/file"
-    _READ_COMMANDS = re.compile(
-        r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|wc)\b'
-    )
-    _SSH_READ_PATTERN = re.compile(
-        r'ssh\s+\S+\s+["\'].*\b(cat|head|tail|less|more|strings|xxd|od|hexdump)\b'
-    )
+    def _extract_paths_from_command(self, command: str) -> list[str]:
+        """Extract all file paths from a Bash command string.
 
-    def _extract_read_paths_from_command(self, command: str) -> list[str]:
-        """Extract file paths from read-like commands in a Bash command string.
-
-        Only scans commands that read file contents (cat, head, tail, etc.),
-        including ssh-wrapped reads like: ssh localhost "cat ~/blocked/file".
-        Ignores execution commands (python, nvcc, etc.) so ik:exec can run.
+        Finds absolute paths (/...) and home paths (~/...) in the command.
+        All extracted paths are checked against blocked/allowed rules.
         """
         import os
-        if not self._READ_COMMANDS.search(command) and not self._SSH_READ_PATTERN.search(command):
-            return []
         paths = []
-        # Match absolute paths and ~/paths in the command
         for match in re.finditer(r'(?:~|/)[^\s;|>&<\'"()]+', command):
             raw = match.group(0)
             resolved = os.path.expanduser(raw)
@@ -472,11 +459,11 @@ class AgentRunner:
                                 "reason": f"Access denied: '{file_path}' is blocked.",
                             }
 
-                # ── Bash: scan read-like commands for blocked paths ──
+                # ── Bash: scan ALL commands for blocked paths ──
                 elif tool_name == "Bash":
                     command = tool_input.get("command", "")
                     if command:
-                        for path in self._extract_read_paths_from_command(command):
+                        for path in self._extract_paths_from_command(command):
                             if self._is_path_blocked(path, rule):
                                 return {
                                     "decision": "block",

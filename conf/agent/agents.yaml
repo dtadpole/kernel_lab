@@ -65,6 +65,7 @@ agents:
           - ~/.claude/projects/
           - ~/.cuda_exec/
         allowed_paths:
+          - ~/kernel_lab/.venv/
           - ~/kernel_lab/cuda_exec/
           - ~/kernel_lab/plugins/
           - ~/kernel_lab/conf/

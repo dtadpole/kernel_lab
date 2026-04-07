@@ -177,6 +177,80 @@ def enrich_result(bench_result: dict, configs: dict) -> dict:
 # Markdown table for stderr
 # ---------------------------------------------------------------------------
 
+def _detect_env_versions() -> dict:
+    """Detect software versions for the table header."""
+    import subprocess
+    versions = {}
+    try:
+        import torch
+        versions["pytorch"] = torch.__version__  # e.g. "2.11.0+cu130"
+    except Exception:
+        pass
+    try:
+        import ctypes
+        lib = ctypes.CDLL("libcudnn.so.9", mode=ctypes.RTLD_GLOBAL)
+        lib.cudnnGetVersion.restype = ctypes.c_ulonglong
+        v = lib.cudnnGetVersion()
+        versions["cudnn"] = f"{v // 10000}.{(v % 10000) // 100}.{v % 100}"
+    except Exception:
+        pass
+    try:
+        import importlib.metadata
+        versions["flash_attn_4"] = importlib.metadata.version("flash-attn-4")
+    except Exception:
+        pass
+    try:
+        import importlib.metadata
+        versions["cutlass_dsl"] = importlib.metadata.version("nvidia-cutlass-dsl")
+    except Exception:
+        pass
+    try:
+        drv = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            text=True, timeout=5,
+        ).strip().split("\n")[0]
+        versions["driver"] = drv
+    except Exception:
+        pass
+    try:
+        from cuda_exec.host_env import resolve_host_env
+        env = resolve_host_env()
+        cuda_home = env.get("CUDA_HOME", "")
+        if cuda_home:
+            # Extract version from path like /usr/local/cuda-13.2
+            import re
+            m = re.search(r"cuda[/-](\d+\.\d+)", cuda_home)
+            versions["cuda"] = m.group(1) if m else ""
+    except Exception:
+        pass
+    try:
+        from cuda_exec.impls import _detect_host_slug
+        versions["host"] = _detect_host_slug()
+    except Exception:
+        pass
+    return versions
+
+
+def _impl_version_label(slug: str, versions: dict) -> str:
+    """Generate a version label for an impl slug."""
+    if "cudnn" in slug and slug.endswith((".cu", "-cudnn")):
+        v = versions.get("cudnn", "")
+        return f"cuDNN {v}" if v else ""
+    if "cutedsl" in slug:
+        v = versions.get("flash_attn_4", "")
+        dsl = versions.get("cutlass_dsl", "")
+        parts = []
+        if v:
+            parts.append(f"FA4 {v}")
+        if dsl:
+            parts.append(f"DSL {dsl}")
+        return ", ".join(parts)
+    if "pytorch" in slug:
+        v = versions.get("pytorch", "")
+        return f"PyTorch {v}" if v else ""
+    return ""
+
+
 def format_results_table(bench_result: dict) -> str:
     """Format the summary as an aligned Markdown comparison table."""
     summary = bench_result.get("summary", {})
@@ -189,11 +263,12 @@ def format_results_table(bench_result: dict) -> str:
     impl_order = bench_result.get("impls_requested", [])
     config_order = list(next(iter(summary["impls"].values()))["configs"].keys()) if summary["impls"] else []
 
+    versions = _detect_env_versions()
+
     # --- Build cell content first, then compute column widths ---
     CFG_LABEL = "Config"
     cfg_width = max(len(CFG_LABEL), *(len(c) for c in config_order), len("% of peak"))
 
-    # Format each cell: returns (display_str, is_data)
     def _fmt_cell(slug: str, config_slug: str) -> str:
         entry = summary["impls"][slug]["configs"].get(config_slug, {})
         ms = entry.get("median_ms")
@@ -210,37 +285,55 @@ def format_results_table(bench_result: dict) -> str:
             cell += f" {spd:.2f}x" if spd is not None else "     "
         return cell
 
-    # Compute column widths from content
+    # Compute column widths from content + version labels
     col_widths: dict[str, int] = {}
     for slug in impl_order:
-        # Header width
         sub = "ms    TFLOPS" + ("   speedup" if slug != golden else "")
-        w = max(len(slug), len(sub))
-        # Data width
+        ver = _impl_version_label(slug, versions)
+        w = max(len(slug), len(sub), len(ver))
         for cfg in config_order:
             w = max(w, len(_fmt_cell(slug, cfg)))
-        # % of peak width
         pct = summary["impls"][slug]["best_pct_peak"]
         w = max(w, len(f"{pct:.1f}%"))
         col_widths[slug] = w
 
-    # --- Render table ---
+    # --- Render ---
     lines: List[str] = []
-    lines.append(f"**{gpu}** — peak {peak} TFLOPS (BF16 TC)")
+
+    # Environment info
+    host = versions.get("host", "")
+    cuda_ver = versions.get("cuda", "")
+    drv = versions.get("driver", "")
+    env_parts = [f"**{gpu}**"]
+    if host:
+        env_parts.append(f"host: {host}")
+    if drv:
+        env_parts.append(f"driver: {drv}")
+    if cuda_ver:
+        env_parts.append(f"CUDA: {cuda_ver}")
+    env_parts.append(f"peak: {peak} TFLOPS (BF16 TC)")
+    lines.append(" | ".join(env_parts))
     lines.append("")
 
-    # Header row 1: impl names
+    # Header row 1: impl slugs
     hdr1 = f"| {CFG_LABEL:<{cfg_width}} |"
     for slug in impl_order:
         hdr1 += f" {slug:<{col_widths[slug]}} |"
     lines.append(hdr1)
 
-    # Header row 2: sub-labels
+    # Header row 2: version labels
     hdr2 = f"| {'':<{cfg_width}} |"
     for slug in impl_order:
-        sub = "ms    TFLOPS" + ("   speedup" if slug != golden else "")
-        hdr2 += f" {sub:<{col_widths[slug]}} |"
+        ver = _impl_version_label(slug, versions)
+        hdr2 += f" {ver:<{col_widths[slug]}} |"
     lines.append(hdr2)
+
+    # Header row 3: column sub-labels (ms/TFLOPS/speedup)
+    hdr3 = f"| {'':<{cfg_width}} |"
+    for slug in impl_order:
+        sub = "ms    TFLOPS" + ("   speedup" if slug != golden else "")
+        hdr3 += f" {sub:<{col_widths[slug]}} |"
+    lines.append(hdr3)
 
     # Separator
     sep = f"|{'-' * (cfg_width + 2)}|"

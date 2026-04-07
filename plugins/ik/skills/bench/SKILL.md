@@ -80,12 +80,10 @@ Golden column has no ✓/✗ or speedup (it IS the baseline).
 
 ## Artifacts (read on demand)
 
-Shared artifacts live at `plugins/ik/artifacts/`:
-
 | Artifact | Content |
 |----------|---------|
-| `slug-resolution.md` | Impl slug format, discovery, env auto-resolution |
-| `kb-layout.md` | KB directory structure, gem rules, JSON response format |
+| `artifacts/slug-resolution.md` | Impl slug format, discovery, env auto-resolution |
+| `artifacts/kb-layout.md` | KB directory structure, gem rules, JSON response format |
 
 ## Rules
 

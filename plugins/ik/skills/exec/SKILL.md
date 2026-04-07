@@ -26,7 +26,7 @@ development — use `/ik:bench` for formal assessment.
 
 GPU is **session-sticky**: once set, all subsequent ik invocations reuse it.
 
-Impl slugs are discovered via `list_impls()` — see `plugins/ik/artifacts/slug-resolution.md`.
+Impl slugs are discovered via `list_impls()` — see `artifacts/slug-resolution.md`.
 
 ## Usage
 

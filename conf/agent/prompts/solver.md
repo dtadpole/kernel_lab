@@ -67,6 +67,13 @@ Docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), cuda-c-best
 - CUDA Toolkit tools (nvcc, ptxas, cuobjdump, nvdisasm, ncu) via Bash
 - Network: `ssh localhost "command"` or WebSearch/WebFetch
 
+## Correctness First — ABSOLUTE RULE
+
+**Correctness before performance.** If any benchmark config shows ✗
+(correctness failure), STOP optimizing and fix correctness immediately.
+Performance numbers are meaningless when correctness is wrong.
+Do NOT request another formal_bench until all configs pass ✓.
+
 ## Formal Benchmark
 
 **request_formal_bench is the only way to get official results.**

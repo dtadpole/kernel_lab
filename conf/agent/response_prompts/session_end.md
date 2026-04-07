@@ -9,10 +9,15 @@ the session is incomplete. CONTINUE — tell the Solver to benchmark its work.
 ## When Formal Benchmark Exists
 
 Read the benchmark result in the trajectory:
-- **Beat previous best** (new gem recorded) → SUCCESS. The Solver achieved
-  a meaningful improvement. Session complete.
-- **Did not beat previous best** → CONTINUE. The optimization didn't land yet.
-  Read the trajectory to understand why, and guide the next attempt.
+
+**Check correctness FIRST.** If any config shows ✗ (correctness failure),
+the Solver MUST fix correctness before any further optimization.
+CONTINUE with explicit guidance: "Fix correctness failures before
+optimizing performance. Performance is meaningless without correctness."
+
+If all configs pass ✓:
+- **Beat previous best** (new gem recorded) → SUCCESS. Session complete.
+- **Did not beat previous best** → CONTINUE. Guide the next attempt.
 
 ## Common Patterns to Watch For
 

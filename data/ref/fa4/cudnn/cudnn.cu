@@ -95,6 +95,8 @@ static struct {
         if (e.is_bad()) { fprintf(stderr,"build_op_graph: %s\n", e.get_message().c_str()); return false; }
         e = graph->create_execution_plans({fe::HeurMode_t::A});
         if (e.is_bad()) { fprintf(stderr,"create_plans: %s\n", e.get_message().c_str()); return false; }
+        /* Note: all cuDNN 9.19 SDPA engines require runtime compilation (NVRTC JIT).
+           Do NOT filter with deselect_behavior_notes(RUNTIME_COMPILATION). */
         e = graph->check_support(handle);
         if (e.is_bad()) { fprintf(stderr,"check_support: %s\n", e.get_message().c_str()); return false; }
         e = graph->build_plans(handle);

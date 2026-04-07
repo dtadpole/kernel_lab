@@ -107,7 +107,7 @@ hosts:
     env:
       cuda_home: /usr/local/cuda-13.2
       cuda_available: ["12.8", "12.9", "13.0", "13.2"]
-      torch_cuda: "cu132"
+      torch_cuda: "cu130"
       torch_cuda_arch: "9.0"       # Hopper = sm_90 / sm_90a
       ld_preload: /lib64/libcuda.so.1  # fbcode ships old libcuda.so.570 that shadows real driver 595
       python: /usr/local/bin/python3  # 3.12.13+meta

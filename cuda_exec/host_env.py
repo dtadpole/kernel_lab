@@ -185,10 +185,27 @@ def resolve_host_env() -> Dict[str, str]:
             if Path(expanded).is_dir():
                 lib_dirs.append(expanded)
                 libs.append("cudnn")
-                # Set LD_LIBRARY_PATH so runtime finds libcudnn
-                env["LD_LIBRARY_PATH"] = expanded
                 # Ensure unversioned libcudnn.so symlink exists for the linker
                 _ensure_cudnn_symlink(Path(expanded))
+
+        # Build LD_LIBRARY_PATH: CUDA_HOME libs first (for nvrtc version match),
+        # then cuDNN lib. Order matters — cuDNN JIT dlopen's libnvrtc.so and we
+        # need it to find the version matching CUDA_HOME, not a different one
+        # that ldconfig might resolve.
+        ld_lib_parts: list[str] = []
+        if cuda_home:
+            for subdir in ("targets/x86_64-linux/lib", "lib64"):
+                p = Path(cuda_home) / subdir
+                if p.is_dir():
+                    ld_lib_parts.append(str(p))
+                    if str(p) not in lib_dirs:
+                        lib_dirs.append(str(p))
+        if cudnn_lib:
+            expanded = _expand(str(cudnn_lib))
+            if Path(expanded).is_dir():
+                ld_lib_parts.append(expanded)
+        if ld_lib_parts:
+            env["LD_LIBRARY_PATH"] = ":".join(ld_lib_parts)
 
         if include_dirs:
             env["NVCC_INCLUDE_DIRS"] = " ".join(include_dirs)

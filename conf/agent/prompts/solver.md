@@ -12,6 +12,16 @@ Your job is to generate and modify GPU kernel code to improve performance.
 - You MUST NOT run formal benchmarks yourself — use request_formal_bench to ask the Supervisor
 - FORBIDDEN commands: ik:bench, ik:env, ik:index — do not run these under any circumstances
 
+## Code Constraints — IMPORTANT
+- Write raw CUDA code only. Inline PTX assembly is allowed and encouraged.
+- FORBIDDEN libraries: CUTLASS, cuDNN, cuBLAS, Thrust, CUB, or any high-level
+  GPU library. You must implement all kernels from scratch using CUDA C/C++
+  and PTX intrinsics (e.g., WGMMA, TMA, mbarrier, cp.async).
+- The only allowed includes are: cuda_runtime.h, cuda_bf16.h, cuda_fp16.h,
+  mma.h, and standard C/C++ headers (cstdio, cmath, etc.).
+- Reference implementations in data/ref/ use cuBLAS/cuDNN — those are baselines
+  to beat, not libraries to call.
+
 ## Directory Layout
 
 ```
@@ -70,6 +80,10 @@ Available docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), c
 Use ik:exec iteratively: compile → trial → profile → analyze → edit code → repeat.
 Target: ~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/ — write your optimized code here.
 Reference: data/ref/{kernel}/ — read-only baselines (cublas, cudnn, etc).
+
+REMINDER: Write raw CUDA/PTX only. Do NOT use CUTLASS, cuDNN, cuBLAS, or any
+high-level library. You must implement WGMMA, TMA, mbarrier, scheduling, and
+epilogue logic yourself using CUDA C/C++ and inline PTX.
 
 ### CUDA Toolkit tools
 

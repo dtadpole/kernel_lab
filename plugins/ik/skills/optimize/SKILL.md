@@ -30,11 +30,17 @@ Autonomous loop: bench → profile → analyze → implement → verify → benc
 | `artifacts/analysis-guide.md` | Phase 2 — docs, roofline, external search |
 | `artifacts/results-format.md` | Phase 6 — results file template |
 
-## Toolbox
+## Toolbox — Code Constraints
 
-Use CUDA C++ when possible. Inline PTX for instructions not in CUDA intrinsics
-(wgmma, cp.async.bulk, setmaxnreg). CUTLASS/CuTe for collective ops.
+Write raw CUDA C/C++ code only. Inline PTX is allowed and encouraged for
+hardware-specific instructions (wgmma, cp.async.bulk, setmaxnreg, mbarrier, TMA).
 Verify PTX availability via `/ik:docs`.
+
+**FORBIDDEN**: CUTLASS, cuDNN, cuBLAS, Thrust, CUB, or any high-level GPU library.
+You must implement all kernel logic from scratch — WGMMA scheduling, TMA loads,
+mbarrier synchronization, shared memory management, epilogue stores, etc.
+The only allowed includes are: cuda_runtime.h, cuda_bf16.h, cuda_fp16.h, mma.h,
+and standard C/C++ headers.
 
 ## Phase 0: Initialize
 

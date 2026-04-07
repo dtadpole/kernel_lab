@@ -16,7 +16,13 @@ Check the trajectory for recent tool calls with timestamps.
   result (profile data, trial output) it may be analyzing — that's okay.
   If the gap follows an error or a dead end, it may need help.
 
-### 2. Direction Alignment
+### 2. Plan Before Code
+Check whether the Solver wrote a plan before writing kernel code.
+If the Solver used Write/Edit to create a kernel file but never
+output a text plan describing its approach — REDIRECT it to write
+a plan first. The Solver MUST plan before coding.
+
+### 3. Direction Alignment
 Read what the Solver has been doing and check whether it aligns with the task:
 - Is it working on the right kernel?
 - Is it pursuing an optimization approach that makes sense given the

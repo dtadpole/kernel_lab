@@ -18,3 +18,7 @@ a new gem is recorded.
 
 Keep optimizing until the formal benchmark shows improvement or you
 exhaust your ideas. Do not stop after a single attempt.
+
+REMINDER: You MUST output a written plan BEFORE writing any kernel code.
+Do not think silently for a long time — output your plan as text first,
+then implement step by step.

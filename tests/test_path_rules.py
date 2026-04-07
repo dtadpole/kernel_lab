@@ -334,8 +334,8 @@ def test_bash_head_blocked():
 
 
 @pytest.mark.quick
-def test_bash_ls_blocked():
-    """ls on blocked path — now blocked (all commands checked)."""
+def test_bash_ls_navigation_allowed():
+    """ls on blocked path — allowed (navigation command)."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
         allowed_paths=[],
@@ -343,18 +343,32 @@ def test_bash_ls_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "ls ~/kernel_lab/data/"
     })
-    assert result.get("decision") == "block"
+    assert result.get("decision") != "block"
 
 
 @pytest.mark.quick
-def test_bash_ls_allowed():
-    """ls on allowed path — should pass."""
+def test_bash_find_navigation_allowed():
+    """find on blocked path — allowed (navigation command)."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
-        allowed_paths=["~/kernel_lab/cuda_exec/"],
+        allowed_paths=[],
     )
     result = runner._check_tool_rules("Bash", {
-        "command": "ls ~/kernel_lab/cuda_exec/"
+        "command": "find ~/kernel_lab/data/peak -name '*.cu'"
+    })
+    assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_bash_ls_kernel_lab_kb_allowed():
+    """ls on kernel_lab_kb/runs/ — allowed (navigation)."""
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab_kb/"],
+        allowed_paths=["~/kernel_lab_kb/runs/<run_tag>/"],
+        run_tag="my_run",
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "ls ~/kernel_lab_kb/runs/"
     })
     assert result.get("decision") != "block"
 

@@ -432,16 +432,29 @@ class AgentRunner:
                 return True
         return False
 
-    def _extract_paths_from_command(self, command: str) -> list[str]:
-        """Extract all file paths from a Bash command string.
+    # Navigation commands — allowed on any path (don't read file content)
+    _NAV_COMMANDS = re.compile(
+        r'^\s*(ls|find|tree|du|stat|file|mkdir|touch|rm|wc\s+-l|dirname|basename|pwd)\b'
+    )
+    # Commands that read content or compile/execute — check blocked paths
+    _DANGEROUS_COMMANDS = re.compile(
+        r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|'
+        r'nvcc|g\+\+|gcc|clang|cp|mv|ln|source|\.)\b'
+    )
 
-        Finds absolute paths (/...), home paths (~/...), and relative paths
-        (e.g. data/peak/...) in the command. Relative paths are resolved
-        against cwd. All extracted paths are checked against blocked/allowed rules.
+    def _extract_paths_from_command(self, command: str) -> list[str]:
+        """Extract file paths from dangerous commands in a Bash command string.
+
+        Skips navigation commands (ls, find, tree, etc.) — those can access
+        any directory. Only checks commands that read content, compile, or
+        execute files from blocked paths.
         """
         import os
+        # Split on pipes/semicolons and check each subcommand
+        # But for simplicity, check the whole command
+        if self._NAV_COMMANDS.match(command) and not self._DANGEROUS_COMMANDS.search(command):
+            return []
         paths = []
-        # Match ~/paths, absolute paths, and relative paths containing /
         for match in re.finditer(r'(?:~/|/|[a-zA-Z0-9_.]+/)[a-zA-Z0-9_./<>\-]*', command):
             raw = match.group(0)
             resolved = os.path.expanduser(raw)

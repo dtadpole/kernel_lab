@@ -318,25 +318,26 @@ def format_results_table(bench_result: dict) -> str:
     # --- Render ---
     lines: List[str] = []
 
-    # Environment info
+    # Environment info (GPU name is already in the table header Config column)
     host = versions.get("host", "")
     cuda_ver = versions.get("cuda", "")
     drv = versions.get("driver", "")
-    env_parts = [f"**{gpu}**"]
+    env_parts = []
     if host:
         env_parts.append(f"host: {host}")
     if drv:
-        env_parts.append(f"driver: {drv}")
+        env_parts.append(f"driver {drv}")
     if cuda_ver:
-        env_parts.append(f"CUDA: {cuda_ver}")
-    env_parts.append(f"peak: {peak} TFLOPS (BF16 TC)")
-    lines.append(" | ".join(env_parts))
+        env_parts.append(f"CUDA {cuda_ver}")
+    if env_parts:
+        lines.append(" | ".join(env_parts))
     lines.append("")
 
     # Build Config column info lines
     gpu_idx = versions.get("gpu_idx", "")
     cfg_info_1 = gpu  # GPU name
-    cfg_info_2 = f"GPU {gpu_idx}" if gpu_idx else ""
+    peak_str = f"GPU {gpu_idx}, {peak} TFLOPS" if gpu_idx else f"{peak} TFLOPS"
+    cfg_info_2 = peak_str
     cfg_width = max(cfg_width, len(cfg_info_1), len(cfg_info_2))
 
     # Header row 1: impl slugs

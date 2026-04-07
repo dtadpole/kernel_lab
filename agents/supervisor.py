@@ -411,10 +411,17 @@ class Supervisor(DefaultHandler):
         )
 
         gpu = self.state.gpu
-        print(f"\n[Supervisor] Dispatching Benchmarker for kernel={kernel} gpu={gpu}")
+        run_tag = self.state.run_tag
+        print(f"\n[Supervisor] Dispatching Benchmarker for kernel={kernel} gpu={gpu} run_tag={run_tag}")
 
         result = await bench_runner.run(
-            prompt=f"Run the formal benchmark for kernel={kernel}. Use GPU {gpu} (exec.gpu={gpu}). Report the results.",
+            prompt=(
+                f"Run the formal benchmark for kernel={kernel}. "
+                f"Use GPU {gpu} (bench.gpu={gpu}). "
+                f"Use run_tag={run_tag} (bench.run_tag={run_tag}). "
+                f"Full command: .venv/bin/python -m cuda_exec.formal bench.kernel={kernel} bench.gpu={gpu} bench.run_tag={run_tag}\n"
+                f"Report the results."
+            ),
             task_slug=f"bench_{kernel}",
         )
 

@@ -347,10 +347,17 @@ def _check_gem(current_configs: dict, gem_base: Path) -> dict | None:
     previous = _load_latest_gem_results(gem_base)
 
     if previous is None:
+        # First run — still require correctness
+        correct_configs = [
+            slug for slug, cfg in current_configs.items()
+            if cfg.get("correctness", False)
+        ]
+        if not correct_configs:
+            return None
         return {
             "previous_run": None,
-            "improved_configs": list(current_configs.keys()),
-            "summary": f"first run — {len(current_configs)} configs",
+            "improved_configs": correct_configs,
+            "summary": f"first run — {len(correct_configs)} configs (correctness verified)",
         }
 
     prev_configs = previous.get("configs", {})

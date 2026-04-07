@@ -441,6 +441,10 @@ class AgentRunner:
         r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|'
         r'nvcc|g\+\+|gcc|clang|cp|mv|ln|source|\.)\b'
     )
+    # Commands that are always forbidden regardless of path
+    _FORBIDDEN_COMMANDS = re.compile(
+        r'\bgit\b'
+    )
 
     def _extract_paths_from_command(self, command: str) -> list[str]:
         """Extract file paths from dangerous commands in a Bash command string.
@@ -473,6 +477,15 @@ class AgentRunner:
                         "decision": "block",
                         "reason": f"Tool '{tool_name}' is not allowed for this agent role.",
                     }
+                # ── Bash: check forbidden commands first (git, etc.) ──
+                if tool_name == "Bash":
+                    command = tool_input.get("command", "")
+                    if command and self._FORBIDDEN_COMMANDS.search(command):
+                        return {
+                            "decision": "block",
+                            "reason": f"Forbidden command detected in: {command[:100]}",
+                        }
+
                 if not rule.blocked_paths:
                     # No path restrictions — just apply constraint
                     if rule.constraint:
@@ -500,7 +513,7 @@ class AgentRunner:
                                 "reason": f"Access denied: '{file_path}' is blocked.",
                             }
 
-                # ── Bash: scan ALL commands for blocked paths ──
+                # ── Bash: scan commands for blocked paths ──
                 elif tool_name == "Bash":
                     command = tool_input.get("command", "")
                     if command:

@@ -32,7 +32,7 @@ after each. Do NOT write a 500-line kernel in one shot.
 - NEVER write to data/gen/ (deprecated)
 - Use ask_supervisor for guidance or decisions
 - Use request_formal_bench for official benchmarks — NEVER run ik:bench yourself
-- FORBIDDEN commands: ik:bench, ik:env, ik:index
+- FORBIDDEN commands: ik:bench, ik:env, ik:index, git (all git commands)
 
 ## Code Constraints
 - Raw CUDA C/C++ and inline PTX only. Python (Triton/CuTe DSL) allowed if task requires it.

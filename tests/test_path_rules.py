@@ -321,6 +321,17 @@ def test_bash_worktrees_blocked():
 
 
 @pytest.mark.quick
+def test_bash_git_forbidden():
+    """git commands are always forbidden."""
+    runner = _make_runner(blocked_paths=[], allowed_paths=[])
+    assert runner._check_tool_rules("Bash", {"command": "git log --oneline"}).get("decision") == "block"
+    assert runner._check_tool_rules("Bash", {"command": "git show abc123"}).get("decision") == "block"
+    assert runner._check_tool_rules("Bash", {"command": "git log -p --all"}).get("decision") == "block"
+    assert runner._check_tool_rules("Bash", {"command": "git diff HEAD~5"}).get("decision") == "block"
+    assert runner._check_tool_rules("Bash", {"command": 'ssh localhost "git log"'}).get("decision") == "block"
+
+
+@pytest.mark.quick
 def test_bash_head_blocked():
     runner = _make_runner(
         blocked_paths=["~/kernel_lab_kb/"],

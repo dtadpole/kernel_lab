@@ -515,7 +515,12 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
     if gen_src.exists():
         shutil.copytree(gen_src, gen_dst)
 
+    # Only gen impls participate in gem evaluation — refs/peaks are baselines
+    gen_slugs = set(bench_result.get("gens", []))
+
     for impl_slug, impl_data in bench_result.get("results", {}).items():
+        if impl_slug not in gen_slugs:
+            continue
         if impl_data.get("compile_ok") is None:
             continue
 

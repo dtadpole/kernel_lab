@@ -38,6 +38,7 @@ class AgentMonitor:
         self._running = False
         self._task: asyncio.Task | None = None
         self._pending_inject: str | None = None
+        self._last_progress_check: float = 0.0  # elapsed time at last progress check
 
     async def start(self) -> None:
         """Start the monitor as a background task."""
@@ -140,6 +141,15 @@ class AgentMonitor:
             return MonitorAlert(
                 alert_type="loop_detected",
                 details=f"Tool '{seq[0]}' called {len(seq)} times consecutively",
+            )
+
+        # Periodic progress check
+        if (self.config.progress_check_interval > 0
+                and elapsed - self._last_progress_check >= self.config.progress_check_interval):
+            self._last_progress_check = elapsed
+            return MonitorAlert(
+                alert_type="progress_check",
+                details=f"Periodic progress check at {elapsed:.0f}s",
             )
 
         return None

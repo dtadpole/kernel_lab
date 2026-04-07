@@ -506,12 +506,17 @@ class Supervisor(DefaultHandler):
                 elapsed_time=elapsed,
                 time_limit=str(self.config.monitor.total_timeout),
             )
+        elif event.alert_type == "progress_check":
+            print(f"[Supervisor] Progress check at {elapsed}")
+            response = await self.steward.check_progress(
+                transcript_path=tp,
+                elapsed_time=elapsed,
+            )
         elif event.alert_type in ("idle_timeout", "loop_detected"):
             self.state.consecutive_stuck += 1
 
             if self.state.consecutive_stuck >= 3:
-                # 3 × 10 min = 30 min no progress → force interrupt + new guidance
-                print(f"[Supervisor] 3 consecutive stuck alerts (30 min) — forcing interrupt")
+                print(f"[Supervisor] 3 consecutive stuck alerts — forcing interrupt")
                 response = await self.steward.handle_stuck(
                     transcript_path=tp,
                     alert_type=event.alert_type,

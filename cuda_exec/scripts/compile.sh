@@ -164,7 +164,15 @@ if [[ -n "$NVCC_INCLUDE_DIRS" ]]; then
   done
 fi
 
-# Extra linker libraries from NVCC_EXTRA_LIBS (space-separated, e.g. "cuda dl")
+# Extra library directories from NVCC_LIB_DIRS (space-separated)
+NVCC_LIB_DIRS="${NVCC_LIB_DIRS:-}"
+if [[ -n "$NVCC_LIB_DIRS" ]]; then
+  for dir in $NVCC_LIB_DIRS; do
+    COMMON_NVCC_ARGS+=("-L${dir}" "-Xlinker" "-rpath=${dir}")
+  done
+fi
+
+# Extra linker libraries from NVCC_EXTRA_LIBS (space-separated, e.g. "cuda cudnn")
 NVCC_EXTRA_LIBS="${NVCC_EXTRA_LIBS:-}"
 if [[ -n "$NVCC_EXTRA_LIBS" ]]; then
   for lib in $NVCC_EXTRA_LIBS; do

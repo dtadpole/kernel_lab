@@ -153,6 +153,10 @@ hosts:
       python: /usr/local/bin/python3  # 3.12.13+meta
       cudnn_sdpa_broken: false      # driver 595 fixes cuDNN 9.19 segfault
       tvm_ffi_disable_torch_c_dlpack: true
+      cudnn_include:
+        - "@venv/nvidia/cudnn/include"
+        - "@uv_cache/include"
+      cudnn_lib: "@venv/nvidia/cudnn/lib"
     network:
       internet: false               # fwdproxy blocks CONNECT tunnels
       proxy_bypass_method: "ssh_localhost"  # for Claude Code sandbox

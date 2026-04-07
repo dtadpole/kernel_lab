@@ -118,19 +118,57 @@ def resolve_host_env() -> Dict[str, str]:
         if default_cuda.exists():
             env["CUDA_HOME"] = str(default_cuda.resolve())
 
-    # CUTLASS include paths for NVCC
+    # Collect extra include dirs and libs from host config
     if entry:
-        cutlass_include = entry.get("env", {}).get("cutlass_include")
-        if cutlass_include:
-            if isinstance(cutlass_include, list):
-                dirs = [d for d in cutlass_include if Path(d).is_dir()]
-            elif Path(cutlass_include).is_dir():
-                dirs = [cutlass_include]
-            else:
-                dirs = []
-            if dirs:
-                env["NVCC_INCLUDE_DIRS"] = " ".join(str(d) for d in dirs)
-                env["NVCC_EXTRA_LIBS"] = "cuda dl"
+        host_env = entry.get("env", {})
+        include_dirs: list[str] = []
+        lib_dirs: list[str] = []
+        libs: list[str] = ["cuda"]  # always link libcuda
+
+        def _expand(path: str) -> str:
+            """Expand @venv and @uv_cache placeholders."""
+            project_root = Path(__file__).resolve().parents[1]
+            venv = str(project_root / ".venv" / "lib" / "python3.12" / "site-packages")
+            path = path.replace("@venv", venv)
+            # Find cudnn_frontend in uv cache (look for the dir containing cudnn_frontend.h)
+            if "@uv_cache" in path:
+                import glob
+                for d in glob.glob(str(Path.home() / ".cache/uv/archive-v0/*/include/cudnn_frontend.h")):
+                    uv_root = str(Path(d).parents[1])  # strip /include/cudnn_frontend.h
+                    path = path.replace("@uv_cache", uv_root)
+                    break
+                else:
+                    path = path.replace("@uv_cache", "")
+            return path
+
+        def _collect_dirs(key: str) -> list[str]:
+            val = host_env.get(key)
+            if not val:
+                return []
+            items = val if isinstance(val, list) else [val]
+            return [d for d in (_expand(str(p)) for p in items) if Path(d).is_dir()]
+
+        # CUTLASS
+        include_dirs.extend(_collect_dirs("cutlass_include"))
+
+        # cuDNN
+        cudnn_includes = _collect_dirs("cudnn_include")
+        include_dirs.extend(cudnn_includes)
+        cudnn_lib = host_env.get("cudnn_lib")
+        if cudnn_lib:
+            expanded = _expand(str(cudnn_lib))
+            if Path(expanded).is_dir():
+                lib_dirs.append(expanded)
+                libs.append("cudnn")
+                # Also set LD_LIBRARY_PATH so runtime finds libcudnn
+                env["LD_LIBRARY_PATH"] = expanded
+
+        if include_dirs:
+            env["NVCC_INCLUDE_DIRS"] = " ".join(include_dirs)
+        if lib_dirs:
+            env["NVCC_LIB_DIRS"] = " ".join(lib_dirs)
+        if libs:
+            env["NVCC_EXTRA_LIBS"] = " ".join(libs)
 
     key, _ = _match_host_entry()
     logger.info("Host env resolved [%s]: %s", key or "auto-detect", env)

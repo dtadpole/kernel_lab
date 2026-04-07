@@ -43,7 +43,7 @@ def set_seed(seed: int) -> None:
 # Device locking (aligned with triton-ag configEndpoints.py / kbEvalCli.py)
 # ---------------------------------------------------------------------------
 MAX_LOCK_AGE = 30  # seconds — force-delete lock older than this
-MAX_LOCK_WAIT = 15  # seconds — max time to wait for lock before giving up
+MAX_LOCK_WAIT = 60  # seconds — max time to wait for lock before giving up
 
 
 def cleanup_lockfile(lock_path: Path) -> None:
@@ -80,11 +80,26 @@ def cleanup_lockfile(lock_path: Path) -> None:
                 pass
 
 
+def _physical_gpu_index() -> int:
+    """Get the physical GPU index from CUDA_VISIBLE_DEVICES.
+
+    When CUDA_VISIBLE_DEVICES=2, the process sees device 0 internally,
+    but the lock should use physical index 2 to avoid conflicts with
+    processes using other GPUs.
+    """
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cvd:
+        first = cvd.split(",")[0].strip()
+        if first.isdigit():
+            return int(first)
+    return 0
+
+
 def acquire_device_lock(device: torch.device) -> int | None:
     """Acquire GPU device lock with wait + stale cleanup."""
     lock_dir = Path.home() / ".cuda_exec"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    device_index = device.index if device.index is not None else 0
+    device_index = _physical_gpu_index()
     lock_path = lock_dir / f".lock_cuda_{device_index}"
 
     deadline = time.monotonic() + MAX_LOCK_WAIT

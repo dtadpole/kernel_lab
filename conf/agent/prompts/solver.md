@@ -67,22 +67,37 @@ Docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), cuda-c-best
 - CUDA Toolkit tools (nvcc, ptxas, cuobjdump, nvdisasm, ncu) via Bash
 - Network: `ssh localhost "command"` or WebSearch/WebFetch
 
+## Seeding
+
+If your current run's gen/ directory has existing code (from a previous
+gem in this run), read it and use it as your starting point. If gen/ is
+empty, write from scratch. Only seed from YOUR current run's gems — never
+from other runs.
+
 ## Optimization Methodology
 
 After each bench result, follow this loop:
 1. **Profile both** — use `ik:exec profile` on the largest config for BOTH
-   your gen-cuda AND ref-cublas. Compare NCU metrics side by side:
-   SM utilization, memory throughput, warp stalls, tensor core utilization.
+   your gen-cuda AND ref-cublas. Compare NCU metrics side by side.
+   See ik:exec `artifacts/profiling-guide.md` for key metrics.
 2. **Compare and find the gap** — where does your kernel lose to the reference?
    Which metric has the biggest gap? This is your optimization target.
-3. **Read the reference** — study cublas.cu and the eval harness to understand
-   the interface, data layout, and what the reference does differently.
-4. **Target the gap** — choose one optimization that closes the specific gap
-   identified by comparison. Do not guess.
+3. **Brainstorm** — each idea must be: data-backed (grounded in profile data),
+   specific (exact code change), measurable (predicts NCU effect), and
+   feasible (within register/SMEM budget). Pick highest impact first.
+4. **Target the gap** — choose one optimization that closes the specific gap.
 5. **Implement → compile → trial → bench** — one change at a time.
 
 If 4 consecutive attempts show no improvement, try a fundamentally different
 architecture (e.g., switch from 1-WG to warp-specialization).
+
+## Key Principles
+
+- **Correctness first** — fix ✗ before optimizing performance
+- **One change at a time** — isolate variables
+- **Stop on improvement** — when bench shows a new gem, record it and stop
+- **Keep trying on failure** — revert and try next idea immediately
+- **Profile failed attempts** — extract learning before reverting
 
 ## Correctness First — ABSOLUTE RULE
 

@@ -1,13 +1,13 @@
 /*
- * BF16 matmul for SM90 — WGMMA + TMA, 3-WG warp-specialized (v25).
+ * BF16 matmul for SM90 — WGMMA + TMA, 3-WG warp-specialized (v26).
+ *
+ * v26: Vectorized 128-bit epilogue + remove trailing barrier on last N-tile.
+ *   SMEM→GMEM uses uint4 (16B) loads/stores: 4 iterations instead of 16.
+ *   8 threads cover one row (8×8 BF16 = 64 cols), 4 warps = 4×4 = 16 rows/iter.
+ *   Last N-tile skips trailing barrier (no subsequent SMEM reuse needed).
  *
  * v25: SMEM-buffered coalesced epilogue.
- *   NCU showed 50% sector waste on scalar stores (16/32 bytes/sector).
- *   Registers → SMEM (natural order) → barrier → SMEM → GMEM (coalesced).
- *   Eliminates L1TEX scoreboard stalls from scattered stores.
- *
  * v24: wgmma_wait1 + GROUP_M=12.
- * v22: Plain bfloat162 stores (remove evict-last).
  * v20: Eliminate register spilling by removing descriptor hoisting.
  *
  * CORRECTNESS: wgmma_wait1() + signal mbar_empty[(kt-1)%STAGES].
@@ -169,59 +169,60 @@ void wgmma_m64n64k16(float (&d)[32], uint64_t da, uint64_t db, int scale_d) {
 }
 
 /* =========================================================================
- * Epilogue — SMEM-buffered coalesced stores (v25).
+ * Epilogue — SMEM-buffered vectorized coalesced stores (v26).
  *
- * Registers → SMEM (natural WGMMA layout) → barrier → SMEM → GMEM (coalesced).
- * EPI_STRIDE=72 (64+8 padding) eliminates SMEM bank conflicts on both
- * write and read paths.
+ * Phase 1: Registers → SMEM (natural WGMMA layout, 4-byte writes)
+ * Phase 2: Barrier (128 threads)
+ * Phase 3: SMEM → GMEM using 128-bit (uint4) loads and stores.
+ *   8 threads cover one row (8 × 8 BF16 = 64 cols), 4 warps × 4 rows = 16 rows/iter.
+ *   Only 4 iterations needed (vs 16 in v25).
+ * Phase 4: Trailing barrier (skipped on last N-tile via `last` flag).
  *
- * Each consumer WG (128 threads) writes one 64×64 N-tile at a time.
- * 128 threads write 4 rows per iteration (32 threads × 2 BF16 = 64 cols),
- * needing 16 iterations to cover 64 rows.
+ * EPI_STRIDE=72 (64+8 padding) eliminates SMEM bank conflicts.
  * ========================================================================= */
 __device__ __forceinline__
 void store_acc_n64_smem(__nv_bfloat16* C, float (&acc)[32],
                         int ctaRow, int ctaCol, int M, int N,
-                        int local_tid, __nv_bfloat16* epi_buf, int bar_id) {
+                        int local_tid, __nv_bfloat16* epi_buf, int bar_id,
+                        int last) {
     const int warp = local_tid / 32;
     const int lane = local_tid % 32;
 
-    /* Step 1: Write registers to SMEM in natural WGMMA layout.
-     * acc[4p+0/1] → row = warp*16 + lane/4,       col = (lane%4)*2 + p*8
-     * acc[4p+2/3] → row = warp*16 + lane/4 + 8,   col = same */
+    /* Phase 1: Write registers to SMEM in natural WGMMA layout. */
     #pragma unroll
     for (int p = 0; p < 8; p++) {
         const int col = (lane % 4) * 2 + p * 8;
         const int row0 = warp * 16 + lane / 4;
         const int row8 = row0 + 8;
-        /* Write bfloat162 pairs to padded SMEM */
         *(__nv_bfloat162*)(epi_buf + row0 * EPI_STRIDE + col) = __halves2bfloat162(
             __float2bfloat16(acc[4*p + 0]), __float2bfloat16(acc[4*p + 1]));
         *(__nv_bfloat162*)(epi_buf + row8 * EPI_STRIDE + col) = __halves2bfloat162(
             __float2bfloat16(acc[4*p + 2]), __float2bfloat16(acc[4*p + 3]));
     }
 
-    /* Step 2: WG-level barrier (128 threads) */
+    /* Phase 2: WG-level barrier (128 threads) */
     asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id));
 
-    /* Step 3: Read SMEM in coalesced order and store to GMEM.
-     * 128 threads, 4 warps × 32 lanes.
-     * Each iteration: 4 rows (one per warp), 32 threads per warp × 2 BF16 = 64 cols.
-     * 16 iterations cover 64 rows. */
+    /* Phase 3: Vectorized 128-bit SMEM → GMEM.
+     * 32 lanes / 8 lanes-per-row = 4 rows per warp. 4 warps × 4 = 16 rows/iter.
+     * Each lane reads 8 consecutive BF16 (uint4 = 16 bytes) from SMEM and
+     * stores to GMEM. 4 iterations cover 64 rows. */
     #pragma unroll
-    for (int iter = 0; iter < 16; iter++) {
-        const int row = iter * 4 + warp;
-        const int col = lane * 2;
+    for (int iter = 0; iter < 4; iter++) {
+        const int row = iter * 16 + warp * 4 + lane / 8;
+        const int col = (lane % 8) * 8;
         const int gRow = ctaRow + row;
         const int gCol = ctaCol + col;
-        if (gRow < M && gCol + 1 < N) {
-            __nv_bfloat162 val = *(__nv_bfloat162*)(epi_buf + row * EPI_STRIDE + col);
-            *(__nv_bfloat162*)(C + gRow * N + gCol) = val;
+        if (gRow < M && gCol + 7 < N) {
+            uint4 val = *(const uint4*)((const char*)epi_buf + (row * EPI_STRIDE + col) * 2);
+            *(uint4*)((char*)C + ((size_t)gRow * N + gCol) * 2) = val;
         }
     }
 
-    /* Step 4: Barrier before reusing SMEM for next N-tile */
-    asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id));
+    /* Phase 4: Trailing barrier — skip on last N-tile (no SMEM reuse). */
+    if (!last) {
+        asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id));
+    }
 }
 
 /* =========================================================================
@@ -394,16 +395,16 @@ matmul_wgmma_tma(
                 mbarrier_arrive(&mbar_empty[(numK - 1) % STAGES]);
             }
 
-            /* Epilogue: register → SMEM → GMEM (coalesced, v25).
+            /* Epilogue: register → SMEM → GMEM (vectorized 128-bit, v26).
              * Each consumer WG uses its own SMEM buffer and barrier.
-             * Process one N-tile at a time to minimize SMEM usage. */
+             * Last N-tile skips trailing barrier (no subsequent SMEM reuse). */
             const int consumer_row = ctaRow + consumer_id * 64;
             __nv_bfloat16* epi_buf = (__nv_bfloat16*)(smem + EPI_OFFSET + consumer_id * EPI_BUF_BYTES);
             const int bar_id = consumer_id + 1;   /* barrier 1 or 2 */
-            store_acc_n64_smem(C, acc0, consumer_row, ctaCol,               M, N, local_tid, epi_buf, bar_id);
-            store_acc_n64_smem(C, acc1, consumer_row, ctaCol + TILE_NQ,     M, N, local_tid, epi_buf, bar_id);
-            store_acc_n64_smem(C, acc2, consumer_row, ctaCol + 2 * TILE_NQ, M, N, local_tid, epi_buf, bar_id);
-            store_acc_n64_smem(C, acc3, consumer_row, ctaCol + 3 * TILE_NQ, M, N, local_tid, epi_buf, bar_id);
+            store_acc_n64_smem(C, acc0, consumer_row, ctaCol,               M, N, local_tid, epi_buf, bar_id, 0);
+            store_acc_n64_smem(C, acc1, consumer_row, ctaCol + TILE_NQ,     M, N, local_tid, epi_buf, bar_id, 0);
+            store_acc_n64_smem(C, acc2, consumer_row, ctaCol + 2 * TILE_NQ, M, N, local_tid, epi_buf, bar_id, 0);
+            store_acc_n64_smem(C, acc3, consumer_row, ctaCol + 3 * TILE_NQ, M, N, local_tid, epi_buf, bar_id, 1);
         }
     }
 }

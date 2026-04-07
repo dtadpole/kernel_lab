@@ -8,17 +8,13 @@ from agents.runner import AgentRunner
 
 
 def _make_runner(blocked_paths, allowed_paths, run_tag="test_run_123"):
-    """Create a minimal AgentRunner with Read tool rules for testing."""
+    """Create a minimal AgentRunner with Read+Bash tool rules for testing."""
+    rule_kwargs = dict(allow=True, blocked_paths=blocked_paths, allowed_paths=allowed_paths)
     config = AgentConfig(
         name="test_solver",
         tool_rules=[
-            ToolRule(
-                tool="Read",
-                allow=True,
-                constraint="test",
-                blocked_paths=blocked_paths,
-                allowed_paths=allowed_paths,
-            ),
+            ToolRule(tool="Read", constraint="test", **rule_kwargs),
+            ToolRule(tool="Bash", **rule_kwargs),
         ],
     )
     storage = StorageConfig(run_tag=run_tag)
@@ -195,3 +191,102 @@ def test_glob_blocked():
 
     result = runner._check_tool_rules("Glob", {"path": "/home/zhenc/kernel_lab/cuda_exec"})
     assert result.get("decision") != "block"
+
+
+# ── Bash command scanning ──
+
+@pytest.mark.quick
+def test_bash_cat_blocked_path():
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab_kb/"],
+        allowed_paths=["~/kernel_lab_kb/runs/<run_tag>/"],
+        run_tag="my_run",
+    )
+    # cat from another run — should be blocked
+    result = runner._check_tool_rules("Bash", {
+        "command": "cat ~/kernel_lab_kb/runs/old_run/gems/v001/cuda.cu"
+    })
+    assert result.get("decision") == "block"
+
+
+@pytest.mark.quick
+def test_bash_cat_allowed_path():
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab_kb/"],
+        allowed_paths=["~/kernel_lab_kb/runs/<run_tag>/"],
+        run_tag="my_run",
+    )
+    # cat from current run — should be allowed
+    result = runner._check_tool_rules("Bash", {
+        "command": "cat ~/kernel_lab_kb/runs/my_run/gen/cuda.cu"
+    })
+    assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_bash_find_blocked():
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/cuda_exec/"],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "find ~/kernel_lab/data/peak -name '*.cu'"
+    })
+    assert result.get("decision") == "block"
+
+
+@pytest.mark.quick
+def test_bash_allowed_command():
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=["~/kernel_lab/cuda_exec/"],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "cat ~/kernel_lab/cuda_exec/impls.py"
+    })
+    assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_bash_no_path_passes():
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab/"],
+        allowed_paths=[],
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "nvidia-smi"
+    })
+    assert result.get("decision") != "block"
+
+
+@pytest.mark.quick
+def test_bash_worktrees_blocked():
+    config = AgentConfig(
+        name="solver",
+        tool_rules=[
+            ToolRule(tool="Bash", allow=True,
+                     blocked_paths=["~/.claude/worktrees/"],
+                     allowed_paths=[]),
+        ],
+    )
+    runner = AgentRunner(
+        agent_config=config, storage_config=StorageConfig(run_tag="test"),
+        cwd="/home/zhenc/kernel_lab",
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "cat ~/.claude/worktrees/fa4-4wg/data/gen/sm90/matmul/cuda/cuda.cu"
+    })
+    assert result.get("decision") == "block"
+
+
+@pytest.mark.quick
+def test_bash_absolute_path_blocked():
+    runner = _make_runner(
+        blocked_paths=["~/kernel_lab_kb/"],
+        allowed_paths=["~/kernel_lab_kb/runs/<run_tag>/"],
+        run_tag="my_run",
+    )
+    result = runner._check_tool_rules("Bash", {
+        "command": "head -50 /home/zhenc/kernel_lab_kb/runs/other_run/gems/cuda.cu"
+    })
+    assert result.get("decision") == "block"

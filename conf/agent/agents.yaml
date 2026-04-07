@@ -58,6 +58,18 @@ agents:
           禁止: ik:bench, ik:env, ik:index — 这些由 Supervisor 管理
           禁止: 通过 Bash 编辑或写入 data/gen/ 和 ~/.cuda_exec/<run_tag>/ 之外的任何文件
           禁止: 修改 CUDA_VISIBLE_DEVICES 环境变量 — GPU 分配由 Supervisor 管理
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/
+          - ~/.claude/worktrees/
+        allowed_paths:
+          - ~/kernel_lab/cuda_exec/
+          - ~/kernel_lab/plugins/
+          - ~/kernel_lab/conf/
+          - ~/kernel_lab/DESIGN.md
+          - ~/kernel_lab/AGENTS.md
+          - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
       - tool: Edit
         allow: true
         constraint: "允许编辑 data/gen/、~/kernel_lab_kb/runs/*/gen/、~/.cuda_exec/<run_tag>/、/tmp/"
@@ -68,8 +80,9 @@ agents:
         allow: true
         constraint: "只允许读白名单中的路径"
         blocked_paths:
-          - ~/kernel_lab/                      # block 整个 repo
-          - ~/kernel_lab_kb/                   # block 整个 KB
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/
+          - ~/.claude/worktrees/
         allowed_paths:
           # 相对路径
           - cuda_exec/
@@ -90,6 +103,7 @@ agents:
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/
+          - ~/.claude/worktrees/
         allowed_paths:
           - cuda_exec/
           - plugins/
@@ -104,6 +118,7 @@ agents:
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/
+          - ~/.claude/worktrees/
         allowed_paths:
           - cuda_exec/
           - plugins/

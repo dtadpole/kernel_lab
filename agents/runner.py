@@ -386,6 +386,42 @@ class AgentRunner:
             resolved = os.path.join(self.cwd, resolved)
         return resolved
 
+    def _is_path_blocked(self, path: str, rule) -> bool:
+        """Check if a resolved absolute path is blocked by a rule.
+
+        Returns True if path matches a blocked_path and does NOT match
+        any allowed_path exception.
+        """
+        import os
+        path_dir = path.rstrip("/") + "/"
+        for blocked in rule.blocked_paths:
+            blocked_resolved = self._resolve_path_pattern(blocked).rstrip("/") + "/"
+            if path_dir.startswith(blocked_resolved) or path == blocked_resolved.rstrip("/"):
+                # Check allowed_paths exceptions
+                for allowed in rule.allowed_paths:
+                    allowed_resolved = self._resolve_path_pattern(allowed).rstrip("/") + "/"
+                    if path_dir.startswith(allowed_resolved) or path == allowed_resolved.rstrip("/"):
+                        return False
+                return True
+        return False
+
+    def _extract_paths_from_command(self, command: str) -> list[str]:
+        """Extract file paths from a Bash command string.
+
+        Finds absolute paths (/...), home paths (~/...), and expands them.
+        """
+        import os
+        import re
+        paths = []
+        # Match absolute paths and ~/paths in the command
+        for match in re.finditer(r'(?:~|/)[^\s;|>&<\'"()]+', command):
+            raw = match.group(0)
+            resolved = os.path.expanduser(raw)
+            if not os.path.isabs(resolved):
+                continue
+            paths.append(resolved)
+        return paths
+
     def _check_tool_rules(self, tool_name: str, tool_input: dict) -> dict:
         """Enforce tool_rules from config. Returns hook output dict."""
         import os
@@ -396,33 +432,44 @@ class AgentRunner:
                         "decision": "block",
                         "reason": f"Tool '{tool_name}' is not allowed for this agent role.",
                     }
-                # Check blocked_paths / allowed_paths
-                if rule.blocked_paths:
+                if not rule.blocked_paths:
+                    # No path restrictions — just apply constraint
+                    if rule.constraint:
+                        return {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "additionalContext": f"Constraint: {rule.constraint}",
+                            }
+                        }
+                    return {}
+
+                # ── Path-based tools (Read, Glob, Grep): check file_path/path ──
+                if tool_name in ("Read", "Glob", "Grep"):
                     file_path = (
                         tool_input.get("file_path", "")
                         or tool_input.get("path", "")
                     )
-                    if file_path and not file_path.startswith("{"):  # skip non-path inputs
+                    if file_path and not file_path.startswith("{"):
                         resolved = os.path.expanduser(file_path)
                         if not os.path.isabs(resolved):
                             resolved = os.path.join(self.cwd, resolved)
-                        # Normalize: ensure trailing / for directory prefix matching
-                        resolved_dir = resolved.rstrip("/") + "/"
-                        for blocked in rule.blocked_paths:
-                            blocked_resolved = self._resolve_path_pattern(blocked).rstrip("/") + "/"
-                            if resolved_dir.startswith(blocked_resolved) or resolved == blocked_resolved.rstrip("/"):
-                                # Check if an allowed_path overrides the block
-                                is_allowed = False
-                                for allowed in rule.allowed_paths:
-                                    allowed_resolved = self._resolve_path_pattern(allowed).rstrip("/") + "/"
-                                    if resolved_dir.startswith(allowed_resolved) or resolved == allowed_resolved.rstrip("/"):
-                                        is_allowed = True
-                                        break
-                                if not is_allowed:
-                                    return {
-                                        "decision": "block",
-                                        "reason": f"Access denied: '{file_path}' is blocked.",
-                                    }
+                        if self._is_path_blocked(resolved, rule):
+                            return {
+                                "decision": "block",
+                                "reason": f"Access denied: '{file_path}' is blocked.",
+                            }
+
+                # ── Bash: scan command for blocked paths ──
+                elif tool_name == "Bash":
+                    command = tool_input.get("command", "")
+                    if command:
+                        for path in self._extract_paths_from_command(command):
+                            if self._is_path_blocked(path, rule):
+                                return {
+                                    "decision": "block",
+                                    "reason": f"Access denied: command references blocked path '{path}'.",
+                                }
+
                 if rule.constraint:
                     return {
                         "hookSpecificOutput": {

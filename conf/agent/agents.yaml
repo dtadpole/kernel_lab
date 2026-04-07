@@ -63,6 +63,7 @@ agents:
           - ~/kernel_lab_kb/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
+          - ~/.cuda_exec/
         allowed_paths:
           - ~/kernel_lab/cuda_exec/
           - ~/kernel_lab/plugins/
@@ -87,6 +88,7 @@ agents:
           - ~/kernel_lab_kb/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
+          - ~/.cuda_exec/
         allowed_paths:
           # 相对路径
           - cuda_exec/
@@ -113,6 +115,7 @@ agents:
           - ~/kernel_lab_kb/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
+          - ~/.cuda_exec/
         allowed_paths:
           - cuda_exec/
           - plugins/
@@ -133,6 +136,7 @@ agents:
           - ~/kernel_lab_kb/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
+          - ~/.cuda_exec/
         allowed_paths:
           - cuda_exec/
           - plugins/

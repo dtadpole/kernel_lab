@@ -133,36 +133,31 @@ Supervisor 的 `run_task()` 管理完整的任务生命周期：
 ```
 run_task(task, run_tag)
   │
-  for iteration in range(max_iterations):
-    │
-    ├── 生成 run_tag: supervisor_run_YYYYMMDD_HHMMSS
-    │
-    ├── phase = "solving"
-    │   └── AgentRunner.run(prompt, task_slug)
-    │         │
-    │         │  期间所有事件通过 hooks → Supervisor.on_*()
-    │         │  Steward 在 on_ask / on_permission / on_stop / on_monitor_alert 中被调用
-    │         │  Monitor 并行运行
-    │         │
-    │         └── Solver 停止 → on_stop() → Steward.review_session_end()
-    │              → verdict 存入 self._pending_verdict
-    │
-    ├── phase = "deciding"
-    │   └── 读取 _pending_verdict
-    │       │
-    │       ├── SUCCESS (level 1)
-    │       │     → phase = "done", break
-    │       │
-    │       ├── CONTINUE (level 2)
-    │       │     → 构建新 prompt（含具体指导），继续循环
-    │       │
-    │       ├── ABORT (level 3)
-    │       │     → phase = "done", break
-    │       │
-    │       └── other
-    │             → phase = "done", break
-    │
-  └── return TaskResult
+  ├── 创建 AgentRunner（一个 session，贯穿整个 task）
+  │
+  ├── iteration 0: AgentRunner.run(initial_prompt)
+  │     │  期间所有事件通过 hooks → Supervisor.on_*()
+  │     │  Steward 在 on_ask / on_permission / on_stop / on_monitor_alert 中被调用
+  │     │  Monitor 并行运行
+  │     └── Solver end_turn → on_stop() → _pending_stop_event
+  │
+  └── while loop:
+      │
+      ├── phase = "deciding"
+      │   └── Steward.review_session_end()
+      │       │
+      │       ├── SUCCESS → phase = "done", break
+      │       │
+      │       ├── CONTINUE:<guidance>
+      │       │     → AgentRunner.resume(guidance)  ← 同一 session 继续
+      │       │     → Solver 保留完整上下文，收到 guidance 继续工作
+      │       │     → Solver 再次 end_turn → 回到 "deciding"
+      │       │
+      │       ├── ABORT → phase = "done", break
+      │       │
+      │       └── other → treat as CONTINUE
+      │
+      └── return TaskResult
 ```
 
 ## Intervention Level 处理
@@ -172,18 +167,19 @@ Supervisor 根据 Steward 返回的 intervention_level 采取不同动作：
 ```python
 async def _handle_steward_response(self, response: StewardResponse):
     match response.intervention_level:
-        case 1:  # Inline
+        case 1:  # Inline (SUCCESS, ALLOW, etc.)
             pass  # 记录，无动作（或答案已通过 MCP 返回）
 
-        case 2:  # Inject
-            await self._solver_runner.interrupt()
+        case 2:  # Continue/Inject (CONTINUE, INJECT, etc.)
+            # session_end CONTINUE: Solver 已 end_turn，用 resume 继续同一 session
+            # monitor INJECT: interrupt Solver → resume with guidance
             await self._solver_runner.resume(response.detail)
 
-        case 3:  # Restart
-            # 当前 iteration 结束，run_task 循环会启动新 iteration
+        case 3:  # Abort (ABORT)
+            # 停止任务，不再 resume
             pass
 
-        case 4:  # Kill
+        case 4:  # Kill (INTERRUPT, KILL)
             await self._solver_runner.interrupt()
             # 不再 resume
 ```

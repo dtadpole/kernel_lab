@@ -257,6 +257,15 @@ class Supervisor(DefaultHandler):
         last_result: RunResult | None = None
         verdict: StewardResponse | None = None
 
+        # Create AgentRunner once — CONTINUE will resume the same session
+        self._solver_runner = AgentRunner(
+            agent_config=solver_config,
+            storage_config=self.config.storage,
+            handler=self,
+            monitor_config=self.config.monitor,
+            steward=None,
+        )
+
         solver_prompt = self._build_initial_prompt(task, run_tag, kernel)
 
         iteration = 0
@@ -264,8 +273,6 @@ class Supervisor(DefaultHandler):
             if self.max_iterations > 0 and iteration >= self.max_iterations:
                 break
             self.state.iteration = iteration
-            self.state.turns_completed = 0
-            self.state.error_count = 0
             self.state.consecutive_stuck = 0
             self.state.phase = "solving"
 
@@ -274,24 +281,23 @@ class Supervisor(DefaultHandler):
             print(f"[Supervisor] Run tag: {run_tag}")
             print(f"{'='*60}\n")
 
-            self._solver_runner = AgentRunner(
-                agent_config=solver_config,
-                storage_config=self.config.storage,
-                handler=self,
-                monitor_config=self.config.monitor,
-                steward=None,
-            )
-
             self._pending_stop_event = None
 
-            last_result = await self._solver_runner.run(
-                prompt=solver_prompt,
-                task_slug=task_slug,
-            )
+            if iteration == 0:
+                # First iteration — fresh session
+                last_result = await self._solver_runner.run(
+                    prompt=solver_prompt,
+                    task_slug=task_slug,
+                )
+            else:
+                # CONTINUE — resume the same session with Steward guidance
+                last_result = await self._solver_runner.resume(solver_prompt)
+
             self._current_log = last_result.log
 
             # ── Post-session Steward review ──
-            # Now the Solver CLI is fully closed, safe to call Steward
+            # Solver has stopped (end_turn), safe to call Steward.
+            # On CONTINUE, we resume the same session with guidance.
             self.state.phase = "deciding"
 
             stop_event = self._pending_stop_event
@@ -333,14 +339,10 @@ class Supervisor(DefaultHandler):
                 self.state.phase = "done"
                 break
             elif verdict.action == "CONTINUE":
-                solver_prompt = self._build_retry_prompt(
-                    task, run_tag, kernel, verdict, iteration,
-                )
+                solver_prompt = self._build_continue_prompt(verdict)
             else:
-                # Unknown verdict — keep going (don't silently stop)
-                solver_prompt = self._build_retry_prompt(
-                    task, run_tag, kernel, verdict, iteration,
-                )
+                # Unknown verdict — treat as CONTINUE
+                solver_prompt = self._build_continue_prompt(verdict)
 
             iteration += 1
 
@@ -382,29 +384,18 @@ a new gem is recorded.
 Keep optimizing until the formal benchmark shows improvement or you
 exhaust your ideas. Do not stop after a single attempt."""
 
-    def _build_retry_prompt(
-        self, task: str, run_tag: str, kernel: str,
-        verdict: StewardResponse, iteration: int,
-    ) -> str:
-        return f"""Run tag for this session: {run_tag}
-Use this run_tag for ALL ik:exec commands (exec.run_tag={run_tag}).
-Scratch directory: ~/.cuda_exec/{run_tag}/
-Kernel: {kernel}
+    def _build_continue_prompt(self, verdict: StewardResponse) -> str:
+        """Build the resume prompt for CONTINUE — injected into the same session."""
+        guidance = verdict.detail or verdict.reasoning[:500]
+        return f"""[Supervisor — CONTINUE]
 
----
+The Steward reviewed your session and determined you should continue.
 
-ITERATION {iteration + 1}: Previous attempt was not accepted.
+Guidance: {guidance}
 
-Feedback: {verdict.detail or verdict.reasoning[:300]}
-
-Original task: {task}
-
-Please try a different approach. Review what was tried before and
-explore an alternative optimization strategy.
-
-REMINDER: You MUST call request_formal_bench as soon as your code
-compiles and passes correctness. Do not end the session without
-benchmarking. No benchmark = not done."""
+Please continue working. Do not repeat what you already tried.
+If you haven't called request_formal_bench yet, do so as soon as
+your code compiles and passes correctness."""
 
     # ── Benchmarker dispatch ──
 

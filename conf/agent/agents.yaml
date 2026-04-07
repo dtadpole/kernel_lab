@@ -75,6 +75,7 @@ agents:
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
       - tool: Edit
         allow: true
         constraint: "允许编辑 ~/kernel_lab_kb/runs/<run_tag>/、/tmp/"
@@ -109,6 +110,7 @@ agents:
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
       - tool: Glob
         allow: true
         blocked_paths:
@@ -130,6 +132,7 @@ agents:
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
       - tool: Grep
         allow: true
         blocked_paths:
@@ -151,6 +154,7 @@ agents:
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
+          - ~/.cuda_exec/<run_tag>/
     system_prompt_file: prompts/solver.md
 
   rigger:

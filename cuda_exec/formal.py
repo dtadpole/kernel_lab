@@ -432,10 +432,14 @@ def formal_benchmark(
     runtime_root_path = Path(runtime_root).expanduser() if runtime_root else Path.home() / ".cuda_exec_bench"
     data_root_path = Path(data_root).expanduser() if data_root else None
 
+    # --- Resolve run_tag: explicit > env var > auto-detect ---
+    if not run_tag:
+        run_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
+
     # --- Phase 1: Snapshot ---
     run_dir = None
     snapshot_data = data_root_path  # fallback: use explicit data_root or None (= project data/)
-    logger.info("Snapshot start [%s]", datetime.now().strftime(_ts_fmt))
+    logger.info("Snapshot start [%s] run_tag=%s", datetime.now().strftime(_ts_fmt), run_tag or "(auto)")
     try:
         from cuda_exec.trajectory import prepare_run
         run_dir = prepare_run(kernel, arch, impls, timeout_seconds, kb_repo=kb_repo_path, run_tag=run_tag)

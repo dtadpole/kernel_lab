@@ -438,6 +438,17 @@ class AgentRunner:
                 return True
         return False
 
+    @staticmethod
+    def _deny(reason: str) -> dict:
+        """Return a PreToolUse hook output that blocks the tool call."""
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+
     # Navigation commands — allowed on any path (don't read file content)
     _NAV_COMMANDS = re.compile(
         r'^\s*(ls|mkdir|touch|dirname|basename|pwd)\b'
@@ -479,18 +490,12 @@ class AgentRunner:
         for rule in self.agent_config.tool_rules:
             if rule.tool == tool_name:
                 if not rule.allow:
-                    return {
-                        "decision": "block",
-                        "reason": f"Tool '{tool_name}' is not allowed for this agent role.",
-                    }
+                    return self._deny(f"Tool '{tool_name}' is not allowed for this agent role.")
                 # ── Bash: check forbidden commands first (git, etc.) ──
                 if tool_name == "Bash":
                     command = tool_input.get("command", "")
                     if command and self._FORBIDDEN_COMMANDS.search(command):
-                        return {
-                            "decision": "block",
-                            "reason": f"Forbidden command detected in: {command[:100]}",
-                        }
+                        return self._deny(f"Forbidden command detected in: {command[:100]}")
 
                 if not rule.blocked_paths:
                     # No path restrictions — just apply constraint
@@ -514,10 +519,7 @@ class AgentRunner:
                         if not os.path.isabs(resolved):
                             resolved = os.path.join(self.cwd, resolved)
                         if self._is_path_blocked(resolved, rule):
-                            return {
-                                "decision": "block",
-                                "reason": f"Access denied: '{file_path}' is blocked.",
-                            }
+                            return self._deny(f"Access denied: '{file_path}' is blocked.")
 
                 # ── Bash: scan commands for blocked paths ──
                 elif tool_name == "Bash":
@@ -525,10 +527,7 @@ class AgentRunner:
                     if command:
                         for path in self._extract_paths_from_command(command):
                             if self._is_path_blocked(path, rule):
-                                return {
-                                    "decision": "block",
-                                    "reason": f"Access denied: command references blocked path '{path}'.",
-                                }
+                                return self._deny(f"Access denied: command references blocked path '{path}'.")
 
                 if rule.constraint:
                     return {

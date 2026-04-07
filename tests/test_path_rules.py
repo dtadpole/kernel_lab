@@ -7,6 +7,11 @@ from agents.config import AgentConfig, StorageConfig, ToolRule
 from agents.runner import AgentRunner
 
 
+def _is_denied(result: dict) -> bool:
+    """Check if a hook result denies the tool call."""
+    return result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+
 def _make_runner(blocked_paths, allowed_paths, run_tag="test_run_123"):
     """Create a minimal AgentRunner with Read+Bash tool rules for testing."""
     rule_kwargs = dict(allow=True, blocked_paths=blocked_paths, allowed_paths=allowed_paths)
@@ -34,7 +39,7 @@ def test_blocked_path_absolute():
         allowed_paths=[],
     )
     result = runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/peak/cuda.cu"})
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -44,7 +49,7 @@ def test_blocked_path_with_tilde():
         allowed_paths=[],
     )
     result = runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/gen/cuda.cu"})
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -54,7 +59,7 @@ def test_unblocked_path_passes():
         allowed_paths=[],
     )
     result = runner._check_tool_rules("Read", {"file_path": "/tmp/something.txt"})
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 # ── Allowed overrides blocked ──
@@ -66,7 +71,7 @@ def test_allowed_overrides_blocked_absolute():
         allowed_paths=["~/kernel_lab/cuda_exec/"],
     )
     result = runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/cuda_exec/impls.py"})
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -76,7 +81,7 @@ def test_allowed_overrides_blocked_relative():
         allowed_paths=["cuda_exec/"],
     )
     result = runner._check_tool_rules("Read", {"file_path": "cuda_exec/impls.py"})
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -86,7 +91,7 @@ def test_blocked_not_in_allowed():
         allowed_paths=["~/kernel_lab/cuda_exec/"],
     )
     result = runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/peak/cuda.cu"})
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 # ── Dynamic <run_tag> substitution ──
@@ -101,7 +106,7 @@ def test_run_tag_substitution_allows_current_run():
     result = runner._check_tool_rules("Read", {
         "file_path": "/home/zhenc/kernel_lab_kb/runs/supervisor_run_20260406_215504/gen/cuda.cu"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -114,7 +119,7 @@ def test_run_tag_substitution_blocks_other_run():
     result = runner._check_tool_rules("Read", {
         "file_path": "/home/zhenc/kernel_lab_kb/runs/run_h8_4/gems/v001/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 # ── Full solver config scenario ──
@@ -157,18 +162,18 @@ def test_solver_read_rules_full():
     )
 
     # Allowed
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/cuda_exec/impls.py"}).get("decision") != "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/plugins/ik/SKILL.md"}).get("decision") != "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/conf/agent/agents.yaml"}).get("decision") != "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/DESIGN.md"}).get("decision") != "block"
-    assert runner._check_tool_rules("Read", {"file_path": f"/home/zhenc/kernel_lab_kb/runs/{run_tag}/gen/cuda.cu"}).get("decision") != "block"
+    assert not _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/cuda_exec/impls.py"}))
+    assert not _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/plugins/ik/SKILL.md"}))
+    assert not _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/conf/agent/agents.yaml"}))
+    assert not _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/DESIGN.md"}))
+    assert not _is_denied(runner._check_tool_rules("Read", {"file_path": f"/home/zhenc/kernel_lab_kb/runs/{run_tag}/gen/cuda.cu"}))
 
     # Blocked
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/peak/sm90/cuda.cu"}).get("decision") == "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/gen/sm90/cuda.cu"}).get("decision") == "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/docs/design/supervisor.md"}).get("decision") == "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab_kb/runs/run_h8_4/gems/v001/cuda.cu"}).get("decision") == "block"
-    assert runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/agents/supervisor.py"}).get("decision") == "block"
+    assert _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/peak/sm90/cuda.cu"}))
+    assert _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/data/gen/sm90/cuda.cu"}))
+    assert _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/docs/design/supervisor.md"}))
+    assert _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab_kb/runs/run_h8_4/gems/v001/cuda.cu"}))
+    assert _is_denied(runner._check_tool_rules("Read", {"file_path": "/home/zhenc/kernel_lab/agents/supervisor.py"}))
 
 
 # ── Glob and Grep use path param ──
@@ -187,10 +192,10 @@ def test_glob_blocked():
         cwd="/home/zhenc/kernel_lab",
     )
     result = runner._check_tool_rules("Glob", {"path": "/home/zhenc/kernel_lab/data/peak"})
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
     result = runner._check_tool_rules("Glob", {"path": "/home/zhenc/kernel_lab/cuda_exec"})
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 # ── Bash command scanning ──
@@ -206,7 +211,7 @@ def test_bash_cat_blocked_path():
     result = runner._check_tool_rules("Bash", {
         "command": "cat ~/kernel_lab_kb/runs/old_run/gems/v001/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -220,7 +225,7 @@ def test_bash_cat_allowed_path():
     result = runner._check_tool_rules("Bash", {
         "command": "cat ~/kernel_lab_kb/runs/my_run/gen/cuda.cu"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -233,7 +238,7 @@ def test_bash_cat_blocked_data():
     result = runner._check_tool_rules("Bash", {
         "command": "cat ~/kernel_lab/data/peak/sm90/matmul/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -246,7 +251,7 @@ def test_bash_cat_allowed_path():
     result = runner._check_tool_rules("Bash", {
         "command": "cat ~/kernel_lab/cuda_exec/impls.py"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -259,7 +264,7 @@ def test_bash_execution_venv_allowed():
     result = runner._check_tool_rules("Bash", {
         "command": "/home/zhenc/kernel_lab/.venv/bin/python -m cuda_exec.exec_cli exec.action=compile"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -272,7 +277,7 @@ def test_bash_execution_data_gen_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "nvcc /home/zhenc/kernel_lab/data/gen/sm90/matmul/cuda.cu -o output"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -285,7 +290,7 @@ def test_bash_execution_data_peak_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "nvcc /home/zhenc/kernel_lab/data/peak/sm90/matmul/cuda.cu -o output"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -297,7 +302,7 @@ def test_bash_no_path_passes():
     result = runner._check_tool_rules("Bash", {
         "command": "nvidia-smi"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -317,18 +322,18 @@ def test_bash_worktrees_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "cat ~/.claude/worktrees/fa4-4wg/data/gen/sm90/matmul/cuda/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
 def test_bash_git_forbidden():
     """git commands are always forbidden."""
     runner = _make_runner(blocked_paths=[], allowed_paths=[])
-    assert runner._check_tool_rules("Bash", {"command": "git log --oneline"}).get("decision") == "block"
-    assert runner._check_tool_rules("Bash", {"command": "git show abc123"}).get("decision") == "block"
-    assert runner._check_tool_rules("Bash", {"command": "git log -p --all"}).get("decision") == "block"
-    assert runner._check_tool_rules("Bash", {"command": "git diff HEAD~5"}).get("decision") == "block"
-    assert runner._check_tool_rules("Bash", {"command": 'ssh localhost "git log"'}).get("decision") == "block"
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "git log --oneline"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "git show abc123"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "git log -p --all"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "git diff HEAD~5"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": 'ssh localhost "git log"'}))
 
 
 @pytest.mark.quick
@@ -341,7 +346,7 @@ def test_bash_head_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "head -50 /home/zhenc/kernel_lab_kb/runs/other_run/gems/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -354,7 +359,7 @@ def test_bash_ls_navigation_allowed():
     result = runner._check_tool_rules("Bash", {
         "command": "ls ~/kernel_lab/data/"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -367,7 +372,7 @@ def test_bash_find_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": "find ~/kernel_lab/data/peak -name '*.cu'"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -381,7 +386,7 @@ def test_bash_ls_kernel_lab_kb_allowed():
     result = runner._check_tool_rules("Bash", {
         "command": "ls ~/kernel_lab_kb/runs/"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -394,7 +399,7 @@ def test_bash_ssh_cat_blocked():
     result = runner._check_tool_rules("Bash", {
         "command": 'ssh localhost "cat ~/kernel_lab/data/peak/sm90/cuda.cu"'
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -407,7 +412,7 @@ def test_bash_ssh_cat_allowed():
     result = runner._check_tool_rules("Bash", {
         "command": 'ssh localhost "cat ~/kernel_lab/data/ref/matmul/cublas/cublas.cu"'
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -420,7 +425,7 @@ def test_read_data_ref_allowed():
     result = runner._check_tool_rules("Read", {
         "file_path": "/home/zhenc/kernel_lab/data/ref/matmul/cublas/cublas.cu"
     })
-    assert result.get("decision") != "block"
+    assert not _is_denied(result)
 
 
 @pytest.mark.quick
@@ -433,7 +438,7 @@ def test_read_data_gen_blocked():
     result = runner._check_tool_rules("Read", {
         "file_path": "/home/zhenc/kernel_lab/data/gen/sm90/matmul/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)
 
 
 @pytest.mark.quick
@@ -446,4 +451,4 @@ def test_read_data_peak_blocked():
     result = runner._check_tool_rules("Read", {
         "file_path": "/home/zhenc/kernel_lab/.peak/sm90/matmul/cuda.cu"
     })
-    assert result.get("decision") == "block"
+    assert _is_denied(result)

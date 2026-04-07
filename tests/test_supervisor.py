@@ -132,19 +132,15 @@ def test_supervisor_state_on_error():
 
 @pytest.mark.quick
 def test_supervisor_monitor_hard_limit():
-    """on_monitor_alert with hard_limit should always return interrupt."""
+    """on_monitor_alert with hard_limit should always return terminate."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
     sup = Supervisor(config)
     sup.state = SupervisorState(phase="solving", task="test")
 
     alert = MonitorAlert(alert_type="hard_limit", details="6 hours exceeded")
 
-    # hard_limit not in router scenarios → falls through to default
     action = anyio.run(sup.on_monitor_alert, alert)
-    # hard_limit is not "total_timeout", so it goes to "stuck" scenario
-    # but even if stuck scenario says CONTINUE, hard_limit should interrupt
-    # Let's verify the current behavior
-    assert action in ("continue", "interrupt")
+    assert action == "terminate"
 
 
 # ── Steward typed methods + intervention levels ──
@@ -239,7 +235,7 @@ def test_supervisor_hard_limit_no_steward():
 
     alert = MonitorAlert(alert_type="hard_limit", details="6h exceeded")
     action = anyio.run(sup.on_monitor_alert, alert)
-    assert action == "interrupt"
+    assert action == "terminate"
 
 
 # ── Steward loads all 6 scenarios ──

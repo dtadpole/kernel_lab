@@ -138,9 +138,15 @@ class AgentRunner:
         return await self._execute(prompt, options)
 
     async def interrupt(self) -> None:
-        """Interrupt the currently running agent."""
+        """Interrupt the currently running agent (graceful)."""
         if self._client:
             await self._client.interrupt()
+
+    async def terminate(self) -> None:
+        """Terminate the agent process (hard kill). Used for hard_limit."""
+        if self._client:
+            await self._client.disconnect()
+        self._is_running = False
 
     @property
     def is_running(self) -> bool:

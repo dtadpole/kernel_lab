@@ -72,8 +72,18 @@ class AgentMonitor:
             # Log that we checked and decided to continue
             return
 
+        elif action == "terminate":
+            # Hard kill — terminate the Solver process, Supervisor will restart
+            event = TextOutputEvent(
+                text=f"[monitor] TERMINATE — {alert.alert_type}: {alert.details}"
+            )
+            self.log.append(event)
+            if self.runner:
+                await self.runner.terminate()
+            self._running = False
+
         elif action == "interrupt":
-            # Log and interrupt the Solver
+            # Soft interrupt — ask Solver to stop gracefully
             event = TextOutputEvent(
                 text=f"[monitor] INTERRUPT — {alert.alert_type}: {alert.details}"
             )

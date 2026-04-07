@@ -510,7 +510,7 @@ class Supervisor(DefaultHandler):
         log = self._current_log or (self._solver_runner.log if self._solver_runner else None)
 
         if event.alert_type == "hard_limit":
-            return "interrupt"
+            return "terminate"
 
         tp = self._get_transcript_path()
         elapsed = str(log.elapsed()) if log else "unknown"

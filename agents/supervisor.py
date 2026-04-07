@@ -189,6 +189,8 @@ class Supervisor(DefaultHandler):
                     "run_tag": run_tag,
                     "success": False,
                     "verdict": "ERROR",
+                    "elapsed": "0s",
+                    "improved": False,
                     "summary": str(e)[:300],
                 })
                 # Continue to next session despite error

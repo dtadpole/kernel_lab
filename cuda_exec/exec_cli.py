@@ -54,14 +54,15 @@ def do_compile(
     impl = resolve_impl(kernel, arch, impl_slug, data_root=data_root)
     metadata = _build_metadata(kernel, impl_slug, run_tag, turn)
 
-    # Build impl-keyed file maps: all impls that need to be staged
+    # Build impl-keyed file maps: all impls that need to be staged.
+    # IMPORTANT: put the target impl FIRST so run_compile_task selects it as
+    # the .cu to compile (it picks the first .cu slug it encounters, and
+    # ref-cudnn also has a .cu entry point which would otherwise shadow gen-cuda).
     all_impls = resolve_impls(kernel, arch, "all", data_root=data_root)
-    compile_impls = {}
+    compile_impls = {impl_slug: dict(impl["files"])}
     for r in all_impls:
-        compile_impls[r["slug"]] = dict(r["files"])
-    # Ensure the target impl is included
-    if impl_slug not in compile_impls:
-        compile_impls[impl_slug] = dict(impl["files"])
+        if r["slug"] not in compile_impls:
+            compile_impls[r["slug"]] = dict(r["files"])
 
     compile_req = CompileRequest(
         metadata=metadata,

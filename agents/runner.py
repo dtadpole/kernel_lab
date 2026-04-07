@@ -173,6 +173,7 @@ class AgentRunner:
             model=ac.model,
             hooks=self._build_hooks(),
             thinking={"type": "enabled", "budget_tokens": 10000},
+            stderr=self._on_stderr,
             env={
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
                 "CUDA_EXEC_RUN_TAG": self.storage_config.resolved_run_tag,
@@ -195,6 +196,26 @@ class AgentRunner:
             opts.agents = self.agents
 
         return opts
+
+    def _init_stderr_log(self) -> None:
+        """Open the stderr log file under ~/.cuda_exec/<run_tag>/."""
+        run_tag = self.storage_config.resolved_run_tag
+        log_dir = Path.home() / ".cuda_exec" / run_tag
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._stderr_log_path = log_dir / f"stderr_{self.agent_config.name}.log"
+        self._stderr_file = open(self._stderr_log_path, "a")
+
+    def _on_stderr(self, line: str) -> None:
+        """Callback for Solver CLI stderr — write to log file and update heartbeat."""
+        if not hasattr(self, "_stderr_file") or self._stderr_file is None:
+            self._init_stderr_log()
+        ts = datetime.now().isoformat(timespec="seconds")
+        self._stderr_file.write(f"[{ts}] {line}\n")
+        self._stderr_file.flush()
+        # stderr activity = alive, update heartbeat
+        self._last_stream_event_time = datetime.now()
+        if self._storage:
+            self._storage.write_heartbeat(self._last_stream_event_time)
 
     def _build_hooks(self) -> dict:
         """Bridge SDK hook callbacks to our EventHandler."""
@@ -600,6 +621,9 @@ class AgentRunner:
         finally:
             self._client = None
             self._is_running = False
+            if hasattr(self, "_stderr_file") and self._stderr_file:
+                self._stderr_file.close()
+                self._stderr_file = None
 
         result.usage = total_usage
 

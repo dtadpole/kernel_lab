@@ -224,8 +224,18 @@ def _detect_env_versions() -> dict:
     except Exception:
         pass
     try:
+        import importlib.metadata
+        versions["cublas"] = importlib.metadata.version("nvidia-cublas")
+    except Exception:
+        pass
+    try:
         from cuda_exec.impls import _detect_host_slug
         versions["host"] = _detect_host_slug()
+    except Exception:
+        pass
+    try:
+        import os
+        versions["gpu_idx"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     except Exception:
         pass
     return versions
@@ -233,9 +243,12 @@ def _detect_env_versions() -> dict:
 
 def _impl_version_label(slug: str, versions: dict) -> str:
     """Generate a version label for an impl slug."""
-    if "cudnn" in slug and slug.endswith((".cu", "-cudnn")):
+    if slug.endswith("-cudnn") or slug == "ref-cudnn":
         v = versions.get("cudnn", "")
         return f"cuDNN {v}" if v else ""
+    if slug.endswith("-cublas") or slug == "ref-cublas":
+        v = versions.get("cublas", "")
+        return f"cuBLAS {v}" if v else ""
     if "cutedsl" in slug:
         v = versions.get("flash_attn_4", "")
         dsl = versions.get("cutlass_dsl", "")
@@ -315,14 +328,20 @@ def format_results_table(bench_result: dict) -> str:
     lines.append(" | ".join(env_parts))
     lines.append("")
 
+    # Build Config column info lines
+    gpu_idx = versions.get("gpu_idx", "")
+    cfg_info_1 = gpu  # GPU name
+    cfg_info_2 = f"GPU {gpu_idx}" if gpu_idx else ""
+    cfg_width = max(cfg_width, len(cfg_info_1), len(cfg_info_2))
+
     # Header row 1: impl slugs
-    hdr1 = f"| {CFG_LABEL:<{cfg_width}} |"
+    hdr1 = f"| {cfg_info_1:<{cfg_width}} |"
     for slug in impl_order:
         hdr1 += f" {slug:<{col_widths[slug]}} |"
     lines.append(hdr1)
 
     # Header row 2: version labels
-    hdr2 = f"| {'':<{cfg_width}} |"
+    hdr2 = f"| {cfg_info_2:<{cfg_width}} |"
     for slug in impl_order:
         ver = _impl_version_label(slug, versions)
         hdr2 += f" {ver:<{col_widths[slug]}} |"
@@ -678,12 +697,13 @@ def cli_main() -> None:
     if table:
         print(table, file=sys.stderr)
 
-    # Print source paths for each implementation
+    # Print source paths and GPU index
     source_paths = result.get("source_paths", {})
     if source_paths:
         print("\nSource paths:", file=sys.stderr)
         for slug, path in source_paths.items():
             print(f"  {slug}: {path}", file=sys.stderr)
+
 
 
 if __name__ == "__main__":

@@ -552,7 +552,7 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
         (slug_dir / "report.md").write_text(report)
 
         # Check gem (per-run: gems live inside this run)
-        gem_base = run_dir / "gems" / impl_slug
+        gem_base = run_dir / "gems" / kernel / impl_slug
         gem_info = _check_gem(config_results, gem_base)
         if gem_info:
             ver = _next_gem_version(gem_base)

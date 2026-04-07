@@ -434,7 +434,7 @@ class AgentRunner:
 
     # Navigation commands — allowed on any path (don't read file content)
     _NAV_COMMANDS = re.compile(
-        r'^\s*(ls|find|tree|du|stat|file|mkdir|touch|rm|wc\s+-l|dirname|basename|pwd)\b'
+        r'^\s*(ls|mkdir|touch|dirname|basename|pwd)\b'
     )
     # Commands that read content or compile/execute — check blocked paths
     _DANGEROUS_COMMANDS = re.compile(

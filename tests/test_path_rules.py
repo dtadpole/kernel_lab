@@ -347,8 +347,8 @@ def test_bash_ls_navigation_allowed():
 
 
 @pytest.mark.quick
-def test_bash_find_navigation_allowed():
-    """find on blocked path — allowed (navigation command)."""
+def test_bash_find_blocked():
+    """find on blocked path — blocked (not a navigation command)."""
     runner = _make_runner(
         blocked_paths=["~/kernel_lab/"],
         allowed_paths=[],
@@ -356,7 +356,7 @@ def test_bash_find_navigation_allowed():
     result = runner._check_tool_rules("Bash", {
         "command": "find ~/kernel_lab/data/peak -name '*.cu'"
     })
-    assert result.get("decision") != "block"
+    assert result.get("decision") == "block"
 
 
 @pytest.mark.quick

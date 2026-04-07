@@ -177,7 +177,7 @@ def enrich_result(bench_result: dict, configs: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def format_results_table(bench_result: dict) -> str:
-    """Format the summary as a Markdown comparison table."""
+    """Format the summary as an aligned Markdown comparison table."""
     summary = bench_result.get("summary", {})
     if not summary:
         return ""
@@ -188,66 +188,85 @@ def format_results_table(bench_result: dict) -> str:
     impl_order = bench_result.get("impls_requested", [])
     config_order = list(next(iter(summary["impls"].values()))["configs"].keys()) if summary["impls"] else []
 
-    # Header
-    lines: List[str] = []
-    hdr1 = f"| {'Config':<24} |"
-    hdr2 = f"| {'':<24} |"
-    sep = f"|{'-' * 26}|"
-    for slug in impl_order:
-        label = slug
-        sub = "ms    TFLOPS"
+    # --- Build cell content first, then compute column widths ---
+    CFG_LABEL = "Config"
+    cfg_width = max(len(CFG_LABEL), *(len(c) for c in config_order), len("% of peak"))
+
+    # Format each cell: returns (display_str, is_data)
+    def _fmt_cell(slug: str, config_slug: str) -> str:
+        entry = summary["impls"][slug]["configs"].get(config_slug, {})
+        ms = entry.get("median_ms")
+        if ms is None:
+            return "—"
+        ms_s = f"{ms:.3f}" if ms < 1 else f"{ms:.2f}"
+        tf = entry.get("tflops")
+        tf_s = f"{tf:.1f}" if tf else "—"
+        cell = f"{ms_s:>6}  {tf_s:>6}"
         if slug != golden:
-            sub += "   ×"
-        hdr1 += f" {label:<20} |"
-        hdr2 += f" {sub:<20} |"
-        sep += f"{'-' * 22}|"
+            ok = entry.get("correct")
+            cell += " ✓" if ok is True else (" ✗" if ok is False else "  ")
+            spd = entry.get("speedup")
+            cell += f" {spd:.2f}x" if spd is not None else "     "
+        return cell
+
+    # Compute column widths from content
+    col_widths: dict[str, int] = {}
+    for slug in impl_order:
+        # Header width
+        sub = "ms    TFLOPS" + ("   speedup" if slug != golden else "")
+        w = max(len(slug), len(sub))
+        # Data width
+        for cfg in config_order:
+            w = max(w, len(_fmt_cell(slug, cfg)))
+        # % of peak width
+        pct = summary["impls"][slug]["best_pct_peak"]
+        w = max(w, len(f"{pct:.1f}%"))
+        col_widths[slug] = w
+
+    # --- Render table ---
+    lines: List[str] = []
     lines.append(f"**{gpu}** — peak {peak} TFLOPS (BF16 TC)")
     lines.append("")
+
+    # Header row 1: impl names
+    hdr1 = f"| {CFG_LABEL:<{cfg_width}} |"
+    for slug in impl_order:
+        hdr1 += f" {slug:<{col_widths[slug]}} |"
     lines.append(hdr1)
+
+    # Header row 2: sub-labels
+    hdr2 = f"| {'':<{cfg_width}} |"
+    for slug in impl_order:
+        sub = "ms    TFLOPS" + ("   speedup" if slug != golden else "")
+        hdr2 += f" {sub:<{col_widths[slug]}} |"
     lines.append(hdr2)
+
+    # Separator
+    sep = f"|{'-' * (cfg_width + 2)}|"
+    for slug in impl_order:
+        sep += f"{'-' * (col_widths[slug] + 2)}|"
     lines.append(sep)
 
     # Data rows
     for config_slug in config_order:
-        row = f"| {config_slug:<24} |"
+        row = f"| {config_slug:<{cfg_width}} |"
         for slug in impl_order:
-            entry = summary["impls"][slug]["configs"].get(config_slug, {})
-            ms = entry.get("median_ms")
-            tf = entry.get("tflops")
-            spd = entry.get("speedup")
-            ok = entry.get("correct")
-
-            if ms is None:
-                cell = "—"
-            else:
-                ms_s = f"{ms:.3f}" if ms < 1 else f"{ms:.2f}"
-                tf_s = f"{tf:>6.1f}" if tf else "    —"
-                cell = f"{ms_s:>6}  {tf_s}"
-                if slug == golden:
-                    pass  # no marker for golden
-                elif ok is True:
-                    cell += " ✓"
-                elif ok is False:
-                    cell += " ✗"
-                else:
-                    cell += "  "
-                if slug != golden and spd is not None:
-                    cell += f" {spd:.1f}×"
-            row += f" {cell:<20} |"
+            cell = _fmt_cell(slug, config_slug)
+            row += f" {cell:<{col_widths[slug]}} |"
         lines.append(row)
 
     # % of peak row
-    pct_row = f"| {'% of peak':<24} |"
+    lines.append(sep)
+    pct_row = f"| {'% of peak':<{cfg_width}} |"
     for slug in impl_order:
         pct = summary["impls"][slug]["best_pct_peak"]
-        cell = f"{pct:>5.1f}%"
-        pct_row += f" {cell:<20} |"
-    lines.append(sep)
+        cell = f"{pct:.1f}%"
+        pct_row += f" {cell:>{col_widths[slug]}} |"
     lines.append(pct_row)
 
     # Footer
     lines.append("")
-    lines.append(f"Golden: {golden} — ✓/✗ = correctness vs golden, ×  = speedup vs golden")
+    lines.append(f"Golden: {golden} — ✓/✗ = correctness vs golden")
 
     return "\n".join(lines)
 

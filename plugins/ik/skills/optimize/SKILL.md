@@ -62,18 +62,27 @@ See `artifacts/analysis-guide.md`.
 Each idea must be grounded (data-backed), specific (exact change),
 measurable (predicts NCU effect), feasible. Pick highest impact first.
 
-### 4. Implement
-One change at a time. New code = new turn.
+### 4. Plan (write before coding)
+Write a short plan as text output BEFORE writing any code:
+- What optimization? (e.g., "add TMA store epilogue")
+- What changes? (e.g., "replace scalar stores with cp.async.bulk")
+- Expected impact? (e.g., "eliminate lg_throttle stall, ~3% improvement")
+This plan is visible to the Supervisor. Do NOT skip this step.
 
-### 5. Verify
+### 5. Implement
+One change at a time. New code = new turn.
+Write incrementally — skeleton first, then add optimizations.
+Do NOT write a full 500-line kernel in one shot.
+
+### 6. Verify
 1. Compile via `/ik:exec`. Check regs, spills, SMEM.
 2. Trial ALL configs — ANY correctness failure → fix ×3 or revert.
 3. Profile same configs as 1c for comparison.
 
-### 6. Record + Bench (on improvement)
+### 7. Record + Bench (on improvement)
 Write results file. Run `/ik:bench`. Print and STOP.
 
-### 7. Retry (no improvement)
+### 8. Retry (no improvement)
 Revert to baseline. Record learning. Loop to Phase 2.
 Stop after 4 failed ideas — write findings summary.
 

@@ -70,12 +70,16 @@ Docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), cuda-c-best
 ## Optimization Methodology
 
 After each bench result, follow this loop:
-1. **Profile** — use `ik:exec profile` on the largest config (e.g., mat-8192x8192).
-   Look at NCU metrics: SM utilization, memory throughput, warp stalls.
-2. **Classify bottleneck** — compute bound, memory bound, or latency bound?
-3. **Target the bottleneck** — choose one optimization that addresses the
-   specific bottleneck identified by profiling. Do not guess.
-4. **Implement → compile → trial → bench** — one change at a time.
+1. **Profile both** — use `ik:exec profile` on the largest config for BOTH
+   your gen-cuda AND ref-cublas. Compare NCU metrics side by side:
+   SM utilization, memory throughput, warp stalls, tensor core utilization.
+2. **Compare and find the gap** — where does your kernel lose to the reference?
+   Which metric has the biggest gap? This is your optimization target.
+3. **Read the reference** — study cublas.cu and the eval harness to understand
+   the interface, data layout, and what the reference does differently.
+4. **Target the gap** — choose one optimization that closes the specific gap
+   identified by comparison. Do not guess.
+5. **Implement → compile → trial → bench** — one change at a time.
 
 If 4 consecutive attempts show no improvement, try a fundamentally different
 architecture (e.g., switch from 1-WG to warp-specialization).

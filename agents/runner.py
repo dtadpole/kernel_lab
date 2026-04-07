@@ -172,10 +172,14 @@ class AgentRunner:
             max_turns=ac.max_turns,
             model=ac.model,
             hooks=self._build_hooks(),
+            thinking={"type": "enabled", "budget_tokens": 10000},
             env={
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
                 "CUDA_EXEC_RUN_TAG": self.storage_config.resolved_run_tag,
             },
+            # Only load our MCP servers, skip all default plugins
+            # (data/datamate/meta/calendar plugins cause stream closed crashes)
+            extra_args={"--strict-mcp-config": True},
         )
 
         if ac.max_budget_usd > 0:

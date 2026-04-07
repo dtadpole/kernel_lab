@@ -1,8 +1,8 @@
-"""cuDNN Flash Attention vendor baseline for cuda_exec evaluation (SM90 Hopper).
+"""PyTorch Flash Attention reference for cuda_exec evaluation.
 
 Uses torch.nn.functional.scaled_dot_product_attention which dispatches to
-cuDNN's fused flash attention kernel on H100 GPUs (SM90). This is NVIDIA's
-vendor-optimized attention implementation.
+cuDNN internally on H100 GPUs. For a pure C++ cuDNN reference,
+see ref-cudnn (cudnn.cu).
 
 H100 SXM5: 132 SMs, 989.5 BF16 TFLOPS dense, 3352 GB/s HBM3 bandwidth.
 H100 PCIe: 114 SMs, 756 BF16 TFLOPS dense, 2039 GB/s HBM3 bandwidth.

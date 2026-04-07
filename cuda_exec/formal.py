@@ -737,7 +737,9 @@ def cli_main() -> None:
     if source_paths:
         print("\nSource paths:", file=sys.stderr)
         for slug, path in source_paths.items():
-            print(f"  {slug}: {path}", file=sys.stderr)
+            p = Path(path)
+            line_count = sum(1 for _ in open(p)) if p.is_file() else 0
+            print(f"  {slug}: {path} ({line_count} lines)", file=sys.stderr)
 
 
 

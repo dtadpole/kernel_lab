@@ -130,7 +130,7 @@ Change `run_trial_task()`:
 Change `main()`:
 - Old: loads reference, cudnn, generated from fixed paths
 - New: scans `inputs/*/` for all impl dirs, runs each one
-- Output JSON: `{"impls": {"ref-cublas": {...}, "gen-cutedsl": {...}, "gen-cuda": {...}}}`
+- Output JSON: `{"impls": {"ref-pytorch": {...}, "gen-cutedsl": {...}, "gen-cuda": {...}}}`
 
 ### Step 9: Update eval_support.py — rename functions
 
@@ -170,7 +170,7 @@ Update path examples and contract descriptions.
 
 Run: `.venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90 bench.gpu=7`
 
-Verify output JSON has `impls: {ref-cublas: {...}, gen-cutedsl: {...}, gen-cuda: {...}}` with median latency > 0 for all three.
+Verify output JSON has `impls: {ref-pytorch: {...}, gen-cutedsl: {...}, gen-cuda: {...}}` with median latency > 0 for all three.
 
 ### Step 14: Bench fa4 — all 3 impls must have data
 

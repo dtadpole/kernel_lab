@@ -16,7 +16,7 @@ Where `<KERNEL>` is provided in the task (e.g., matmul, fa4, vecadd).
 Optional overrides (only if specified in the task):
 - `bench.gpu=N` — specific GPU index
 - `bench.arch=smXX` — specific architecture
-- `bench.impls=[ref-cublas,gen-cuda]` — specific implementations
+- `bench.impls=[ref-pytorch,gen-cuda]` — specific implementations
 - `bench.timeout=N` — per-config timeout in seconds
 
 ## Rules

@@ -37,7 +37,7 @@ When `ik:optimize` starts and finds gen/ empty (no gems in this run):
 1. **First time (no gems at all):** The solver generates initial kernel code.
    This is the `seed=init` path. The LLM writes a kernel from scratch using:
    - NVIDIA documentation (PTX ISA, CUDA Programming Guide)
-   - Reference implementations (ref-cublas, ref-cutedsl) for API contract
+   - Reference implementations (ref-pytorch, ref-cutedsl) for API contract
    - Architecture specs (SM90 WGMMA, TMA, etc.)
    - Previous results files for institutional knowledge
 

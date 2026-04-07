@@ -12,9 +12,9 @@ Output JSON:
   {
     "config_slug": "...",
     "status": "ok",
-    "golden_slug": "ref-cublas",
+    "golden_slug": "ref-pytorch",
     "impls": {
-      "ref-cublas": {"performance": {...}, "correctness": null},
+      "ref-pytorch": {"performance": {...}, "correctness": null},
       "gen-cutedsl": {"performance": {...}, "correctness": {"passed": true, ...}},
       "gen-cuda": {"performance": {...}, "correctness": {"passed": true, ...}}
     }
@@ -177,7 +177,7 @@ def main() -> int:
     parser.add_argument("--config-json", default="{}")
     parser.add_argument("--impls", required=True,
                         help="Comma-separated impl slugs in order. First ref-* is golden. "
-                             "Example: ref-cublas,gen-cutedsl,gen-cuda")
+                             "Example: ref-pytorch,gen-cutedsl,gen-cuda")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--num-warmups", type=int, default=NUM_WARMUP_RUNS)

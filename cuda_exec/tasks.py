@@ -885,7 +885,7 @@ def run_profile_task(
     """Run Nsight Compute profiling on any impl (by slug)."""
     # Legacy compat: map old side names to slugs
     if side is not None and impl == "gen-cuda":
-        _side_map = {"generated": "gen-cuda", "reference": "gen-cutedsl", "cudnn": "ref-cublas"}
+        _side_map = {"generated": "gen-cuda", "reference": "gen-cutedsl", "cudnn": "ref-pytorch"}
         impl = _side_map.get(side, side)
 
     workspace = resolve_workspace_bundle(**metadata.model_dump())

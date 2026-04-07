@@ -22,12 +22,12 @@
 
 ## Implementation Slugs
 
-Slugs follow `{source}-{name}` pattern (e.g. `ref-cublas`, `gen-cuda`).
+Slugs follow `{source}-{name}` pattern (e.g. `ref-pytorch`, `gen-cuda`).
 See `cuda_exec/impls.py` for slug resolution logic.
 
 ```python
 from cuda_exec.impls import list_impls
-list_impls("matmul", "sm90")  # → [{"slug": "ref-cublas", ...}, {"slug": "gen-cuda", ...}]
+list_impls("matmul", "sm90")  # → [{"slug": "ref-pytorch", ...}, {"slug": "gen-cuda", ...}]
 ```
 
 ## Slug Mapping Examples

@@ -10,7 +10,7 @@ Important public conventions captured in this file:
 - Trial/profile configs are slug-keyed maps: Dict[config_slug, Dict[str, Any]].
 - Public response files are returned as Dict[relative_path, FilePayload].
 - Relative paths may include folder names, but must remain relative.
-- Implementations are keyed by slug: `{source}-{name}` (e.g. `ref-cublas`, `gen-cuda`).
+- Implementations are keyed by slug: `{source}-{name}` (e.g. `ref-pytorch`, `gen-cuda`).
 - The first `ref-*` impl is the golden baseline for correctness comparison.
 - `artifacts` means kept results.
 - `logs` means process output.
@@ -47,7 +47,7 @@ class CompileRequest(RequestBase):
 
     Example:
         {
-            "ref-cublas": {"cublas.py": "..."},
+            "ref-pytorch": {"cublas.py": "..."},
             "gen-cutedsl": {"cutedsl.py": "...", "cute_gemm_sm90.py": "..."},
             "gen-cuda": {"cuda.cu": "..."}
         }
@@ -102,7 +102,7 @@ class ProfileRequest(RequestBase):
 
     impl: str = Field(
         ...,
-        description="Impl slug to NCU-profile (e.g. 'gen-cuda', 'ref-cublas', 'gen-cutedsl'). "
+        description="Impl slug to NCU-profile (e.g. 'gen-cuda', 'ref-pytorch', 'gen-cutedsl'). "
                     "Resolved from inputs/{slug}/ in the workspace.",
     )
     configs: Dict[str, Dict[str, Any]] = Field(
@@ -281,9 +281,9 @@ class TrialConfigOutput(BaseModel):
     Example:
         {
             "status": "ok",
-            "golden_slug": "ref-cublas",
+            "golden_slug": "ref-pytorch",
             "impls": {
-                "ref-cublas": {"performance": {...}, "correctness": null},
+                "ref-pytorch": {"performance": {...}, "correctness": null},
                 "gen-cutedsl": {"performance": {...}, "correctness": {"passed": true, ...}},
                 "gen-cuda": {"performance": {...}, "correctness": {"passed": true, ...}}
             }

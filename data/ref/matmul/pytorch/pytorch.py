@@ -1,11 +1,8 @@
-"""cuBLAS BF16 GEMM vendor baseline for cuda_exec evaluation.
+"""PyTorch BF16 GEMM reference for cuda_exec evaluation.
 
-Uses torch.mm() which dispatches directly to cuBLAS cublasGemmEx on CUDA.
-cuBLAS is NVIDIA's most optimized GEMM implementation — cuDNN does not add
-value for pure matrix multiplication (cuDNN internally calls cuBLAS for GEMM).
-
-This file serves as the vendor-optimized baseline to compare against
-hand-written CUDA kernels and CuTe DSL implementations.
+Uses torch.mm() which dispatches to cuBLAS internally.
+This is the Python-level reference — for a pure C++ cuBLAS reference,
+see ref-cublas (cublas.cu).
 
 Input layout: A (M, K), B (K, N) — BF16
 Output layout: C (M, N) — BF16 (FP32 accumulation is automatic in cuBLAS)
@@ -86,13 +83,7 @@ def _config_from_env() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class Model(nn.Module):
-    """cuBLAS BF16 GEMM vendor baseline.
-
-    Computes C = A @ B where A is M×K, B is K×N, C is M×N.
-    torch.mm dispatches to cublasGemmEx with BF16 inputs and FP32
-    internal accumulation. cuBLAS automatically selects the best
-    Tensor Core kernel for the current GPU architecture.
-    """
+    """PyTorch BF16 GEMM reference (dispatches to cuBLAS internally)."""
 
     def __init__(self):
         super().__init__()

@@ -8,10 +8,10 @@ Slug format: {source}-{name}
             or "peak" (data/peak/{arch}/{kernel}/)
   - name: file stem (e.g., "cublas", "cutedsl", "cuda")
 
-Full identifier: {kernel}/{impl_slug}  (e.g., "matmul/ref-cublas")
+Full identifier: {kernel}/{impl_slug}  (e.g., "matmul/ref-pytorch")
 
 File resolution: slug → try .py first, then .cu
-  - ref-cublas  → data/ref/matmul/cublas.py
+  - ref-pytorch  → data/ref/matmul/cublas.py
   - gen-cutedsl → data/gen/sm90/matmul/cutedsl.py
   - gen-cuda    → data/gen/sm90/matmul/cuda.cu
   - peak-cuda   → data/peak/sm90/fa4/cuda.cu
@@ -281,7 +281,7 @@ def resolve_impl(
     """Resolve an implementation slug to its source files and metadata.
 
     Each impl lives in its own subdirectory:
-        ref-cublas  → data/ref/{kernel}/cublas/
+        ref-pytorch  → data/ref/{kernel}/cublas/
         gen-cuda    → data/gen/{arch}/{kernel}/cuda/
         gen-cutedsl → data/gen/{arch}/{kernel}/cutedsl/
 
@@ -290,7 +290,7 @@ def resolve_impl(
 
     Returns:
         {
-            "slug": "ref-cublas",
+            "slug": "ref-pytorch",
             "source": "ref",
             "name": "cublas",
             "entry_point": Path(...),
@@ -302,7 +302,7 @@ def resolve_impl(
     if len(parts) != 2 or parts[0] not in ("ref", "gen", "peak"):
         raise ValueError(
             f"Invalid impl slug '{impl_slug}'. "
-            f"Format: '{{ref|gen|peak}}-{{name}}' (e.g., 'ref-cublas', 'gen-cuda', 'peak-cuda')"
+            f"Format: '{{ref|gen|peak}}-{{name}}' (e.g., 'ref-pytorch', 'gen-cuda', 'peak-cuda')"
         )
 
     source, name = parts
@@ -359,7 +359,7 @@ def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List
     Each subdirectory is one impl. Entry point: {subdir_name}.py or .cu.
 
     Returns list of:
-        {"slug": "ref-cublas", "source": "ref", "name": "cublas",
+        {"slug": "ref-pytorch", "source": "ref", "name": "cublas",
          "file_type": "py", "path": Path(...)}
     """
     impls = []

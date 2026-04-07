@@ -1,18 +1,14 @@
 /*
- * cuBLAS BF16 GEMM reference — calls cublasGemmEx directly from C++.
+ * cuBLAS BF16 GEMM reference — calls cublasGemmEx directly.
  *
- * Square matrix multiplication: C = A @ B
- * A (M, K), B (K, N), C (M, N) — all BF16, FP32 accumulation.
+ * C = A @ B, all BF16, FP32 accumulation.
+ * Config shape [M, N], M=N=K (square).
  *
- * Config shape is [M, N] with M=N=K (square).
- * Harness provides:
- *   inputs[0] = A (input_size elements BF16)
- *   inputs[1] = B (input_size elements BF16)
- *   outputs[0] = C (input_size elements BF16)
+ * Harness contract:
+ *   inputs[0]  = A (M×K BF16)
+ *   inputs[1]  = B (K×N BF16)
+ *   outputs[0] = C (M×N BF16)
  *   n = input_size = M * N
- *
- * Compile: nvcc -std=c++17 -O3 -gencode arch=compute_90a,code=sm_90a
- *          -lcublas
  */
 
 #include <cuda_bf16.h>

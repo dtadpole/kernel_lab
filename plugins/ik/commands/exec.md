@@ -22,7 +22,7 @@ Implementations are discovered dynamically. A **slug** has the format `{source}-
 
 | Source | Directory | Example |
 |--------|-----------|---------|
-| `ref` | `data/ref/{kernel}/` | `ref-cublas` |
+| `ref` | `data/ref/{kernel}/` | `ref-pytorch` |
 | `gen` | `data/gen/{arch}/{kernel}/` | `gen-cuda` |
 
 Use `list_impls(kernel, arch)` from `cuda_exec/impls.py` to discover all available slugs.
@@ -104,7 +104,7 @@ All settings in `conf/exec/default.yaml`:
 | `action` | required | `compile`, `trial`, or `profile` |
 | `kernel` | required | Kernel name (matmul, fa4, vecadd) |
 | `arch` | required | GPU architecture (sm90, sm120) |
-| `impl` | required | Impl slug (e.g. `gen-cuda`, `ref-cublas`) |
+| `impl` | required | Impl slug (e.g. `gen-cuda`, `ref-pytorch`) |
 | `gpu` | `null` | GPU index (sets CUDA_VISIBLE_DEVICES; null = use env) |
 | `turn` | `1` | Turn number (increment for new source code) |
 | `run_tag` | required | Workspace isolation tag (must be same across compile→trial→profile) |

@@ -21,7 +21,7 @@ A **slug** has the format `{source}-{name}`:
 
 | Source | Directory | Example slug | Example path |
 |--------|-----------|--------------|--------------|
-| `ref` | `ref/{kernel}/` | `ref-cublas` | `ref/matmul/cublas.py` |
+| `ref` | `ref/{kernel}/` | `ref-pytorch` | `ref/matmul/cublas.py` |
 | `gen` | `gen/{arch}/{kernel}/` | `gen-cuda` | `gen/sm90/matmul/cuda.cu` |
 
 **Forward resolution** (slug → files): `resolve_impl(kernel, arch, slug)`
@@ -85,7 +85,7 @@ cd /home/zhenc/kernel_lab
 # Specific GPU, arch, impls, or timeout
 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.gpu=5
 .venv/bin/python -m cuda_exec.formal bench.kernel=matmul bench.arch=sm90
-.venv/bin/python -m cuda_exec.formal bench.kernel=matmul 'bench.impls=[ref-cublas,gen-cuda]'
+.venv/bin/python -m cuda_exec.formal bench.kernel=matmul 'bench.impls=[ref-pytorch,gen-cuda]'
 .venv/bin/python -m cuda_exec.formal bench.kernel=fa4 bench.timeout=600
 ```
 
@@ -189,11 +189,11 @@ box-drawing characters. This is mandatory — never skip it.
 Each `ref-*` and `gen-*` slug becomes a column. The table adapts to whatever
 implementations exist for the kernel+arch combination.
 
-Example 1 — matmul (slugs: `ref-cublas`, `gen-cutedsl`, `gen-cuda`):
+Example 1 — matmul (slugs: `ref-pytorch`, `gen-cutedsl`, `gen-cuda`):
 
 ```
 ┌────────────────────────┬──────────────────┬────────────────────┬────────────────────┐
-│ NVIDIA H100 SXM5       │  ref-cublas      │  gen-cutedsl       │  gen-cuda          │
+│ NVIDIA H100 SXM5       │  ref-pytorch      │  gen-cutedsl       │  gen-cuda          │
 │ GPU4, torch 2.11+cu128 │  TFLOPS   (ms)   │  TFLOPS   (ms)     │  TFLOPS   (ms)     │
 ├────────────────────────┼──────────────────┼────────────────────┼────────────────────┤
 │ mat-256x256            │    1.0  (0.033)  │    0.4  (0.091) ✓  │    3.1  (0.011) ✓  │
@@ -232,7 +232,7 @@ Peak: 800 TFLOPS | ✓/✗ = correctness vs <first-ref-slug>
 - **All non-golden columns include ✓/✗** inline after the `(ms)` value —
   correctness vs the first ref-* (golden) impl. This includes:
   - All `gen-*` impls (generated code)
-  - Second and subsequent `ref-*` impls (e.g. `ref-cudnn` vs `ref-cublas`)
+  - Second and subsequent `ref-*` impls (e.g. `ref-cudnn` vs `ref-pytorch`)
   - Only the **first ref-*** column has no ✓/✗ (it is the golden reference itself)
 - **% of peak** row: best TFLOPS across configs / GPU peak TFLOPS
 - **Header row 1**: GPU model, host name

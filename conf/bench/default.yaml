@@ -1,7 +1,7 @@
 # Formal benchmark configuration
 kernel: ???         # required: fa4, matmul, vecadd
 arch: auto          # auto-detect from host config / nvidia-smi, or explicit: sm90, sm120
-impls: all          # "all" or list: [ref-cublas, gen-cuda]
+impls: all          # "all" or list: [ref-pytorch, gen-cuda]
 timeout: 120        # per-config timeout in seconds
 gpu: null           # GPU index (sets CUDA_VISIBLE_DEVICES; null = use env)
 run_tag: null       # run folder in kernel_lab_kb/runs/

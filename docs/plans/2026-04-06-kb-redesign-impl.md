@@ -73,7 +73,7 @@ command = {
 
 ### 2d. Verify
 ```bash
-python3 -c "from cuda_exec.trajectory import prepare_run; print(prepare_run('matmul', 'sm90', ['gen-cuda','ref-cublas'], 300))"
+python3 -c "from cuda_exec.trajectory import prepare_run; print(prepare_run('matmul', 'sm90', ['gen-cuda','ref-pytorch'], 300))"
 ls -la ~/kernel_lab_kb/runs/run_*/
 ```
 

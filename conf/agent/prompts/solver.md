@@ -67,6 +67,19 @@ Docs: cuda-c-programming-guide, parallel-thread-execution (PTX ISA), cuda-c-best
 - CUDA Toolkit tools (nvcc, ptxas, cuobjdump, nvdisasm, ncu) via Bash
 - Network: `ssh localhost "command"` or WebSearch/WebFetch
 
+## Optimization Methodology
+
+After each bench result, follow this loop:
+1. **Profile** — use `ik:exec profile` on the largest config (e.g., mat-8192x8192).
+   Look at NCU metrics: SM utilization, memory throughput, warp stalls.
+2. **Classify bottleneck** — compute bound, memory bound, or latency bound?
+3. **Target the bottleneck** — choose one optimization that addresses the
+   specific bottleneck identified by profiling. Do not guess.
+4. **Implement → compile → trial → bench** — one change at a time.
+
+If 4 consecutive attempts show no improvement, try a fundamentally different
+architecture (e.g., switch from 1-WG to warp-specialization).
+
 ## Correctness First — ABSOLUTE RULE
 
 **Correctness before performance.** If any benchmark config shows ✗

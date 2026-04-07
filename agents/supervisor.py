@@ -254,6 +254,12 @@ class Supervisor(DefaultHandler):
         # and CUDA_EXEC_RUN_TAG env var is propagated to all agents
         self.config.storage.run_tag = run_tag
 
+        # Create run directories: KB run dir + scratch dir
+        kb_run_dir = Path(self.config.storage.kb_root).expanduser() / "runs" / run_tag
+        scratch_dir = Path.home() / ".cuda_exec" / run_tag
+        kb_run_dir.mkdir(parents=True, exist_ok=True)
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+
         self.state = SupervisorState(
             phase="planning",
             task=task,

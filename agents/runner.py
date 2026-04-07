@@ -458,6 +458,7 @@ class AgentRunner:
     # Commands that read content or compile/execute — check blocked paths
     _DANGEROUS_COMMANDS = re.compile(
         r'\b(cat|head|tail|less|more|strings|xxd|od|hexdump|tac|nl|'
+        r'wc|grep|awk|sed|sort|uniq|cut|tr|diff|comm|paste|'
         r'nvcc|g\+\+|gcc|clang|cp|mv|ln|source|\.)\b'
     )
     # Commands that are always forbidden regardless of path

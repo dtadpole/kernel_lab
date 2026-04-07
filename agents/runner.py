@@ -173,6 +173,7 @@ class AgentRunner:
             model=ac.model,
             hooks=self._build_hooks(),
             thinking={"type": "enabled", "budget_tokens": 10000},
+            include_partial_messages=True,
             stderr=self._on_stderr,
             env={
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
@@ -534,17 +535,14 @@ class AgentRunner:
                                 start_event = StartEvent(session_id=sid)
                                 result.log.append(start_event)
 
-                        # Assistant message — extract text + thinking
+                        # Assistant message — complete, fully assembled
                         elif isinstance(message, AssistantMessage):
                             for block in message.content:
                                 if isinstance(block, TextBlock):
                                     event = TextOutputEvent(text=block.text)
                                     result.log.append(event)
                                     await self.handler.on_text(event)
-                                elif isinstance(block, ThinkingBlock):
-                                    # Thinking serves as heartbeat (timestamp updated below)
-                                    # but content is NOT logged to journal/trajectory
-                                    pass
+                                # ThinkingBlock: heartbeat only (updated below), not logged
                             # Accumulate usage
                             if message.usage:
                                 for k, v in message.usage.items():

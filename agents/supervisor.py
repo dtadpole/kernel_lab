@@ -634,8 +634,18 @@ class Supervisor(DefaultHandler):
                 "bench_data": bench_data,
             })
 
-            # Detect correctness failures (✗ in bench output)
-            has_correctness_failure = "✗" in bench_result.result_text
+            # Detect correctness failures from structured JSON data
+            has_correctness_failure = False
+            summary = bench_data.get("summary", {})
+            for impl_slug, impl_info in summary.get("impls", {}).items():
+                if impl_slug.startswith("gen-"):
+                    for cfg_slug, cfg_info in impl_info.get("configs", {}).items():
+                        if cfg_info.get("correct") is False:
+                            has_correctness_failure = True
+                            break
+            # Fallback: also check stderr table for ✗
+            if not has_correctness_failure and "✗" in bench_result.result_text:
+                has_correctness_failure = True
 
             # Build template variables
             run_tag = self.state.run_tag

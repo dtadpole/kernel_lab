@@ -140,9 +140,23 @@ class Supervisor(DefaultHandler):
         consecutive_errors = 0
         max_consecutive_errors = 5
         error_cooldown_seconds = 60
+        recent_session_starts: list[float] = []  # timestamps
+        max_sessions_per_minute = 10
 
         while True:
             session_number += 1
+
+            # Rate limit: prevent crash loops from creating millions of sessions
+            import time
+            now = time.time()
+            recent_session_starts.append(now)
+            recent_session_starts = [t for t in recent_session_starts if now - t < 60]
+            if len(recent_session_starts) > max_sessions_per_minute:
+                print(f"[Supervisor] CRASH LOOP DETECTED: {len(recent_session_starts)} sessions in 60s. "
+                      f"Cooling down {error_cooldown_seconds}s...")
+                await asyncio.sleep(error_cooldown_seconds)
+                recent_session_starts.clear()
+                consecutive_errors = 0
 
             # Build prompt with history from previous sessions
             session_prompt = self._build_continuous_prompt(

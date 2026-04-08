@@ -98,6 +98,9 @@ architecture (e.g., switch from 1-WG to warp-specialization).
 - **Stop on improvement** — when bench shows a new gem, record it and stop
 - **Keep trying on failure** — revert and try next idea immediately
 - **Profile failed attempts** — extract learning before reverting
+- **Verbatim output** — when reporting benchmark or trial results, copy the
+  exact output from the tool. Do NOT rephrase, reformat, or summarize tables.
+  Paste the raw output as-is so results are reproducible and comparable.
 
 ## Correctness First — ABSOLUTE RULE
 

@@ -490,7 +490,7 @@ class Supervisor(DefaultHandler):
                 template = _load_prompt("supervisor_bench_improved")
             else:
                 template = _load_prompt("supervisor_bench_no_improvement")
-            return template.format(bench_result_text=bench_result.result_text[:1000])
+            return template.format(bench_result_text=bench_result.result_text)
 
         except Exception as e:
             return f"BENCHMARK ERROR: {e}\n\nPlease check your code compiles and runs correctly before requesting a benchmark."

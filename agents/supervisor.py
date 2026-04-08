@@ -509,8 +509,8 @@ class Supervisor(DefaultHandler):
             return await self._handle_bench_request(event)
 
         # ── save_gem_notes ──
-        if event.question.strip().upper() == "SAVE_GEM_NOTES":
-            return self._save_gem_notes(event.context)
+        if event.question.startswith("SAVE_GEM_NOTES:"):
+            return self._save_gem_notes(event.question, event.context)
 
         # ── Regular question → Steward ──
         return await self.steward.answer_question(
@@ -519,17 +519,35 @@ class Supervisor(DefaultHandler):
             solver_context=event.context,
         )
 
-    def _save_gem_notes(self, notes: str) -> str:
-        """Save Solver's optimization notes alongside the latest gem."""
+    def _save_gem_notes(self, query: str, notes: str) -> str:
+        """Save Solver's implementation notes alongside a specific gem.
+
+        gem_id format: "gen-cuda/v003"
+        Resolves to: ~/kernel_lab_kb/runs/<run_tag>/gems/<kernel>/<slug>/v003_*/notes.md
+        """
         import glob
 
-        if not hasattr(self, "_latest_gem_dir") or not self._latest_gem_dir:
-            return "No gem to annotate. Call request_formal_bench first."
+        # Parse gem_id from query
+        gem_id_m = re.search(r"gem_id=(\S+)", query)
+        if not gem_id_m:
+            return "Missing gem_id. Call save_gem_notes(gem_id='gen-cuda/v003', notes='...')"
 
-        # Resolve glob to actual directory
-        matches = sorted(glob.glob(self._latest_gem_dir))
+        gem_id = gem_id_m.group(1)
+        parts = gem_id.split("/")
+        if len(parts) != 2:
+            return f"Invalid gem_id '{gem_id}'. Expected format: 'gen-cuda/v003'"
+
+        slug, version = parts  # e.g. "gen-cuda", "v003"
+        kernel = self.state.kernel
+        run_tag = self.state.run_tag
+
+        gem_pattern = str(
+            Path.home() / "kernel_lab_kb" / "runs" / run_tag /
+            "gems" / kernel / slug / f"{version}_*"
+        )
+        matches = sorted(glob.glob(gem_pattern))
         if not matches:
-            return f"Gem directory not found: {self._latest_gem_dir}"
+            return f"Gem not found: {gem_pattern}"
 
         gem_dir = Path(matches[-1])
         notes_path = gem_dir / "notes.md"
@@ -600,22 +618,17 @@ class Supervisor(DefaultHandler):
                 bench_data = bench_result.usage.get("bench_data", {})
                 gems = bench_data.get("gems", {})
                 gem_details = ""
-                gem_dir = ""
                 for slug, info in gems.items():
                     ver = info.get("version", "?")
                     n_improved = len(info.get("improved_configs", []))
-                    gem_details += f"  - {slug}: v{ver:03d} ({n_improved} configs improved)\n"
-                    gem_dir = str(Path.home() / "kernel_lab_kb" / "runs" /
-                                 self.state.run_tag / "gems" / kernel / slug /
-                                 f"v{ver:03d}_*")
-
-                self._latest_gem_dir = gem_dir  # for save_gem_notes
+                    gem_id = f"{slug}/v{ver:03d}"
+                    gem_details += f"  - gem_id: {gem_id} ({n_improved} configs improved)\n"
 
                 result_text += (
                     f"\n\n★ NEW GEM PRODUCED ★\n"
                     f"{gem_details}\n"
-                    f"ACTION REQUIRED: Call save_gem_notes with Markdown implementation notes.\n"
-                    f"Include:\n"
+                    f"ACTION REQUIRED: Call save_gem_notes(gem_id=\"{gem_id}\", notes=\"...\").\n"
+                    f"Write Markdown notes with:\n"
                     f"- What you changed in this iteration (code changes, new techniques)\n"
                     f"- What you generated (kernel architecture, key parameters)\n"
                     f"- Core technical points (why this optimization works)\n"

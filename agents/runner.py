@@ -429,20 +429,23 @@ class AgentRunner:
         if "save_gem_notes" in custom:
             @tool(
                 "save_gem_notes",
-                "Save implementation notes alongside the latest gem. "
+                "Save implementation notes alongside a gem. "
                 "Call this after request_formal_bench returns '★ NEW GEM PRODUCED'. "
+                "Use the gem_id from the gem notification (e.g. 'gen-cuda/v003'). "
                 "Write in Markdown. Include ONLY implementation details — "
                 "what you changed, what you generated, core technical points. "
                 "Do NOT include reflections or learnings.",
                 {
-                    "notes": str,  # Markdown: what changed, what generated, core points
+                    "gem_id": str,   # e.g. "gen-cuda/v003" from gem notification
+                    "notes": str,    # Markdown: what changed, what generated, core points
                 },
             )
             async def save_gem_notes(args):
+                gem_id = args.get("gem_id", "")
                 notes = args.get("notes", "")
 
                 event = AskEvent(
-                    question="SAVE_GEM_NOTES",
+                    question=f"SAVE_GEM_NOTES: gem_id={gem_id}",
                     context=notes,
                 )
                 if runner_ref.log:

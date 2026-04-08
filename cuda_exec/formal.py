@@ -387,6 +387,26 @@ def format_results_table(bench_result: dict) -> str:
     lines.append("")
     lines.append(f"Golden: {golden} — ✓/✗ = correctness vs golden")
 
+    # Correctness summary — count failures per impl
+    for slug in impl_order:
+        if slug == golden:
+            continue
+        failed_configs = []
+        passed_configs = []
+        for cfg in config_order:
+            entry = summary["impls"][slug]["configs"].get(cfg, {})
+            ok = entry.get("correct")
+            if ok is True:
+                passed_configs.append(cfg)
+            else:
+                failed_configs.append(cfg)
+        if failed_configs:
+            lines.append("")
+            lines.append(f"⚠️  {slug}: CORRECTNESS FAILED on {len(failed_configs)}/{len(config_order)} configs: {', '.join(failed_configs)}")
+            lines.append(f"    Fix correctness BEFORE optimizing performance. Wrong results = wasted effort.")
+        elif passed_configs:
+            lines.append(f"✅  {slug}: correctness PASSED on all {len(passed_configs)} configs")
+
     return "\n".join(lines)
 
 

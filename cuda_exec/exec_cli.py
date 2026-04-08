@@ -28,7 +28,7 @@ from cuda_exec.tasks import compile_endpoint, trial_endpoint, profile_endpoint
 logger = logging.getLogger(__name__)
 
 
-def _build_metadata(kernel: str, impl_slug: str, run_tag: str, turn: int) -> Metadata:
+def _build_metadata(kernel: str, impl_slug: str, run_tag: str, revision: int) -> Metadata:
     """Build metadata from exec config."""
     tag = run_tag
     return Metadata(
@@ -36,7 +36,7 @@ def _build_metadata(kernel: str, impl_slug: str, run_tag: str, turn: int) -> Met
         version="v1",
         direction_id=0,
         direction_slug=f"{kernel}-{impl_slug}",
-        turn=turn,
+        revision=revision,
     )
 
 
@@ -46,13 +46,13 @@ def do_compile(
     impl_slug: str,
     *,
     run_tag: str = "auto",
-    turn: int = 1,
+    revision: int = 1,
     timeout: int = 120,
     data_root: Path | None = None,
 ) -> dict:
     """Compile an implementation against its reference."""
     impl = resolve_impl(kernel, arch, impl_slug, data_root=data_root)
-    metadata = _build_metadata(kernel, impl_slug, run_tag, turn)
+    metadata = _build_metadata(kernel, impl_slug, run_tag, revision)
 
     # Build impl-keyed file maps: all impls that need to be staged.
     # IMPORTANT: put the target impl FIRST so run_compile_task selects it as
@@ -82,12 +82,12 @@ def do_trial(
     *,
     configs: str | list[str] = "all",
     run_tag: str = "auto",
-    turn: int = 1,
+    revision: int = 1,
     timeout: int = 120,
     data_root: Path | None = None,
 ) -> dict:
     """Trial an implementation across configs."""
-    metadata = _build_metadata(kernel, impl_slug, run_tag, turn)
+    metadata = _build_metadata(kernel, impl_slug, run_tag, revision)
 
     all_configs = load_configs(kernel, data_root=data_root)
     if configs == "all":
@@ -113,12 +113,12 @@ def do_profile(
     *,
     configs: str | list[str] = "all",
     run_tag: str = "auto",
-    turn: int = 1,
+    revision: int = 1,
     timeout: int = 120,
     data_root: Path | None = None,
 ) -> dict:
     """Profile an implementation with NCU."""
-    metadata = _build_metadata(kernel, impl_slug, run_tag, turn)
+    metadata = _build_metadata(kernel, impl_slug, run_tag, revision)
 
     all_configs = load_configs(kernel, data_root=data_root)
     if configs == "all":
@@ -181,7 +181,7 @@ def cli_main() -> None:
             "  exec.gpu=<N>               GPU index (CUDA_VISIBLE_DEVICES)\n"
             "  exec.arch=<smXX>           GPU arch (default: auto-detect)\n"
             "  exec.configs=[c1,c2,...]   Config slugs, or 'all' (default: all)\n"
-            "  exec.turn=<N>              Turn number (default: 1)\n"
+            "  exec.revision=<N>              Revision number (default: 1)\n"
             "  exec.timeout=<seconds>     Per-action timeout (default: 120)\n"
             "\n"
             f"Missing: {', '.join(f'exec.{f}' for f in missing)}",
@@ -209,7 +209,7 @@ def cli_main() -> None:
         arch = resolve_arch()
     impl_slug = exec_cfg.impl
     run_tag = exec_cfg.get("run_tag", "auto")
-    turn = exec_cfg.get("turn", 1)
+    revision = exec_cfg.get("revision", 1)
     timeout = exec_cfg.get("timeout", 120)
     data_root_str = exec_cfg.get("data_root")
     data_root = Path(data_root_str).expanduser() if data_root_str else None
@@ -224,17 +224,17 @@ def cli_main() -> None:
     if action == "compile":
         result = do_compile(
             kernel, arch, impl_slug,
-            run_tag=run_tag, turn=turn, timeout=timeout, data_root=data_root,
+            run_tag=run_tag, revision=revision, timeout=timeout, data_root=data_root,
         )
     elif action == "trial":
         result = do_trial(
             kernel, arch, impl_slug,
-            configs=configs_val, run_tag=run_tag, turn=turn, timeout=timeout, data_root=data_root,
+            configs=configs_val, run_tag=run_tag, revision=revision, timeout=timeout, data_root=data_root,
         )
     elif action == "profile":
         result = do_profile(
             kernel, arch, impl_slug,
-            configs=configs_val, run_tag=run_tag, turn=turn, timeout=timeout, data_root=data_root,
+            configs=configs_val, run_tag=run_tag, revision=revision, timeout=timeout, data_root=data_root,
         )
     else:
         print(f"Unknown action: {action}. Must be compile, trial, or profile.", file=sys.stderr)

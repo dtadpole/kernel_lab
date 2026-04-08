@@ -8,7 +8,7 @@ Key differences from ik:exec:
 - ALL configs are trialed (no cherry-picking)
 - ALL implementations are trialed (or a specified subset)
 - No profiling (that's ik:exec's job during iteration)
-- Simplified metadata (no turn management)
+- Simplified metadata (no revision management)
 - Snapshot-first: sources are snapshotted to kernel_lab_kb BEFORE compile/trial
 """
 
@@ -561,14 +561,14 @@ def formal_benchmark(
 
     # --- Compile + trial each .cu impl (any source) ---
     for gen in cu_impls:
-        unique_turn = int(time.time()) % 100000
+        unique_rev = int(time.time()) % 100000
 
         metadata = Metadata(
             run_tag=run_tag,
             version="v1",
             direction_id=0,
             direction_slug=f"{kernel}-{gen['slug']}",
-            turn=unique_turn,
+            revision=unique_rev,
         )
 
         if gen["file_type"] == "cu":

@@ -190,7 +190,7 @@ def main() -> int:
         version=args.version,
         direction_id=args.direction_id,
         direction_slug=args.direction_slug,
-        turn=args.turn,
+        revision=args.revision,
     )
     config = json.loads(args.config_json)
     if not isinstance(config, dict):

@@ -20,7 +20,7 @@ development — use `/ik:bench` for formal assessment.
 | `arch` | no | auto | GPU arch: `sm90`, `sm120` |
 | `gpu` | no | from host config | GPU index (`CUDA_VISIBLE_DEVICES`) |
 | `run_tag` | no | auto | Workspace isolation tag (same across compile→trial→profile) |
-| `turn` | no | `1` | Turn number (increment for new source code) |
+| `revision` | no | `1` | Revision number (increment for new source code) |
 | `configs` | no | `all` | Config slugs to trial/profile, or `all` |
 | `side` | no | `generated` | Profile only: `generated` or `reference` |
 
@@ -55,7 +55,7 @@ cd /home/zhenc/kernel_lab
 ## Workflow
 
 ```
-compile (once per turn)
+compile (once per revision)
    ↓
 trial (any configs, repeatable)
    ↓
@@ -67,11 +67,11 @@ profile (1-2 configs, NCU deep dive)
 3. **Profile** — NCU hardware metrics. See `artifacts/profiling-guide.md` for
    key metrics, bottleneck classification, and assembly examination.
 
-New source code → increment `exec.turn`. Old turns are immutable.
+New source code → increment `exec.revision`. Old revisions are immutable.
 
 ## Rules
 
-- Compile exactly once per turn before trial or profile
+- Compile exactly once per revision before trial or profile
 - One compile fans out to many trial/profile calls
 - Same `run_tag` across compile → trial → profile
-- `exec.turn` must increment when source code changes
+- `exec.revision` must increment when source code changes

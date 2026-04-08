@@ -31,7 +31,7 @@ from cuda_exec.models import (
     TrialResponse,
 )
 from cuda_exec.runner import (
-    capture_turn_file,
+    capture_rev_file,
     resolve_workspace_bundle,
     run_cuda_command,
     run_generic_command,
@@ -48,9 +48,9 @@ SAFE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 logger = logging.getLogger(__name__)
 WORKFLOW_RULES = {
     "compile_required_first": True,
-    "compile_once_per_turn": True,
-    "new_inputs_require_new_turn": True,
-    "turns_are_immutable": True,
+    "compile_once_per_revision": True,
+    "new_inputs_require_new_revision": True,
+    "revisions_are_immutable": True,
 }
 
 
@@ -191,8 +191,8 @@ def _load_compile_manifest(workspace: dict) -> dict:
     manifest_path = _compile_manifest_path(workspace)
     if not manifest_path.exists():
         raise ValueError((
-                "Workflow violation: compile must run first for this turn before trial/profile. "
-                f"Missing compile state: {manifest_path}. Start with /compile, or use a new turn."
+                "Workflow violation: compile must run first for this revision before trial/profile. "
+                f"Missing compile state: {manifest_path}. Start with /compile, or use a new revision."
             ),
         )
     return json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -215,7 +215,7 @@ def _primary_artifact_from_manifest(workspace: dict) -> tuple[Path, dict]:
 
 def _append_file_entry(result: dict, rel_path: str) -> None:
     existing_paths = {item["path"] for item in result.get("files", [])}
-    file_entry = capture_turn_file(rel_path, result["workspace_path"])
+    file_entry = capture_rev_file(rel_path, result["workspace_path"])
     if file_entry["path"] not in existing_paths:
         result.setdefault("files", []).append(file_entry)
 
@@ -461,8 +461,8 @@ def run_compile_task(
 
     if manifest_path.exists() or _existing_attempts(workspace, "compile"):
         raise ValueError((
-                "Workflow violation: compile may run only once per turn. "
-                "Do not reuse the same turn to upload another file set. If you have new files or want a different compile input set, start a new turn and compile there."
+                "Workflow violation: compile may run only once per revision. "
+                "Do not reuse the same revision to upload another file set. If you have new files or want a different compile input set, start a new revision and compile there."
             ),
         )
 
@@ -473,7 +473,7 @@ def run_compile_task(
             stage="compile",
             attempt=attempt,
             status="running",
-            detail="compile has started for this turn",
+            detail="compile has started for this revision",
         ),
     )
 
@@ -614,7 +614,7 @@ def run_compile_task(
                 artifact_id="compile:state",
                 kind="state",
                 path=_stage_manifest_rel("compile", attempt),
-                description="Compile manifest for this turn",
+                description="Compile manifest for this revision",
             ),
         ]
 
@@ -713,8 +713,8 @@ def run_trial_task(
             str(metadata.direction_id),
             "--direction-slug",
             metadata.direction_slug,
-            "--turn",
-            str(metadata.turn),
+            "--revision",
+            str(metadata.revision),
             "--config-slug",
             config_slug,
             "--config-json",
@@ -760,7 +760,7 @@ def run_trial_task(
         if isinstance(payload_json, dict):
             payload["impls"] = payload_json.get("impls", {})
             payload["golden_slug"] = payload_json.get("golden_slug", "")
-        payload["files"].append(capture_turn_file(comparison_rel, str(workspace_path)))
+        payload["files"].append(capture_rev_file(comparison_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
         stage_artifacts.extend(payload["artifacts"])
@@ -791,14 +791,14 @@ def run_trial_task(
                     artifact_id="trial:state",
                     kind="state",
                     path=_stage_manifest_rel("trial", attempt),
-                    description="Trial manifest for this turn and attempt",
+                    description="Trial manifest for this revision and attempt",
                 )
             ],
         }
     )
     manifest_path = _stage_manifest_path(workspace, "trial", attempt)
     _write_manifest(manifest_path, manifest)
-    stage_files.append(capture_turn_file(_stage_manifest_rel("trial", attempt), str(workspace_path)))
+    stage_files.append(capture_rev_file(_stage_manifest_rel("trial", attempt), str(workspace_path)))
     stage_artifacts.extend(manifest["artifacts"])
 
     output = _summarize_config_outputs(config_results)
@@ -1034,9 +1034,9 @@ def run_profile_task(
             artifacts=config_artifacts,
             summary=ncu_summary,
         )
-        payload["files"].append(capture_turn_file(profile_json_rel, str(workspace_path)))
+        payload["files"].append(capture_rev_file(profile_json_rel, str(workspace_path)))
         if ncu_text_rel:
-            payload["files"].append(capture_turn_file(ncu_text_rel, str(workspace_path)))
+            payload["files"].append(capture_rev_file(ncu_text_rel, str(workspace_path)))
         config_results[config_slug] = payload
         stage_files.extend(payload["files"])
         stage_artifacts.extend(config_artifacts)
@@ -1068,7 +1068,7 @@ def run_profile_task(
                     artifact_id="profile:state",
                     kind="state",
                     path=_stage_manifest_rel("profile", attempt),
-                    description="Profile manifest for this turn and attempt",
+                    description="Profile manifest for this revision and attempt",
                 ),
                 *stage_artifacts,
             ],
@@ -1076,7 +1076,7 @@ def run_profile_task(
     )
     manifest_path = _stage_manifest_path(workspace, "profile", attempt)
     _write_manifest(manifest_path, manifest)
-    stage_files.append(capture_turn_file(_stage_manifest_rel("profile", attempt), str(workspace_path)))
+    stage_files.append(capture_rev_file(_stage_manifest_rel("profile", attempt), str(workspace_path)))
     stage_artifacts = manifest["artifacts"]
 
     output = _summarize_config_outputs(config_results)
@@ -1174,7 +1174,7 @@ def _capture_public_files(workspace_path: str, rel_paths: list[str], *, inline: 
     """Materialize public response files as relative_path -> FilePayload."""
     payload: dict[str, dict] = {}
     for rel_path in rel_paths:
-        item = capture_turn_file(rel_path, workspace_path, max_bytes=max_bytes)
+        item = capture_rev_file(rel_path, workspace_path, max_bytes=max_bytes)
         if not item.get("exists") or item.get("error"):
             continue
         entry = {
@@ -1231,15 +1231,15 @@ def compile_endpoint(request: CompileRequest) -> CompileResponse:
 
 
 def file_read_endpoint(request: FileReadRequest) -> FileReadResponse:
-    """Read one turn-relative file from artifacts/, logs/, or state/."""
+    """Read one revision-relative file from artifacts/, logs/, or state/."""
     _validate_relative_path(request.path)
     allowed_prefixes = ("artifacts/", "logs/", "state/")
     if not request.path.startswith(allowed_prefixes):
-        raise ValueError("file reads are limited to artifacts/, logs/, and state/ paths under the resolved turn root")
+        raise ValueError("file reads are limited to artifacts/, logs/, and state/ paths under the resolved revision root")
     workspace = resolve_workspace_bundle(**request.metadata.model_dump())
     file_payload = _capture_public_file(workspace["workspace_path"], request.path, inline=True, max_bytes=request.max_bytes)
     if file_payload is None:
-        raise FileNotFoundError(f"file not found for this turn/path: {request.path}")
+        raise FileNotFoundError(f"file not found for this revision/path: {request.path}")
     return FileReadResponse(metadata=request.metadata, file=file_payload)
 
 

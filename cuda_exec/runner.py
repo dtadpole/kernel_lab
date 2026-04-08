@@ -8,7 +8,7 @@ Mental model:
 - logs = process output
 - state = workflow record
 
-Only four top-level directories are created per turn root:
+Only four top-level directories are created per revision root:
 - workspace/
 - artifacts/
 - logs/
@@ -54,7 +54,7 @@ def _validate_component(label: str, value: str) -> str:
 
 
 def _runtime_root() -> Path:
-    """Return the runtime root for turn data.
+    """Return the runtime root for revision data.
 
     Default:
         Path.home() / ".cuda_exec"
@@ -76,9 +76,9 @@ def resolve_workspace_bundle(
     version: str,
     direction_id: int,
     direction_slug: str,
-    turn: int,
+    revision: int,
 ) -> dict:
-    """Resolve and create the per-turn runtime bundle.
+    """Resolve and create the per-revision runtime bundle.
 
     The returned bundle is the concrete on-disk implementation of the four-dir
     runtime model. `workspace_path` is also the initial cwd for launched
@@ -91,22 +91,22 @@ def resolve_workspace_bundle(
     safe_direction_slug = _validate_component("direction_slug", direction_slug)
     if direction_id < 0:
         raise ValueError("direction_id must be >= 0")
-    if turn < 0:
-        raise ValueError("turn must be >= 0")
+    if revision < 0:
+        raise ValueError("revision must be >= 0")
 
-    turn_root = (
+    rev_root = (
         _runtime_root()
         / safe_run_tag
         / safe_version
         / f"{direction_id}_{safe_direction_slug}"
-        / f"turn_{turn}"
+        / f"rev_{revision}"
     )
     bundle = {
-        "root_path": str(turn_root),
-        "workspace_path": str(turn_root / "workspace"),
-        "artifacts_path": str(turn_root / "artifacts"),
-        "logs_path": str(turn_root / "logs"),
-        "state_path": str(turn_root / "state"),
+        "root_path": str(rev_root),
+        "workspace_path": str(rev_root / "workspace"),
+        "artifacts_path": str(rev_root / "artifacts"),
+        "logs_path": str(rev_root / "logs"),
+        "state_path": str(rev_root / "state"),
     }
     for path in bundle.values():
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -131,27 +131,27 @@ def _resolve_existing_directory(path_value: str) -> Path:
     return path
 
 
-def _turn_root_from_workspace(workspace_path: Path) -> Path:
+def _rev_root_from_workspace(workspace_path: Path) -> Path:
     return workspace_path.parent
 
 
-def resolve_turn_artifact_path(path_value: str, workspace_path: Path) -> Path:
+def resolve_rev_artifact_path(path_value: str, workspace_path: Path) -> Path:
     path = Path(path_value).expanduser()
     if not path.is_absolute():
-        path = _turn_root_from_workspace(workspace_path) / path
+        path = _rev_root_from_workspace(workspace_path) / path
     return path.resolve()
 
 
-def capture_turn_file(path_value: str, workspace_path: str, max_bytes: int | None = None) -> dict:
-    """Read a turn-relative file for public response use.
+def capture_rev_file(path_value: str, workspace_path: str, max_bytes: int | None = None) -> dict:
+    """Read a revision-relative file for public response use.
 
-    The caller provides a relative path within the turn root. The returned dict
+    The caller provides a relative path within the revision root. The returned dict
     includes content plus minimal encoding/truncation metadata so the same
     helper can serve both text logs and binary artifacts.
     """
 
     workspace = _resolve_existing_directory(workspace_path)
-    path = resolve_turn_artifact_path(path_value, workspace)
+    path = resolve_rev_artifact_path(path_value, workspace)
     if not path.exists():
         return {
             "path": str(path),
@@ -207,11 +207,11 @@ def _collect_files(paths: List[str], workspace_path: Path) -> List[dict]:
         if value not in seen:
             deduped.append(value)
             seen.add(value)
-    return [capture_turn_file(value, str(workspace_path)) for value in deduped]
+    return [capture_rev_file(value, str(workspace_path)) for value in deduped]
 
 
-def _relative_to_turn_root(path: Path, workspace_path: Path) -> str:
-    return str(path.relative_to(_turn_root_from_workspace(workspace_path)))
+def _relative_to_rev_root(path: Path, workspace_path: Path) -> str:
+    return str(path.relative_to(_rev_root_from_workspace(workspace_path)))
 
 
 def _run_command(
@@ -250,7 +250,7 @@ def _run_command(
     ts_fmt = "%Y-%m-%d %H:%M:%S UTC"
 
     if log_file:
-        log_path = resolve_turn_artifact_path(log_file, resolved_workspace)
+        log_path = resolve_rev_artifact_path(log_file, resolved_workspace)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         stdout_path = log_path.with_suffix(".stdout")
         stderr_path = log_path.with_suffix(".stderr")
@@ -272,9 +272,9 @@ def _run_command(
 
         extra_files.extend(
             [
-                _relative_to_turn_root(log_path, resolved_workspace),
-                _relative_to_turn_root(stdout_path, resolved_workspace),
-                _relative_to_turn_root(stderr_path, resolved_workspace),
+                _relative_to_rev_root(log_path, resolved_workspace),
+                _relative_to_rev_root(stdout_path, resolved_workspace),
+                _relative_to_rev_root(stderr_path, resolved_workspace),
             ]
         )
 
@@ -283,7 +283,7 @@ def _run_command(
         "ok": completed.returncode == 0,
         "kind": kind,
         "command": command,
-        "turn_root": str(_turn_root_from_workspace(resolved_workspace)),
+        "rev_root": str(_rev_root_from_workspace(resolved_workspace)),
         "workspace_path": str(resolved_workspace),
         "returncode": completed.returncode,
         "duration_seconds": duration,

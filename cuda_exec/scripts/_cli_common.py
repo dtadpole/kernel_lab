@@ -62,7 +62,7 @@ def add_metadata_args(parser) -> None:
     parser.add_argument("--version", required=True, help="Version component used under ~/.cuda_exec")
     parser.add_argument("--direction-id", type=int, required=True, help="Direction id")
     parser.add_argument("--direction-slug", required=True, help="Direction slug")
-    parser.add_argument("--turn", type=int, required=True, help="Turn number")
+    parser.add_argument("--revision", type=int, required=True, help="Revision number")
 
 
 def resolve_workspace_from_args(args) -> str:
@@ -73,6 +73,6 @@ def resolve_workspace_from_args(args) -> str:
         version=args.version,
         direction_id=args.direction_id,
         direction_slug=args.direction_slug,
-        turn=args.turn,
+        revision=args.revision,
     )
     return bundle["workspace_path"]

@@ -25,13 +25,13 @@ from pydantic import BaseModel, Field
 
 
 class Metadata(BaseModel):
-    """Required turn identity for all command-style requests."""
+    """Required revision identity for all command-style requests."""
 
     run_tag: str = Field(..., min_length=1, description="Agent run namespace tag")
     version: str = Field(..., min_length=1, description="Agent/API version tag")
     direction_id: int = Field(..., ge=0, description="Stable integer id for a research direction")
     direction_slug: str = Field(..., min_length=1, description="Readable slug for a research direction")
-    turn: int = Field(..., ge=0, description="Turn index within the direction")
+    revision: int = Field(..., ge=0, description="Revision index within the direction")
 
 
 class RequestBase(BaseModel):
@@ -125,8 +125,8 @@ class ExecuteRequest(RequestBase):
 
 
 class FileReadRequest(BaseModel):
-    metadata: Metadata = Field(..., description="Required turn identity used to resolve the turn root")
-    path: str = Field(..., min_length=1, description="Relative path under the turn root to read")
+    metadata: Metadata = Field(..., description="Required revision identity used to resolve the revision root")
+    path: str = Field(..., min_length=1, description="Relative path under the revision root to read")
     max_bytes: int | None = Field(default=None, ge=1, description="Optional maximum number of bytes to inline from the requested file")
 
 
@@ -256,8 +256,8 @@ class CompileResponse(ResponseBase):
 
 
 class FileReadResponse(BaseModel):
-    metadata: Metadata = Field(..., description="Echoed turn identity used to resolve the file")
-    file: FilePayload = Field(..., description="Inline payload for the requested turn-relative file")
+    metadata: Metadata = Field(..., description="Echoed revision identity used to resolve the file")
+    file: FilePayload = Field(..., description="Inline payload for the requested revision-relative file")
 
 
 class ImplTrialResult(BaseModel):

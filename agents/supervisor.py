@@ -508,12 +508,35 @@ class Supervisor(DefaultHandler):
         if event.question.startswith("REQUEST_FORMAL_BENCH:"):
             return await self._handle_bench_request(event)
 
+        # ── save_gem_notes ──
+        if event.question.strip().upper() == "SAVE_GEM_NOTES":
+            return self._save_gem_notes(event.context)
+
         # ── Regular question → Steward ──
         return await self.steward.answer_question(
             transcript_path=self._get_transcript_path(),
             question=event.question,
             solver_context=event.context,
         )
+
+    def _save_gem_notes(self, notes: str) -> str:
+        """Save Solver's optimization notes alongside the latest gem."""
+        import glob
+
+        if not hasattr(self, "_latest_gem_dir") or not self._latest_gem_dir:
+            return "No gem to annotate. Call request_formal_bench first."
+
+        # Resolve glob to actual directory
+        matches = sorted(glob.glob(self._latest_gem_dir))
+        if not matches:
+            return f"Gem directory not found: {self._latest_gem_dir}"
+
+        gem_dir = Path(matches[-1])
+        notes_path = gem_dir / "notes.md"
+        notes_path.write_text(notes.strip() + "\n")
+
+        print(f"[Supervisor] Saved gem notes to {notes_path}")
+        return f"Notes saved to {notes_path}. Continue optimizing."
 
     async def _handle_bench_request(self, event: AskEvent) -> str:
         """Solver requested a formal benchmark. Run via subprocess."""
@@ -571,6 +594,32 @@ class Supervisor(DefaultHandler):
                     "Do NOT request another formal_bench until ALL configs show ✓.\n\n"
                 )
                 result_text = correctness_warning + result_text
+
+            # Notify Solver about new gem
+            if improved:
+                bench_data = bench_result.usage.get("bench_data", {})
+                gems = bench_data.get("gems", {})
+                gem_details = ""
+                gem_dir = ""
+                for slug, info in gems.items():
+                    ver = info.get("version", "?")
+                    n_improved = len(info.get("improved_configs", []))
+                    gem_details += f"  - {slug}: v{ver:03d} ({n_improved} configs improved)\n"
+                    gem_dir = str(Path.home() / "kernel_lab_kb" / "runs" /
+                                 self.state.run_tag / "gems" / kernel / slug /
+                                 f"v{ver:03d}_*")
+
+                self._latest_gem_dir = gem_dir  # for save_gem_notes
+
+                result_text += (
+                    f"\n\n★ NEW GEM PRODUCED ★\n"
+                    f"{gem_details}\n"
+                    f"ACTION REQUIRED: Call ask_supervisor with your optimization notes.\n"
+                    f"Question: SAVE_GEM_NOTES\n"
+                    f"Context: Include what optimization you applied, the key insight,\n"
+                    f"NCU metrics before vs after (if profiled), and next optimization to try.\n"
+                    f"The Supervisor will save your notes alongside the gem.\n"
+                )
 
             return result_text
 

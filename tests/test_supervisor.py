@@ -233,6 +233,56 @@ def test_parse_bench_improved_structured_false():
 
 
 @pytest.mark.quick
+def test_correctness_failure_from_json():
+    """Detect correctness failure from structured JSON data."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    bench_data = {
+        "summary": {
+            "impls": {
+                "gen-cuda": {
+                    "configs": {
+                        "mha-causal-b8-s4096": {"correct": True},
+                        "mha-causal-b4-s8192": {"correct": False},
+                    }
+                },
+                "ref-cudnn": {"configs": {}}
+            }
+        }
+    }
+    assert sup._check_correctness_failure(bench_data, "") is True
+
+
+@pytest.mark.quick
+def test_correctness_pass_from_json():
+    """No correctness failure when all gen configs pass."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    bench_data = {
+        "summary": {
+            "impls": {
+                "gen-cuda": {
+                    "configs": {
+                        "mha-causal-b8-s4096": {"correct": True},
+                        "mha-causal-b4-s8192": {"correct": True},
+                    }
+                }
+            }
+        }
+    }
+    assert sup._check_correctness_failure(bench_data, "") is False
+
+
+@pytest.mark.quick
+def test_correctness_fallback_to_stderr():
+    """Fallback to ✗ in stderr when JSON has no data."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    assert sup._check_correctness_failure({}, "some table ✗ failure") is True
+    assert sup._check_correctness_failure({}, "some table ✓ all good") is False
+
+
+@pytest.mark.quick
 def test_submit_bench_reflection():
     """_handle_bench_reflection saves reflection.md to impls dir."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")

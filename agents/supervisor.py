@@ -513,6 +513,23 @@ class Supervisor(DefaultHandler):
         result.usage = {"bench_data": bench_data}
         return result
 
+    def _check_correctness_failure(self, bench_data: dict, result_text: str) -> bool:
+        """Check if any gen-* impl has correctness failures.
+
+        Primary: structured JSON from formal.py stdout.
+        Fallback: ✗ character in stderr table.
+        """
+        summary = bench_data.get("summary", {})
+        for impl_slug, impl_info in summary.get("impls", {}).items():
+            if impl_slug.startswith("gen-"):
+                for cfg_slug, cfg_info in impl_info.get("configs", {}).items():
+                    if cfg_info.get("correct") is False:
+                        return True
+        # Fallback: check stderr table
+        if "✗" in result_text:
+            return True
+        return False
+
     def _parse_bench_improved(self, bench_result: RunResult) -> bool:
         """Check if the benchmark result shows improvement (new gem)."""
         # Check structured data first
@@ -634,18 +651,9 @@ class Supervisor(DefaultHandler):
                 "bench_data": bench_data,
             })
 
-            # Detect correctness failures from structured JSON data
-            has_correctness_failure = False
-            summary = bench_data.get("summary", {})
-            for impl_slug, impl_info in summary.get("impls", {}).items():
-                if impl_slug.startswith("gen-"):
-                    for cfg_slug, cfg_info in impl_info.get("configs", {}).items():
-                        if cfg_info.get("correct") is False:
-                            has_correctness_failure = True
-                            break
-            # Fallback: also check stderr table for ✗
-            if not has_correctness_failure and "✗" in bench_result.result_text:
-                has_correctness_failure = True
+            has_correctness_failure = self._check_correctness_failure(
+                bench_data, bench_result.result_text
+            )
 
             # Build template variables
             run_tag = self.state.run_tag

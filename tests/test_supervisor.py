@@ -212,6 +212,77 @@ def test_parse_bench_improved_gem_keyword():
     assert sup._parse_bench_improved(result) is True
 
 
+@pytest.mark.quick
+def test_parse_bench_improved_structured_data():
+    """_parse_bench_improved uses bench_data from JSON stdout."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    result = RunResult(result_text="some table output")
+    result.usage = {"bench_data": {"improved": True, "gems": {"gen-cuda": {"version": 3}}}}
+    assert sup._parse_bench_improved(result) is True
+
+
+@pytest.mark.quick
+def test_parse_bench_improved_structured_false():
+    """_parse_bench_improved returns False when bench_data says not improved."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    result = RunResult(result_text="some table output")
+    result.usage = {"bench_data": {"improved": False, "gems": {}}}
+    assert sup._parse_bench_improved(result) is False
+
+
+@pytest.mark.quick
+def test_save_gem_md():
+    """_save_gem_md writes notes.md to the correct gem directory."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    sup.state = SupervisorState(
+        phase="solving", task="test", kernel="fa4",
+        run_tag="test_run_save_gem",
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create fake gem directory
+        gem_dir = Path(tmpdir) / "v003_20260407_120000"
+        gem_dir.mkdir(parents=True)
+
+        # Patch glob to find our temp dir
+        import unittest.mock as mock
+        with mock.patch("glob.glob", return_value=[str(gem_dir)]):
+            result = sup._save_gem_md(
+                "SAVE_GEM_NOTES: gem_id=gen-cuda/v003",
+                "## Changes\n- Removed named barriers\n- 2 barriers instead of 16",
+            )
+
+        assert "Notes saved" in result
+        notes_path = gem_dir / "notes.md"
+        assert notes_path.exists()
+        content = notes_path.read_text()
+        assert "Removed named barriers" in content
+        assert "2 barriers instead of 16" in content
+
+
+@pytest.mark.quick
+def test_save_gem_md_missing_id():
+    """_save_gem_md returns error when gem_id is missing."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    sup.state = SupervisorState(phase="solving", task="test", kernel="fa4")
+    result = sup._save_gem_md("SAVE_GEM_NOTES:", "some notes")
+    assert "Missing gem_id" in result
+
+
+@pytest.mark.quick
+def test_save_gem_md_invalid_id():
+    """_save_gem_md returns error for invalid gem_id format."""
+    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
+    sup = Supervisor(config)
+    sup.state = SupervisorState(phase="solving", task="test", kernel="fa4")
+    result = sup._save_gem_md("SAVE_GEM_NOTES: gem_id=bad_format", "some notes")
+    assert "Invalid gem_id" in result
+
+
 # ── Supervisor consecutive stuck tracking ──
 
 @pytest.mark.quick

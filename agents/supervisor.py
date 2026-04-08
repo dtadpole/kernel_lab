@@ -401,15 +401,22 @@ class Supervisor(DefaultHandler):
 
     # ── Benchmarker dispatch ──
 
-    async def _run_benchmarker(self, kernel: str) -> RunResult:
+    async def _run_benchmarker(
+        self,
+        kernel: str,
+        arch: str = "",
+        impls: str = "",
+        timeout: int = 0,
+    ) -> RunResult:
         """Run formal benchmark directly via .venv/bin/python subprocess.
 
         No Benchmarker agent — just run formal.py and parse JSON output.
+        GPU and run_tag are always overridden by Supervisor (not from Solver).
         """
         import asyncio
         import subprocess
 
-        gpu = self.state.gpu
+        gpu = self.state.gpu       # Supervisor controls GPU
         run_tag = self.state.run_tag
         cwd = self.config.defaults.get("cwd", str(Path.cwd()))
         venv_python = str(Path(cwd) / ".venv" / "bin" / "python")
@@ -420,6 +427,12 @@ class Supervisor(DefaultHandler):
             f"bench.gpu={gpu}",
             f"bench.run_tag={run_tag}",
         ]
+        if arch:
+            cmd.append(f"bench.arch={arch}")
+        if impls:
+            cmd.append(f"bench.impls=[{impls}]")
+        if timeout > 0:
+            cmd.append(f"bench.timeout={timeout}")
 
         print(f"\n[Supervisor] Running formal bench: {' '.join(cmd)}")
 
@@ -441,7 +454,7 @@ class Supervisor(DefaultHandler):
         if table_output:
             print(f"[Supervisor] Bench table:\n{table_output[:500]}")
 
-        # Parse JSON to check gems
+        # Parse JSON for structured data (gems, improved, etc.)
         bench_data = {}
         if json_output:
             try:
@@ -449,7 +462,7 @@ class Supervisor(DefaultHandler):
             except json.JSONDecodeError:
                 pass
 
-        # Build result text from stderr table (the human-readable output)
+        # result_text = stderr table (human-readable, returned to Solver)
         result_text = table_output or "(no output)"
         if proc_result.returncode != 0:
             result_text = f"BENCHMARK FAILED (exit code {proc_result.returncode})\n\n{result_text}"
@@ -503,16 +516,34 @@ class Supervisor(DefaultHandler):
         )
 
     async def _handle_bench_request(self, event: AskEvent) -> str:
-        """Solver requested a formal benchmark. Dispatch Benchmarker."""
+        """Solver requested a formal benchmark. Run via subprocess."""
         kernel = self.state.kernel
 
-        # Parse kernel from the request if specified
-        parts = event.question.split("kernel=")
-        if len(parts) > 1:
-            kernel = parts[1].split()[0].strip()
+        # Parse params from the request string
+        query = event.question
+        for param in ["kernel", "arch", "impls", "timeout"]:
+            match = re.search(rf"{param}=(\S+)", query)
+            if match:
+                if param == "kernel":
+                    kernel = match.group(1)
+
+        arch = ""
+        impls = ""
+        timeout = 0
+        arch_m = re.search(r"arch=(\S+)", query)
+        impls_m = re.search(r"impls=(\S+)", query)
+        timeout_m = re.search(r"timeout=(\d+)", query)
+        if arch_m:
+            arch = arch_m.group(1)
+        if impls_m:
+            impls = impls_m.group(1)
+        if timeout_m:
+            timeout = int(timeout_m.group(1))
 
         try:
-            bench_result = await self._run_benchmarker(kernel)
+            bench_result = await self._run_benchmarker(
+                kernel, arch=arch, impls=impls, timeout=timeout,
+            )
             improved = self._parse_bench_improved(bench_result)
 
             self.state.bench_results.append({

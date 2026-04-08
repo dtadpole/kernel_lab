@@ -387,16 +387,35 @@ class AgentRunner:
         if "request_formal_bench" in custom:
             @tool(
                 "request_formal_bench",
-                "Request the Supervisor to run a formal benchmark (ik:bench). "
-                "You cannot run ik:bench yourself — only the Supervisor can schedule it.",
-                {"kernel": str, "reason": str},
+                "Request the Supervisor to run a formal benchmark. "
+                "You cannot run ik:bench yourself — only the Supervisor can schedule it. "
+                "The Supervisor controls which GPU to use — do not specify gpu.",
+                {
+                    "kernel": str,
+                    "reason": str,
+                    "arch": str,       # optional: GPU arch (default: auto-detect)
+                    "impls": str,      # optional: impl slugs comma-separated, or "all"
+                    "timeout": int,    # optional: per-config timeout in seconds
+                },
             )
             async def request_formal_bench(args):
                 kernel = args.get("kernel", "")
                 reason = args.get("reason", "")
+                arch = args.get("arch", "")
+                impls = args.get("impls", "")
+                timeout = args.get("timeout", 0)
+
+                # Build query string with optional params
+                query_parts = [f"kernel={kernel}"]
+                if arch:
+                    query_parts.append(f"arch={arch}")
+                if impls:
+                    query_parts.append(f"impls={impls}")
+                if timeout:
+                    query_parts.append(f"timeout={timeout}")
 
                 event = AskEvent(
-                    question=f"REQUEST_FORMAL_BENCH: kernel={kernel}",
+                    question=f"REQUEST_FORMAL_BENCH: {' '.join(query_parts)}",
                     context=f"Reason: {reason}",
                 )
                 if runner_ref.log:

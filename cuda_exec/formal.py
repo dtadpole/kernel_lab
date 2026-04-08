@@ -97,7 +97,7 @@ def _extract_impl_metrics(
             elif "performance" in entry:
                 # py impl: configs[c]["performance"]
                 median_ms = entry.get("performance", {}).get("latency_ms", {}).get("median")
-            metrics[slug][config_slug] = {"median_ms": median_ms, "correct": None}
+            metrics[slug][config_slug] = {"median_ms": median_ms, "correct": False}  # default: fail until proven correct
 
     # Correctness comes from cu trial results (which compare all impls vs golden)
     for slug, impl_result in bench_result.get("results", {}).items():

@@ -614,11 +614,12 @@ class Supervisor(DefaultHandler):
                 result_text += (
                     f"\n\n★ NEW GEM PRODUCED ★\n"
                     f"{gem_details}\n"
-                    f"ACTION REQUIRED: Call ask_supervisor with your optimization notes.\n"
-                    f"Question: SAVE_GEM_NOTES\n"
-                    f"Context: Include what optimization you applied, the key insight,\n"
-                    f"NCU metrics before vs after (if profiled), and next optimization to try.\n"
-                    f"The Supervisor will save your notes alongside the gem.\n"
+                    f"ACTION REQUIRED: Call save_gem_notes with Markdown implementation notes.\n"
+                    f"Include:\n"
+                    f"- What you changed in this iteration (code changes, new techniques)\n"
+                    f"- What you generated (kernel architecture, key parameters)\n"
+                    f"- Core technical points (why this optimization works)\n"
+                    f"Do NOT include reflections or learnings — only implementation facts.\n"
                 )
 
             return result_text

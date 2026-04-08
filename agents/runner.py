@@ -429,11 +429,13 @@ class AgentRunner:
         if "save_gem_notes" in custom:
             @tool(
                 "save_gem_notes",
-                "Save optimization notes alongside the latest gem. "
+                "Save implementation notes alongside the latest gem. "
                 "Call this after request_formal_bench returns '★ NEW GEM PRODUCED'. "
-                "The Supervisor saves your notes in the gem directory.",
+                "Write in Markdown. Include ONLY implementation details — "
+                "what you changed, what you generated, core technical points. "
+                "Do NOT include reflections or learnings.",
                 {
-                    "notes": str,  # what optimization, key insight, NCU metrics, next steps
+                    "notes": str,  # Markdown: what changed, what generated, core points
                 },
             )
             async def save_gem_notes(args):

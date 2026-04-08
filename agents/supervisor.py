@@ -486,11 +486,26 @@ class Supervisor(DefaultHandler):
                 "summary": bench_result.result_text[:500],
             })
 
+            # Detect correctness failures (✗ in bench output)
+            has_correctness_failure = "✗" in bench_result.result_text
+
             if improved:
                 template = _load_prompt("supervisor_bench_improved")
             else:
                 template = _load_prompt("supervisor_bench_no_improvement")
-            return template.format(bench_result_text=bench_result.result_text)
+            result_text = template.format(bench_result_text=bench_result.result_text)
+
+            if has_correctness_failure:
+                correctness_warning = (
+                    "⚠️ CORRECTNESS FAILURE DETECTED ⚠️\n\n"
+                    "One or more configs show ✗ in the benchmark table above.\n"
+                    "✗ means your kernel produced WRONG RESULTS vs the golden reference.\n"
+                    "You MUST fix correctness before doing any performance optimization.\n"
+                    "Do NOT request another formal_bench until ALL configs show ✓.\n\n"
+                )
+                result_text = correctness_warning + result_text
+
+            return result_text
 
         except Exception as e:
             return f"BENCHMARK ERROR: {e}\n\nPlease check your code compiles and runs correctly before requesting a benchmark."

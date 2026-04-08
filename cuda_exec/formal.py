@@ -573,10 +573,15 @@ def formal_benchmark(
 
         if gen["file_type"] == "cu":
             # .cu needs compile — build impl-keyed request
+            # Include ALL impls so trial.py can compare against the right golden
             compile_impls = {}
-            # Include .py impls as references for correctness comparison
+            # Include .py impls
             for py_impl in py_impls:
                 compile_impls[py_impl["slug"]] = dict(py_impl["files"])
+            # Include ALL other .cu impls (ref-cublas etc.) for correctness comparison
+            for other_cu in cu_impls:
+                if other_cu["slug"] != gen["slug"]:
+                    compile_impls[other_cu["slug"]] = dict(other_cu["files"])
             # Include this .cu gen impl
             compile_impls[gen["slug"]] = dict(gen["files"])
 

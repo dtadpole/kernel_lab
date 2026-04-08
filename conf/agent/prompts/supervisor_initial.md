@@ -1,5 +1,5 @@
 Run tag for this session: {run_tag}
-Working directory: /home/zhenc/kernel_lab
+Working directory: ~/kernel_lab
 Python: .venv/bin/python (ALWAYS use this, never search for other venvs)
 Kernel: {kernel}
 GPU: {gpu}

@@ -402,42 +402,76 @@ class Supervisor(DefaultHandler):
     # ── Benchmarker dispatch ──
 
     async def _run_benchmarker(self, kernel: str) -> RunResult:
-        """Dispatch the Benchmarker agent to run ik:bench."""
-        from agents.config import MonitorConfig as MC
-        bench_config = self.config.get_agent("benchmarker")
-        bench_runner = AgentRunner(
-            agent_config=bench_config,
-            storage_config=self.config.storage,
-            monitor_config=MC.for_benchmarker(),
-            steward=None,
-        )
+        """Run formal benchmark directly via .venv/bin/python subprocess.
+
+        No Benchmarker agent — just run formal.py and parse JSON output.
+        """
+        import asyncio
+        import subprocess
 
         gpu = self.state.gpu
         run_tag = self.state.run_tag
-        print(f"\n[Supervisor] Dispatching Benchmarker for kernel={kernel} gpu={gpu} run_tag={run_tag}")
+        cwd = self.config.defaults.get("cwd", str(Path.cwd()))
+        venv_python = str(Path(cwd) / ".venv" / "bin" / "python")
 
-        result = await bench_runner.run(
-            prompt=(
-                f"Run the formal benchmark for kernel={kernel}. "
-                f"Use GPU {gpu} (bench.gpu={gpu}). "
-                f"Use run_tag={run_tag} (bench.run_tag={run_tag}). "
-                f"Full command: .venv/bin/python -m cuda_exec.formal bench.kernel={kernel} bench.gpu={gpu} bench.run_tag={run_tag}\n"
-                f"Report the results."
-            ),
-            task_slug=f"bench_{kernel}",
-        )
+        cmd = [
+            venv_python, "-m", "cuda_exec.formal",
+            f"bench.kernel={kernel}",
+            f"bench.gpu={gpu}",
+            f"bench.run_tag={run_tag}",
+        ]
 
-        print(f"[Supervisor] Benchmarker completed: {result.result_text[:200]}")
+        print(f"\n[Supervisor] Running formal bench: {' '.join(cmd)}")
+
+        # Run in thread pool to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        proc_result = await loop.run_in_executor(None, lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=1200,  # 20 min max
+        ))
+
+        # stdout = JSON result, stderr = Markdown table + source paths
+        table_output = proc_result.stderr.strip()
+        json_output = proc_result.stdout.strip()
+
+        print(f"[Supervisor] Bench exit code: {proc_result.returncode}")
+        if table_output:
+            print(f"[Supervisor] Bench table:\n{table_output[:500]}")
+
+        # Parse JSON to check gems
+        bench_data = {}
+        if json_output:
+            try:
+                bench_data = json.loads(json_output)
+            except json.JSONDecodeError:
+                pass
+
+        # Build result text from stderr table (the human-readable output)
+        result_text = table_output or "(no output)"
+        if proc_result.returncode != 0:
+            result_text = f"BENCHMARK FAILED (exit code {proc_result.returncode})\n\n{result_text}"
+
+        result = RunResult(result_text=result_text)
+        result.usage = {"bench_data": bench_data}
         return result
 
     def _parse_bench_improved(self, bench_result: RunResult) -> bool:
         """Check if the benchmark result shows improvement (new gem)."""
+        # Check structured data first
+        bench_data = bench_result.usage.get("bench_data", {})
+        if bench_data.get("improved"):
+            return True
+        gems = bench_data.get("gems", {})
+        if gems:
+            return True
+        # Fallback to text parsing
         text = bench_result.result_text.lower()
-        if "improved" in text and "true" in text:
+        if "improved: true" in text or "improved=true" in text:
             return True
-        if "new gem" in text or "beats previous" in text:
-            return True
-        if "gem" in text and ("v002" in text or "v003" in text or "v004" in text):
+        if "new gem" in text:
             return True
         return False
 

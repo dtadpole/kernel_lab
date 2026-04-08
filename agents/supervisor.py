@@ -677,7 +677,13 @@ class Supervisor(DefaultHandler):
             else:
                 template = _load_prompt("supervisor_bench_no_improvement")
 
+            # Escape braces in bench_result_text to prevent format() errors
+            # (formal.py output may contain { } in log lines)
+            safe_bench_text = bench_result.result_text.replace("{", "{{").replace("}", "}}")
+            template_vars["bench_result_text"] = safe_bench_text
             result_text = template.format(**template_vars)
+            # Unescape for final output
+            result_text = result_text.replace("{{", "{").replace("}}", "}")
 
             if has_correctness_failure:
                 correctness_warning = (

@@ -178,6 +178,7 @@ class AgentRunner:
         opts = ClaudeAgentOptions(
             cwd=self.cwd,
             allowed_tools=allowed,
+            disallowed_tools=["Skill", "Agent", "TodoWrite", "TodoRead"],
             system_prompt=ac.system_prompt,
             permission_mode=ac.permission_mode,
             max_turns=ac.max_turns,

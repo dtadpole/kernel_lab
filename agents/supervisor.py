@@ -321,6 +321,10 @@ class Supervisor(DefaultHandler):
         solver_prompt = self._build_initial_prompt(task, run_tag, kernel, gpu)
 
         iteration = 0
+        consecutive_quick_exits = 0
+        max_quick_exits = 3
+        min_session_seconds = 30  # sessions shorter than this are "quick exits"
+
         while True:  # run until SUCCESS or hard_limit
             if self.max_iterations > 0 and iteration >= self.max_iterations:
                 break
@@ -346,6 +350,18 @@ class Supervisor(DefaultHandler):
                 last_result = await self._solver_runner.resume(solver_prompt)
 
             self._current_log = last_result.log
+
+            # Detect quick exits (Solver stops almost immediately)
+            session_duration = last_result.log.elapsed().total_seconds() if last_result.log else 0
+            if iteration > 0 and session_duration < min_session_seconds:
+                consecutive_quick_exits += 1
+                print(f"[Supervisor] Quick exit detected ({session_duration:.0f}s < {min_session_seconds}s) "
+                      f"— {consecutive_quick_exits}/{max_quick_exits}")
+                if consecutive_quick_exits >= max_quick_exits:
+                    print(f"[Supervisor] {max_quick_exits} consecutive quick exits — aborting run_task")
+                    break
+            else:
+                consecutive_quick_exits = 0
 
             # ── Post-session Steward review ──
             # Solver has stopped (end_turn), safe to call Steward.

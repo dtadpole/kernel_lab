@@ -46,14 +46,26 @@ class AgentMonitor:
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
-        """Stop the monitor."""
+        """Stop the monitor gracefully — no cancel, just flag and wait.
+
+        We do NOT cancel the task because asyncio.Task.cancel() can
+        propagate CancelledError through anyio cancel scopes used by
+        the Claude SDK, killing the parent execution context.
+        Instead, set _running=False and wait for the next check_interval
+        sleep to finish (at most check_interval seconds).
+        """
         self._running = False
         if self._task and not self._task.done():
-            self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+                # Wait for the task to exit naturally (max check_interval seconds)
+                await asyncio.wait_for(self._task, timeout=self.config.check_interval + 5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # If it doesn't stop in time, cancel as last resort
+                self._task.cancel()
+                try:
+                    await self._task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     async def _run_loop(self) -> None:
         while self._running:

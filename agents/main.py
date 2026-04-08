@@ -133,12 +133,14 @@ def _setup_process_group():
     os.setpgrp()  # become process group leader
 
     def _kill_group(signum, frame):
-        print(f"\n[Main] Received signal {signum}, killing process group...")
+        print(f"\n[Main] Received signal {signum} ({signal.Signals(signum).name}), killing process group...")
+        # Kill children first (exclude self to avoid re-entry)
         try:
             os.killpg(os.getpgrp(), signal.SIGTERM)
         except ProcessLookupError:
             pass
-        sys.exit(1)
+        # Exit with 128+signal (Unix convention: killed by signal)
+        os._exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _kill_group)
     signal.signal(signal.SIGINT, _kill_group)

@@ -714,6 +714,19 @@ class AgentRunner:
                 except (asyncio.CancelledError, Exception):
                     pass  # Client cleanup failed — already handled
 
+        except BaseException as exc:
+            # Log subprocess exit info
+            exit_info = f"{type(exc).__name__}: {exc}"
+            print(f"[Runner] {self.agent_config.name} subprocess error: {exit_info}")
+            if self._storage:
+                self._storage.append_event({
+                    "ts": datetime.now().isoformat(),
+                    "type": "SubprocessError",
+                    "agent": self.agent_config.name,
+                    "error": exit_info[:500],
+                })
+            raise
+
         finally:
             self._client = None
             self._is_running = False

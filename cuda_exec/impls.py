@@ -111,11 +111,12 @@ def reseed_gen(kernel: str, arch: str, *,
     Returns:
         Path to the reseeded gen/<arch>/<kernel>/ directory.
     """
+    import os
     import shutil
     repo = kb_repo or _KB_REPO
 
     if not run_tag:
-        run_tag = f"run_{_detect_host_slug()}"
+        run_tag = os.environ.get("CUDA_EXEC_RUN_TAG") or f"run_{_detect_host_slug()}"
 
     run_dir = repo / "runs" / run_tag
     gen_path = run_dir / "gen" / arch / kernel
@@ -154,11 +155,12 @@ def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
     Gems are per-run artifacts. No cross-run access.
     A fresh run with no gems returns None — the caller must seed explicitly.
     """
+    import os
     repo = kb_repo or _KB_REPO
     runs_dir = repo / "runs"
 
     if not run_tag:
-        run_tag = f"run_{_detect_host_slug()}"
+        run_tag = os.environ.get("CUDA_EXEC_RUN_TAG") or f"run_{_detect_host_slug()}"
 
     run_dir = runs_dir / run_tag
     if run_dir.exists():
@@ -217,11 +219,14 @@ def _ensure_gen_dir(kernel: str, arch: str, *,
 def _resolve_run_tag(run_tag: str | None = None) -> str:
     """Resolve run_tag — kept for backward compat with list_gems/reseed_gen.
 
-    Priority: explicit > IK_RUN_HOME dirname > run_{host_slug}.
+    Priority: explicit > CUDA_EXEC_RUN_TAG > IK_RUN_HOME dirname > run_{host_slug}.
     """
     import os
     if run_tag:
         return run_tag
+    env_tag = os.environ.get("CUDA_EXEC_RUN_TAG")
+    if env_tag:
+        return env_tag
     env_home = os.environ.get("IK_RUN_HOME")
     if env_home:
         return Path(env_home).name
@@ -402,6 +407,24 @@ def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List
     _scan_dir(_ref_dir(kernel, data_root), "ref")
     _scan_dir(_peak_dir(kernel, arch, data_root), "peak")
     _scan_dir(_gen_dir(kernel, arch, data_root), "gen")
+
+    # Check for a per-kernel priority config that overrides ref ordering.
+    # Useful when a ref impl is broken in subprocess context (e.g., cuDNN segfault)
+    # and a different ref should be the golden reference for correctness comparison.
+    # File: data/ref/{kernel}/_priority.json  →  {"golden_ref": "ref-pytorch"}
+    priority_file = _ref_dir(kernel, data_root) / "_priority.json"
+    if priority_file.exists():
+        try:
+            import json as _json
+            priority = _json.loads(priority_file.read_text())
+            golden = priority.get("golden_ref")
+            if golden:
+                golden_items = [i for i in impls if i["slug"] == golden]
+                others = [i for i in impls if i["slug"] != golden]
+                if golden_items:
+                    impls[:] = golden_items + others
+        except Exception:
+            pass  # Malformed priority file — fall back to alphabetical order
 
     return impls
 

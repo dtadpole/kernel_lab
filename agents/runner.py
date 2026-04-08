@@ -426,6 +426,31 @@ class AgentRunner:
 
             tools_list.append(request_formal_bench)
 
+        if "save_gem_notes" in custom:
+            @tool(
+                "save_gem_notes",
+                "Save optimization notes alongside the latest gem. "
+                "Call this after request_formal_bench returns '★ NEW GEM PRODUCED'. "
+                "The Supervisor saves your notes in the gem directory.",
+                {
+                    "notes": str,  # what optimization, key insight, NCU metrics, next steps
+                },
+            )
+            async def save_gem_notes(args):
+                notes = args.get("notes", "")
+
+                event = AskEvent(
+                    question="SAVE_GEM_NOTES",
+                    context=notes,
+                )
+                if runner_ref.log:
+                    runner_ref.log.append(event)
+
+                answer = await runner_ref.handler.on_ask(event)
+                return {"content": [{"type": "text", "text": answer}]}
+
+            tools_list.append(save_gem_notes)
+
         if not tools_list:
             return {}
 

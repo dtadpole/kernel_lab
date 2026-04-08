@@ -508,9 +508,9 @@ class Supervisor(DefaultHandler):
         if event.question.startswith("REQUEST_FORMAL_BENCH:"):
             return await self._handle_bench_request(event)
 
-        # ── save_gem_md ──
-        if event.question.startswith("SAVE_GEM_NOTES:"):
-            return self._save_gem_md(event.question, event.context)
+        # ── submit_bench_reflection ──
+        if event.question == "SUBMIT_BENCH_REFLECTION":
+            return self._handle_bench_reflection(event.context)
 
         # ── Regular question → Steward ──
         return await self.steward.answer_question(
@@ -519,42 +519,52 @@ class Supervisor(DefaultHandler):
             solver_context=event.context,
         )
 
-    def _save_gem_md(self, query: str, notes: str) -> str:
-        """Save Solver's implementation notes alongside a specific gem.
+    def _handle_bench_reflection(self, context: str) -> str:
+        """Save bench reflection and optional gem notes via cuda_exec.reflection."""
+        from cuda_exec.reflection import save_bench_reflection
 
-        gem_id format: "gen-cuda/v003"
-        Resolves to: ~/kernel_lab_kb/runs/<run_tag>/gems/<kernel>/<slug>/v003_*/notes.md
-        """
-        import glob
+        try:
+            data = json.loads(context)
+        except json.JSONDecodeError:
+            return "Invalid context — expected JSON with reflection_md field."
 
-        # Parse gem_id from query
-        gem_id_m = re.search(r"gem_id=(\S+)", query)
-        if not gem_id_m:
-            return "Missing gem_id. Call save_gem_md(gem_id='gen-cuda/v003', notes='...')"
+        gem_id = data.get("gem_id", "")
+        gem_notes_md = data.get("gem_notes_md", "")
+        reflection_md = data.get("reflection_md", "")
 
-        gem_id = gem_id_m.group(1)
-        parts = gem_id.split("/")
-        if len(parts) != 2:
-            return f"Invalid gem_id '{gem_id}'. Expected format: 'gen-cuda/v003'"
+        if not reflection_md:
+            return "Missing reflection_md. Please write your reflection."
 
-        slug, version = parts  # e.g. "gen-cuda", "v003"
-        kernel = self.state.kernel
-        run_tag = self.state.run_tag
+        # Get latest bench timestamp from state
+        bench_ts = ""
+        if self.state.bench_results:
+            last = self.state.bench_results[-1]
+            bench_data = last.get("bench_data", {})
+            bench_ts = bench_data.get("bench_timestamp", "")
+        if not bench_ts:
+            # Fallback: use current time
+            bench_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        gem_pattern = str(
-            Path.home() / "kernel_lab_kb" / "runs" / run_tag /
-            "gems" / kernel / slug / f"{version}_*"
+        result = save_bench_reflection(
+            run_tag=self.state.run_tag,
+            bench_ts=bench_ts,
+            kernel=self.state.kernel,
+            reflection_md=reflection_md,
+            gem_id=gem_id,
+            gem_notes_md=gem_notes_md,
         )
-        matches = sorted(glob.glob(gem_pattern))
-        if not matches:
-            return f"Gem not found: {gem_pattern}"
 
-        gem_dir = Path(matches[-1])
-        notes_path = gem_dir / "notes.md"
-        notes_path.write_text(notes.strip() + "\n")
+        files = result.get("files_written", [])
+        print(f"[Supervisor] Reflection saved: {files}")
 
-        print(f"[Supervisor] Saved gem notes to {notes_path}")
-        return f"Notes saved to {notes_path}. Continue optimizing."
+        parts = [f"Reflection saved to {result.get('reflection_path', '?')}."]
+        if result.get("gem_notes_path"):
+            parts.append(f"Gem notes saved to {result['gem_notes_path']}.")
+        if result.get("gem_error"):
+            parts.append(f"Warning: {result['gem_error']}")
+        parts.append("Continue optimizing.")
+
+        return " ".join(parts)
 
     async def _handle_bench_request(self, event: AskEvent) -> str:
         """Solver requested a formal benchmark. Run via subprocess."""
@@ -587,21 +597,61 @@ class Supervisor(DefaultHandler):
             )
             improved = self._parse_bench_improved(bench_result)
 
+            bench_data = bench_result.usage.get("bench_data", {})
+            bench_ts = bench_data.get("bench_timestamp", "")
+
             self.state.bench_results.append({
                 "iteration": self.state.iteration,
                 "kernel": kernel,
                 "improved": improved,
                 "summary": bench_result.result_text[:500],
+                "bench_data": bench_data,
             })
 
             # Detect correctness failures (✗ in bench output)
             has_correctness_failure = "✗" in bench_result.result_text
 
+            # Build template variables
+            run_tag = self.state.run_tag
+            kb_root = Path.home() / "kernel_lab_kb"
+            impls_dir = kb_root / "runs" / run_tag / "impls" / bench_ts
+
+            # Find gem info
+            gems = bench_data.get("gems", {})
+            gem_id = ""
+            n_improved = 0
+            for slug, info in gems.items():
+                ver = info.get("version", "?")
+                n_improved = len(info.get("improved_configs", []))
+                gem_id = f"{slug}/v{ver:03d}"
+
+            # Find previous/best gem path
+            import glob
+            gem_pattern = str(kb_root / "runs" / run_tag / "gems" / kernel / "gen-cuda" / "v*")
+            gem_matches = sorted(glob.glob(gem_pattern))
+            if improved and len(gem_matches) >= 2:
+                prev_gem_path = gem_matches[-2]
+            elif gem_matches:
+                prev_gem_path = gem_matches[-1]
+            else:
+                prev_gem_path = "(none — first iteration)"
+
+            template_vars = {
+                "bench_result_text": bench_result.result_text,
+                "gem_id": gem_id,
+                "n_improved": n_improved,
+                "impls_dir": str(impls_dir),
+                "kernel": kernel,
+                "prev_gem_path": prev_gem_path,
+                "best_gem_path": gem_matches[-1] if gem_matches else "(none)",
+            }
+
             if improved:
                 template = _load_prompt("supervisor_bench_improved")
             else:
                 template = _load_prompt("supervisor_bench_no_improvement")
-            result_text = template.format(bench_result_text=bench_result.result_text)
+
+            result_text = template.format(**template_vars)
 
             if has_correctness_failure:
                 correctness_warning = (
@@ -612,28 +662,6 @@ class Supervisor(DefaultHandler):
                     "Do NOT request another formal_bench until ALL configs show ✓.\n\n"
                 )
                 result_text = correctness_warning + result_text
-
-            # Notify Solver about new gem
-            if improved:
-                bench_data = bench_result.usage.get("bench_data", {})
-                gems = bench_data.get("gems", {})
-                gem_details = ""
-                for slug, info in gems.items():
-                    ver = info.get("version", "?")
-                    n_improved = len(info.get("improved_configs", []))
-                    gem_id = f"{slug}/v{ver:03d}"
-                    gem_details += f"  - gem_id: {gem_id} ({n_improved} configs improved)\n"
-
-                result_text += (
-                    f"\n\n★ NEW GEM PRODUCED ★\n"
-                    f"{gem_details}\n"
-                    f"ACTION REQUIRED: Call save_gem_md(gem_id=\"{gem_id}\", notes=\"...\").\n"
-                    f"Write Markdown notes with:\n"
-                    f"- What you changed in this iteration (code changes, new techniques)\n"
-                    f"- What you generated (kernel architecture, key parameters)\n"
-                    f"- Core technical points (why this optimization works)\n"
-                    f"Do NOT include reflections or learnings — only implementation facts.\n"
-                )
 
             return result_text
 

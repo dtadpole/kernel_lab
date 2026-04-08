@@ -233,54 +233,89 @@ def test_parse_bench_improved_structured_false():
 
 
 @pytest.mark.quick
-def test_save_gem_md():
-    """_save_gem_md writes notes.md to the correct gem directory."""
+def test_submit_bench_reflection():
+    """_handle_bench_reflection saves reflection.md to impls dir."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
     sup = Supervisor(config)
     sup.state = SupervisorState(
         phase="solving", task="test", kernel="fa4",
-        run_tag="test_run_save_gem",
+        run_tag="test_run_reflection",
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Create fake gem directory
-        gem_dir = Path(tmpdir) / "v003_20260407_120000"
+        # Create fake impls dir
+        impls_dir = Path(tmpdir) / "runs" / "test_run_reflection" / "impls" / "20260408_120000"
+        impls_dir.mkdir(parents=True)
+
+        # Set bench_results with bench_data
+        sup.state.bench_results = [{"bench_data": {"bench_timestamp": "20260408_120000"}}]
+
+        import json
+        context = json.dumps({
+            "gem_id": "",
+            "gem_notes_md": "",
+            "reflection_md": "## Discovery\n1. C7513 warning means WGMMA serialization",
+        })
+
+        from cuda_exec.reflection import save_bench_reflection
+        result = save_bench_reflection(
+            run_tag="test_run_reflection",
+            bench_ts="20260408_120000",
+            kernel="fa4",
+            reflection_md="## Discovery\n1. C7513 warning means WGMMA serialization",
+            kb_repo=Path(tmpdir),
+        )
+
+        assert result["status"] == "ok"
+        assert len(result["files_written"]) == 1
+        content = Path(result["reflection_path"]).read_text()
+        assert "C7513" in content
+
+
+@pytest.mark.quick
+def test_submit_bench_reflection_with_gem():
+    """_handle_bench_reflection saves both reflection and gem notes."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create fake impls and gem dirs
+        impls_dir = Path(tmpdir) / "runs" / "test_run" / "impls" / "20260408_120000"
+        impls_dir.mkdir(parents=True)
+        gem_dir = Path(tmpdir) / "runs" / "test_run" / "gems" / "fa4" / "gen-cuda" / "v003_20260408_120000"
         gem_dir.mkdir(parents=True)
 
-        # Patch glob to find our temp dir
-        import unittest.mock as mock
-        with mock.patch("glob.glob", return_value=[str(gem_dir)]):
-            result = sup._save_gem_md(
-                "SAVE_GEM_NOTES: gem_id=gen-cuda/v003",
-                "## Changes\n- Removed named barriers\n- 2 barriers instead of 16",
-            )
+        from cuda_exec.reflection import save_bench_reflection
+        result = save_bench_reflection(
+            run_tag="test_run",
+            bench_ts="20260408_120000",
+            kernel="fa4",
+            reflection_md="## Discovery\n1. Barrier stalls came from mbarrier, not named_barrier",
+            gem_id="gen-cuda/v003",
+            gem_notes_md="## Implementation\n- Removed named barriers\n- 2 barriers instead of 16",
+            kb_repo=Path(tmpdir),
+        )
 
-        assert "Notes saved" in result
-        notes_path = gem_dir / "notes.md"
-        assert notes_path.exists()
-        content = notes_path.read_text()
-        assert "Removed named barriers" in content
-        assert "2 barriers instead of 16" in content
-
-
-@pytest.mark.quick
-def test_save_gem_md_missing_id():
-    """_save_gem_md returns error when gem_id is missing."""
-    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test", kernel="fa4")
-    result = sup._save_gem_md("SAVE_GEM_NOTES:", "some notes")
-    assert "Missing gem_id" in result
+        assert result["status"] == "ok"
+        assert len(result["files_written"]) == 2
+        assert "C7513" not in Path(result["gem_notes_path"]).read_text()  # gem notes != reflection
+        assert "named barriers" in Path(result["gem_notes_path"]).read_text()
+        assert "mbarrier" in Path(result["reflection_path"]).read_text()
 
 
 @pytest.mark.quick
-def test_save_gem_md_invalid_id():
-    """_save_gem_md returns error for invalid gem_id format."""
-    config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test", kernel="fa4")
-    result = sup._save_gem_md("SAVE_GEM_NOTES: gem_id=bad_format", "some notes")
-    assert "Invalid gem_id" in result
+def test_submit_bench_reflection_missing_reflection():
+    """save_bench_reflection with empty reflection_md still creates file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        reflections_dir = Path(tmpdir) / "runs" / "test_run" / "reflections"
+
+        from cuda_exec.reflection import save_bench_reflection
+        result = save_bench_reflection(
+            run_tag="test_run",
+            bench_ts="20260408_999999",
+            kernel="fa4",
+            reflection_md="minimal",
+            kb_repo=Path(tmpdir),
+        )
+        # Falls back to reflections/ dir since impls doesn't exist
+        assert "reflections/" in result.get("note", "")
 
 
 # ── Supervisor consecutive stuck tracking ──

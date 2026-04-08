@@ -426,27 +426,34 @@ class AgentRunner:
 
             tools_list.append(request_formal_bench)
 
-        if "save_gem_md" in custom:
+        if "submit_bench_reflection" in custom:
             @tool(
-                "save_gem_md",
-                "Save implementation notes alongside a gem. "
-                "Call this after request_formal_bench returns '★ NEW GEM PRODUCED'. "
-                "Use the gem_id from the gem notification (e.g. 'gen-cuda/v003'). "
-                "Write in Markdown. Include ONLY implementation details — "
-                "what you changed, what you generated, core technical points. "
-                "Do NOT include reflections or learnings.",
+                "submit_bench_reflection",
+                "Submit reflection after a formal benchmark. Call this every time "
+                "after request_formal_bench returns results. "
+                "gem_id and gem_notes_md are only needed when a new gem was produced. "
+                "reflection_md is always required.",
                 {
-                    "gem_id": str,   # e.g. "gen-cuda/v003" from gem notification
-                    "notes": str,    # Markdown: what changed, what generated, core points
+                    "gem_id": str,          # optional: e.g. "gen-cuda/v003", only if gem produced
+                    "gem_notes_md": str,    # optional: Markdown implementation notes for gem
+                    "reflection_md": str,   # required: Markdown reflection (at most 3 points)
                 },
             )
-            async def save_gem_md(args):
+            async def submit_bench_reflection(args):
                 gem_id = args.get("gem_id", "")
-                notes = args.get("notes", "")
+                gem_notes_md = args.get("gem_notes_md", "")
+                reflection_md = args.get("reflection_md", "")
+
+                # Pack both into the event
+                context = json.dumps({
+                    "gem_id": gem_id,
+                    "gem_notes_md": gem_notes_md,
+                    "reflection_md": reflection_md,
+                })
 
                 event = AskEvent(
-                    question=f"SAVE_GEM_NOTES: gem_id={gem_id}",
-                    context=notes,
+                    question="SUBMIT_BENCH_REFLECTION",
+                    context=context,
                 )
                 if runner_ref.log:
                     runner_ref.log.append(event)
@@ -454,7 +461,7 @@ class AgentRunner:
                 answer = await runner_ref.handler.on_ask(event)
                 return {"content": [{"type": "text", "text": answer}]}
 
-            tools_list.append(save_gem_md)
+            tools_list.append(submit_bench_reflection)
 
         if not tools_list:
             return {}

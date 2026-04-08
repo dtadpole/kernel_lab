@@ -538,17 +538,13 @@ class Supervisor(DefaultHandler):
         elapsed = str(log.elapsed()) if log else "unknown"
 
         if event.alert_type == "total_timeout":
-            response = await self.steward.handle_time_limit(
-                transcript_path=tp,
-                elapsed_time=elapsed,
-                time_limit=str(self.config.monitor.total_timeout),
-            )
+            # Code decision: auto-continue until hard_limit
+            print(f"[Supervisor] Time limit at {elapsed} — auto-continuing")
+            return "continue"
         elif event.alert_type == "progress_check":
-            print(f"[Supervisor] Progress check at {elapsed}")
-            response = await self.steward.check_progress(
-                transcript_path=tp,
-                elapsed_time=elapsed,
-            )
+            # Code decision: just log, no Steward needed
+            print(f"[Supervisor] Progress check at {elapsed} — heartbeat OK")
+            return "continue"
         elif event.alert_type in ("idle_timeout", "loop_detected"):
             self.state.consecutive_stuck += 1
 

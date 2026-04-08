@@ -186,8 +186,10 @@ class Supervisor(DefaultHandler):
             except KeyboardInterrupt:
                 print(f"\n[Supervisor] Interrupted by user after {session_number} sessions")
                 break
-            except Exception as e:
-                print(f"\n[Supervisor] Session {session_number} error: {e}")
+            except KeyboardInterrupt:
+                raise  # re-raise, handled by outer except
+            except BaseException as e:
+                print(f"\n[Supervisor] Session {session_number} error: {type(e).__name__}: {e}")
                 session_history.append({
                     "session": session_number,
                     "run_tag": run_tag,
@@ -195,7 +197,7 @@ class Supervisor(DefaultHandler):
                     "verdict": "ERROR",
                     "elapsed": "0s",
                     "improved": False,
-                    "summary": str(e)[:300],
+                    "summary": f"{type(e).__name__}: {str(e)[:280]}",
                 })
                 # Continue to next session despite error
 

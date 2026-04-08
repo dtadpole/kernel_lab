@@ -133,6 +133,11 @@ class AgentRunner:
         if self.log is None:
             self.log = SessionLog()
 
+        # Ensure previous monitor is fully stopped before creating new client
+        if self._monitor:
+            await self._monitor.stop()
+            self._monitor = None
+
         options = self._build_options()
         options.resume = self._session_id
         return await self._execute(prompt, options)
@@ -551,7 +556,13 @@ class AgentRunner:
         total_usage: dict = {}
 
         try:
-            async with ClaudeSDKClient(options=options) as client:
+            try:
+                client_ctx = ClaudeSDKClient(options=options)
+                client = await client_ctx.__aenter__()
+            except Exception as e:
+                raise RuntimeError(f"Failed to start Claude CLI: {e}") from e
+
+            try:
                 self._client = client
                 await client.query(prompt)
 
@@ -651,6 +662,13 @@ class AgentRunner:
                 finally:
                     await monitor.stop()
                     self._monitor = None
+
+            finally:
+                # Close client — catch CancelledError from transport cleanup
+                try:
+                    await client_ctx.__aexit__(None, None, None)
+                except (asyncio.CancelledError, Exception):
+                    pass  # Client cleanup failed — already handled
 
         finally:
             self._client = None

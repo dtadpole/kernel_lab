@@ -426,9 +426,9 @@ class AgentRunner:
 
             tools_list.append(request_formal_bench)
 
-        if "save_gem_notes" in custom:
+        if "save_gem_md" in custom:
             @tool(
-                "save_gem_notes",
+                "save_gem_md",
                 "Save implementation notes alongside a gem. "
                 "Call this after request_formal_bench returns '★ NEW GEM PRODUCED'. "
                 "Use the gem_id from the gem notification (e.g. 'gen-cuda/v003'). "
@@ -440,7 +440,7 @@ class AgentRunner:
                     "notes": str,    # Markdown: what changed, what generated, core points
                 },
             )
-            async def save_gem_notes(args):
+            async def save_gem_md(args):
                 gem_id = args.get("gem_id", "")
                 notes = args.get("notes", "")
 
@@ -454,7 +454,7 @@ class AgentRunner:
                 answer = await runner_ref.handler.on_ask(event)
                 return {"content": [{"type": "text", "text": answer}]}
 
-            tools_list.append(save_gem_notes)
+            tools_list.append(save_gem_md)
 
         if not tools_list:
             return {}

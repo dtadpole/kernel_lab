@@ -47,7 +47,7 @@ agents:
       custom:
         - ask_supervisor
         - request_formal_bench
-        - save_gem_notes
+        - save_gem_md
     tool_rules:
       - tool: Bash
         allow: true

@@ -508,9 +508,9 @@ class Supervisor(DefaultHandler):
         if event.question.startswith("REQUEST_FORMAL_BENCH:"):
             return await self._handle_bench_request(event)
 
-        # ── save_gem_notes ──
+        # ── save_gem_md ──
         if event.question.startswith("SAVE_GEM_NOTES:"):
-            return self._save_gem_notes(event.question, event.context)
+            return self._save_gem_md(event.question, event.context)
 
         # ── Regular question → Steward ──
         return await self.steward.answer_question(
@@ -519,7 +519,7 @@ class Supervisor(DefaultHandler):
             solver_context=event.context,
         )
 
-    def _save_gem_notes(self, query: str, notes: str) -> str:
+    def _save_gem_md(self, query: str, notes: str) -> str:
         """Save Solver's implementation notes alongside a specific gem.
 
         gem_id format: "gen-cuda/v003"
@@ -530,7 +530,7 @@ class Supervisor(DefaultHandler):
         # Parse gem_id from query
         gem_id_m = re.search(r"gem_id=(\S+)", query)
         if not gem_id_m:
-            return "Missing gem_id. Call save_gem_notes(gem_id='gen-cuda/v003', notes='...')"
+            return "Missing gem_id. Call save_gem_md(gem_id='gen-cuda/v003', notes='...')"
 
         gem_id = gem_id_m.group(1)
         parts = gem_id.split("/")
@@ -627,7 +627,7 @@ class Supervisor(DefaultHandler):
                 result_text += (
                     f"\n\n★ NEW GEM PRODUCED ★\n"
                     f"{gem_details}\n"
-                    f"ACTION REQUIRED: Call save_gem_notes(gem_id=\"{gem_id}\", notes=\"...\").\n"
+                    f"ACTION REQUIRED: Call save_gem_md(gem_id=\"{gem_id}\", notes=\"...\").\n"
                     f"Write Markdown notes with:\n"
                     f"- What you changed in this iteration (code changes, new techniques)\n"
                     f"- What you generated (kernel architecture, key parameters)\n"

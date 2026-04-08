@@ -13,6 +13,7 @@ Decision loop:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -136,6 +137,10 @@ class Supervisor(DefaultHandler):
         print(f"[Supervisor] Kill with Ctrl+C or hard_limit to stop")
         print(f"{'='*60}\n")
 
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        error_cooldown_seconds = 60
+
         while True:
             session_number += 1
 
@@ -160,6 +165,8 @@ class Supervisor(DefaultHandler):
                     gpu=gpu,
                     run_tag=run_tag,
                 )
+
+                consecutive_errors = 0  # reset on success
 
                 # Record session result
                 session_record = {
@@ -186,10 +193,10 @@ class Supervisor(DefaultHandler):
             except KeyboardInterrupt:
                 print(f"\n[Supervisor] Interrupted by user after {session_number} sessions")
                 break
-            except KeyboardInterrupt:
-                raise  # re-raise, handled by outer except
             except BaseException as e:
-                print(f"\n[Supervisor] Session {session_number} error: {type(e).__name__}: {e}")
+                consecutive_errors += 1
+                print(f"\n[Supervisor] Session {session_number} error ({consecutive_errors}/{max_consecutive_errors}): "
+                      f"{type(e).__name__}: {e}")
                 session_history.append({
                     "session": session_number,
                     "run_tag": run_tag,
@@ -199,7 +206,12 @@ class Supervisor(DefaultHandler):
                     "improved": False,
                     "summary": f"{type(e).__name__}: {str(e)[:280]}",
                 })
-                # Continue to next session despite error
+
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"[Supervisor] {max_consecutive_errors} consecutive errors — "
+                          f"cooling down {error_cooldown_seconds}s before retry")
+                    await asyncio.sleep(error_cooldown_seconds)
+                    consecutive_errors = 0
 
     def _build_continuous_prompt(
         self, task: str, kernel: str,

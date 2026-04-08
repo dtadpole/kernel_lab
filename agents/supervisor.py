@@ -612,31 +612,15 @@ class Supervisor(DefaultHandler):
         """Solver requested a formal benchmark. Run via subprocess."""
         kernel = self.state.kernel
 
-        # Parse params from the request string
+        # Parse kernel from the request string
         query = event.question
-        for param in ["kernel", "arch", "impls", "timeout"]:
-            match = re.search(rf"{param}=(\S+)", query)
-            if match:
-                if param == "kernel":
-                    kernel = match.group(1)
-
-        arch = ""
-        impls = ""
-        timeout = 0
-        arch_m = re.search(r"arch=(\S+)", query)
-        impls_m = re.search(r"impls=(\S+)", query)
-        timeout_m = re.search(r"timeout=(\d+)", query)
-        if arch_m:
-            arch = arch_m.group(1)
-        if impls_m:
-            impls = impls_m.group(1)
-        if timeout_m:
-            timeout = int(timeout_m.group(1))
+        kernel_m = re.search(r"kernel=(\S+)", query)
+        if kernel_m:
+            kernel = kernel_m.group(1)
 
         try:
-            bench_result = await self._run_benchmarker(
-                kernel, arch=arch, impls=impls, timeout=timeout,
-            )
+            # Supervisor controls GPU, impls (always "all"), and run_tag
+            bench_result = await self._run_benchmarker(kernel)
             improved = self._parse_bench_improved(bench_result)
 
             bench_data = bench_result.usage.get("bench_data", {})

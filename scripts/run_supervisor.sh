@@ -14,8 +14,8 @@ while true; do
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Supervisor exited with code $EXIT_CODE" | tee -a "$EXIT_LOG"
 
-    if [ $EXIT_CODE -eq 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Clean exit. Not restarting." | tee -a "$EXIT_LOG"
+    if [ $EXIT_CODE -eq 130 ] || [ $EXIT_CODE -eq 2 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] User interrupt (Ctrl+C). Not restarting." | tee -a "$EXIT_LOG"
         break
     fi
 

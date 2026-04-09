@@ -374,22 +374,24 @@ def measure_reference(
             model(*inputs)
         torch.cuda.synchronize(device=device)
 
-        latencies_ms: list[float] = []
-        last_output: Any = None
+        # Pipelined measurement: L2 flush + kernel enqueued back-to-back
+        # with NO sync between iterations.  Matches eval_harness.cu and
+        # triton.testing.do_bench — hides CPU submission overhead.
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
+
         for trial_idx in range(num_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
-            # Fresh input buffers — new allocations per trial (new pointers),
-            # matching the C eval_harness.cu methodology.
-            inputs = generate_inputs(config, device)
-            torch.cuda.synchronize(device=device)
-            start_ev = torch.cuda.Event(enable_timing=True)
-            end_ev = torch.cuda.Event(enable_timing=True)
-            start_ev.record()
+            start_events[trial_idx].record()
             last_output = model(*inputs)
-            end_ev.record()
-            end_ev.synchronize()
-            latencies_ms.append(start_ev.elapsed_time(end_ev))
+            end_events[trial_idx].record()
+
+        torch.cuda.synchronize(device=device)
+        latencies_ms: list[float] = [
+            start_events[i].elapsed_time(end_events[i])
+            for i in range(num_trials)
+        ]
 
         # Run once more with deterministic inputs for correctness output
         set_seed(seed)

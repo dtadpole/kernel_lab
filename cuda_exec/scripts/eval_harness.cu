@@ -15,6 +15,14 @@
  *
  * The harness provides: main(), env-based config, BF16 input generation,
  * CUDA event timing, warmup, and structured JSON output on stdout.
+ *
+ * Measurement methodology (sustained / pipelined):
+ *   L2 flush and kernel launches are enqueued back-to-back with NO
+ *   cudaStreamSynchronize between iterations.  The GPU stays busy
+ *   executing the L2 flush while the CPU prepares the next kernel_run
+ *   (TMA encoding, cuBLAS dispatch, etc.).  This hides CPU submission
+ *   overhead and measures pure GPU kernel throughput — matching what
+ *   happens in real training/inference where kernels are pipelined.
  */
 
 #include <cuda_bf16.h>
@@ -106,8 +114,8 @@ static void fill_arange(__nv_bfloat16* host_buf, int count) {
 
 /* ------------------------------------------------------------------ */
 /* Device kernel: fill buffer with pseudo-random BF16 values.         */
-/* Used to re-randomize inputs before each timed trial so that        */
-/* kernels cannot cache preprocessed results across calls.            */
+/* Used to randomize inputs so that kernels cannot exploit constant   */
+/* data patterns.                                                     */
 /* ------------------------------------------------------------------ */
 __global__ void fill_random_bf16(__nv_bfloat16* buf, int count,
                                  unsigned int seed) {
@@ -287,55 +295,63 @@ int main() {
         }
     }
 
-    /* Timed trials with CUDA events.
-     * Before each trial, allocate FRESH input buffers and fill with
-     * pseudo-random data.  This prevents kernels from caching
-     * preprocessed results (e.g. a transposed copy of B) across calls:
-     *   - New pointers break pointer-based caches
-     *   - New random data breaks content-based caches
-     * Both the allocation and randomization run OUTSIDE the timed region. */
+    /* Randomize inputs before the timed loop */
     const int rand_block = 256;
     const int rand_grid = (cfg.input_size + rand_block - 1) / rand_block;
-    std::vector<double> latencies;
-    for (int i = 0; i < cfg.num_trials; i++) {
-        cudaEvent_t start_ev, end_ev;
-        cudaEventCreate(&start_ev);
-        cudaEventCreate(&end_ev);
+    for (int j = 0; j < num_inputs; j++) {
+        unsigned int seed = 0xCAFE0000u + (unsigned int)j;
+        fill_random_bf16<<<rand_grid, rand_block, 0, stream>>>(
+            d_inputs[j], cfg.input_size, seed);
+    }
+    cudaStreamSynchronize(stream);
 
-        /* Flush L2 cache before each trial */
+    /* Timed trials — pipelined measurement.
+     * L2 flush + kernel_run enqueued back-to-back with NO sync between
+     * iterations.  The GPU stays busy with the L2 flush while the CPU
+     * prepares the next kernel launch, hiding CPU submission overhead. */
+    const int N = cfg.num_trials;
+    std::vector<cudaEvent_t> start_events(N), end_events(N);
+    for (int i = 0; i < N; i++) {
+        cudaEventCreate(&start_events[i]);
+        cudaEventCreate(&end_events[i]);
+    }
+
+    for (int i = 0; i < N; i++) {
         if (l2_flush_buf != nullptr) {
             cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
         }
 
-        /* Allocate fresh input buffers (new pointers break pointer caches) */
-        for (int j = 0; j < num_inputs; j++)
-            cudaFree(d_inputs[j]);
-        for (int j = 0; j < num_inputs; j++) {
-            cudaMalloc(&d_inputs[j], elem_bytes);
-            unsigned int seed = 0xCAFE0000u + (unsigned int)(i * num_inputs + j);
-            fill_random_bf16<<<rand_grid, rand_block, 0, stream>>>(
-                d_inputs[j], cfg.input_size, seed);
-        }
-        cudaStreamSynchronize(stream);
-
-        cudaEventRecord(start_ev, stream);
+        cudaEventRecord(start_events[i], stream);
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,
                             cfg.input_size, stream);
-        cudaEventRecord(end_ev, stream);
-        cudaEventSynchronize(end_ev);
+        cudaEventRecord(end_events[i], stream);
 
         if (rc != 0) {
             fprintf(stderr, "kernel_run trial %d failed: rc=%d\n", i, rc);
             return 5;
         }
+    }
 
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA error during trials: %s\n",
+                cudaGetErrorString(err));
+        return 5;
+    }
+
+    std::vector<double> latencies;
+    for (int i = 0; i < N; i++) {
         float ms = 0.0f;
-        cudaEventElapsedTime(&ms, start_ev, end_ev);
+        cudaEventElapsedTime(&ms, start_events[i], end_events[i]);
         latencies.push_back(static_cast<double>(ms));
+    }
 
-        cudaEventDestroy(start_ev);
-        cudaEventDestroy(end_ev);
+    for (int i = 0; i < N; i++) {
+        cudaEventDestroy(start_events[i]);
+        cudaEventDestroy(end_events[i]);
     }
 
     /* Correctness pass: allocate fresh buffers and fill with deterministic

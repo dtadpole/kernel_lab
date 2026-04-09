@@ -110,7 +110,7 @@ static CachedState create_and_autotune(
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
         &g_workspace_size, sizeof(g_workspace_size));
 
-    const int NUM_CANDIDATES = 20;
+    const int NUM_CANDIDATES = 50;
     cublasLtMatmulHeuristicResult_t results[NUM_CANDIDATES];
     int num_returned = 0;
 

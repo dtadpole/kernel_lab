@@ -27,12 +27,14 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <nvml.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 #include <vector>
 
 /* ------------------------------------------------------------------ */
@@ -72,6 +74,41 @@ static int env_int(const char* name, int fallback) {
 static float env_float(const char* name, float fallback) {
     const char* v = getenv(name);
     return v ? static_cast<float>(atof(v)) : fallback;
+}
+
+/* ------------------------------------------------------------------ */
+/* GPU state snapshot via NVML                                        */
+/* ------------------------------------------------------------------ */
+struct GpuSnapshot {
+    unsigned int sm_clock_mhz;
+    unsigned int temp_c;
+    bool valid;
+};
+
+static nvmlDevice_t g_nvml_dev = nullptr;
+static bool g_nvml_ok = false;
+
+static void nvml_init() {
+    if (g_nvml_ok) return;
+    if (nvmlInit_v2() != NVML_SUCCESS) return;
+
+    /* Use CUDA_VISIBLE_DEVICES index 0 → need the real NVML device index. */
+    int cuda_dev = 0;
+    char pci_bus_id[64] = {};
+    if (cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), cuda_dev) != cudaSuccess)
+        return;
+    if (nvmlDeviceGetHandleByPciBusId_v2(pci_bus_id, &g_nvml_dev) != NVML_SUCCESS)
+        return;
+    g_nvml_ok = true;
+}
+
+static GpuSnapshot gpu_snapshot() {
+    GpuSnapshot s = {};
+    if (!g_nvml_ok) return s;
+    nvmlDeviceGetClockInfo(g_nvml_dev, NVML_CLOCK_SM, &s.sm_clock_mhz);
+    nvmlDeviceGetTemperature(g_nvml_dev, NVML_TEMPERATURE_GPU, &s.temp_c);
+    s.valid = true;
+    return s;
 }
 
 /* ------------------------------------------------------------------ */
@@ -143,7 +180,10 @@ __global__ void fill_random_bf16(__nv_bfloat16* buf, int count,
 /* ------------------------------------------------------------------ */
 static void print_json(const HarnessConfig* cfg,
                        const std::vector<double>& latencies,
-                       const std::vector<std::vector<__nv_bfloat16>>& outputs) {
+                       const std::vector<std::vector<__nv_bfloat16>>& outputs,
+                       const GpuSnapshot& snap_warmup,
+                       const GpuSnapshot& snap_before,
+                       const GpuSnapshot& snap_after) {
     /* Latency stats */
     std::vector<double> sorted_lat(latencies);
     std::sort(sorted_lat.begin(), sorted_lat.end());
@@ -225,6 +265,26 @@ static void print_json(const HarnessConfig* cfg,
     printf("      \"mean\": %.6f\n", mean_ms);
     printf("    },\n");
     printf("    \"runs\": %d\n", static_cast<int>(latencies.size()));
+    printf("  },\n");
+
+    /* GPU clock/temp snapshots (NVML) — frequency responds in <100ms.
+     * Power is omitted (needs ~1s ramp-up; measured at outer bench level).
+     *   warmup: after warmup completes (post-sync idle clock)
+     *   before: right before measurement loop starts
+     *   during: sampled mid-measurement (GPU under sustained load) */
+    printf("  \"gpu_state\": {\n");
+    if (snap_warmup.valid) {
+        printf("    \"warmup\": { \"sm_clock_mhz\": %u, \"temp_c\": %u },\n",
+               snap_warmup.sm_clock_mhz, snap_warmup.temp_c);
+    }
+    if (snap_before.valid) {
+        printf("    \"before\": { \"sm_clock_mhz\": %u, \"temp_c\": %u },\n",
+               snap_before.sm_clock_mhz, snap_before.temp_c);
+    }
+    if (snap_after.valid) {
+        printf("    \"during\": { \"sm_clock_mhz\": %u, \"temp_c\": %u }\n",
+               snap_after.sm_clock_mhz, snap_after.temp_c);
+    }
     printf("  }\n");
     printf("}\n");
 }
@@ -278,6 +338,9 @@ int main() {
     /* Create stream */
     cudaStream_t stream;
     cudaStreamCreate(&stream);
+
+    /* Init NVML for GPU state snapshots */
+    nvml_init();
 
     /* L2 cache flush buffer (Triton do_bench / NVBench pattern) */
     int l2_attr = 0;
@@ -343,6 +406,11 @@ int main() {
                    cfg.input_size, stream);
     }
 
+    /* GPU state snapshot after warmup — sync to ensure warmup completed,
+     * then sample the post-warmup idle clock + temp. */
+    cudaStreamSynchronize(stream);
+    GpuSnapshot snap_warmup = gpu_snapshot();
+
     /* Randomize inputs before the timed loop */
     const int rand_block = 256;
     const int rand_grid = (cfg.input_size + rand_block - 1) / rand_block;
@@ -354,15 +422,21 @@ int main() {
     cudaStreamSynchronize(stream);
 
     /* ── Time-based measurement (default 100 ms) ────────────────── */
-    /* At least 10 trials for statistical robustness. */
     const int n_trials = (int)(cfg.rep_ms / est_ms);
     const int N = n_trials > 1 ? n_trials : 1;
+
+    /* GPU state snapshot BEFORE measurement — take while GPU is still
+     * warm from the randomize kernels (no idle gap). */
+    GpuSnapshot snap_before = gpu_snapshot();
 
     std::vector<cudaEvent_t> start_events(N), end_events(N);
     for (int i = 0; i < N; i++) {
         cudaEventCreate(&start_events[i]);
         cudaEventCreate(&end_events[i]);
     }
+
+    const int mid = N / 2;
+    GpuSnapshot snap_after = {};
 
     for (int i = 0; i < N; i++) {
         if (l2_flush_buf != nullptr) {
@@ -378,6 +452,15 @@ int main() {
         if (rc != 0) {
             fprintf(stderr, "kernel_run trial %d failed: rc=%d\n", i, rc);
             return 5;
+        }
+
+        /* Sample GPU clock mid-measurement. The CPU enqueues trials
+         * much faster than the GPU executes them. At the midpoint,
+         * sync to let the GPU catch up, then sample NVML.
+         * CUDA events are per-trial so sync doesn't affect latencies. */
+        if (i == mid) {
+            cudaStreamSynchronize(stream);
+            snap_after = gpu_snapshot();
         }
     }
 
@@ -436,7 +519,7 @@ int main() {
     }
 
     /* Print structured JSON */
-    print_json(&cfg, latencies, h_outputs);
+    print_json(&cfg, latencies, h_outputs, snap_warmup, snap_before, snap_after);
 
     /* Cleanup */
     if (l2_flush_buf) cudaFree(l2_flush_buf);

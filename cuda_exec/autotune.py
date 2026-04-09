@@ -256,7 +256,7 @@ def compile_variants(
     output_dir: Path,
     arch: str,
     env_base: dict[str, str],
-    max_workers: int = 8,
+    max_workers: int = 16,
 ) -> list[CompileResult]:
     """Compile all variants in parallel."""
     results = []
@@ -320,7 +320,7 @@ def _quick_bench_variant(
         try:
             result = subprocess.run(
                 [binary_path],
-                capture_output=True, text=True, timeout=60, env=env,
+                capture_output=True, text=True, timeout=120, env=env,
             )
             if result.returncode != 0:
                 results[config_slug] = None
@@ -355,7 +355,8 @@ def bench_variants(
     results = []
     ok_variants = [r for r in compile_results if r.ok]
 
-    for cr in ok_variants:
+    for idx, cr in enumerate(ok_variants):
+        logger.info("  bench %d/%d: %s", idx + 1, len(ok_variants), cr.tag)
         latencies = _quick_bench_variant(
             cr.binary_path, configs, env_base,
             num_warmups=num_warmups, num_trials=num_trials,
@@ -427,7 +428,7 @@ def run_autotune(
     arch: str,
     env_base: dict[str, str],
     *,
-    max_compile_workers: int = 8,
+    max_compile_workers: int = 16,
     bench_warmups: int = 2,
     bench_trials: int = 3,
     bench_configs: list[str] | None = None,

@@ -715,6 +715,19 @@ class AgentRunner:
                         if self._storage:
                             self._storage.write_heartbeat(self._last_stream_event_time)
 
+                        # Check monitor flags — handle outside anyio cancel scope
+                        if self._monitor and self._monitor._pending_terminate:
+                            self._monitor._pending_terminate = False
+                            result.stop_reason = "terminate"
+                            result.result_text = "Terminated by monitor (hard_limit)"
+                            stop_event = StopEvent(reason="terminate", result_text="hard_limit")
+                            result.log.append(stop_event)
+                            await self.handler.on_stop(stop_event)
+                            break
+                        if self._monitor and self._monitor._pending_interrupt:
+                            self._monitor._pending_interrupt = False
+                            await self._client.interrupt()
+
                 finally:
                     await monitor.stop()
                     self._monitor = None

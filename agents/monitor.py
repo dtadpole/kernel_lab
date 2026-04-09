@@ -38,6 +38,8 @@ class AgentMonitor:
         self._running = False
         self._task: asyncio.Task | None = None
         self._pending_inject: str | None = None
+        self._pending_interrupt: bool = False
+        self._pending_terminate: bool = False
         self._last_progress_check: float = 0.0  # elapsed time at last progress check
 
     async def start(self) -> None:
@@ -85,23 +87,23 @@ class AgentMonitor:
             return
 
         elif action == "terminate":
-            # Hard kill — terminate the Solver process, Supervisor will restart
+            # Set flag — main loop will terminate. Do NOT call runner.terminate()
+            # directly because it triggers anyio cancel scope propagation.
             event = TextOutputEvent(
                 text=f"[monitor] TERMINATE — {alert.alert_type}: {alert.details}"
             )
             self.log.append(event)
-            if self.runner:
-                await self.runner.terminate()
+            self._pending_terminate = True
             self._running = False
 
         elif action == "interrupt":
-            # Soft interrupt — ask Solver to stop gracefully
+            # Set flag — main loop will interrupt. Do NOT call runner.interrupt()
+            # directly for the same cancel scope reason.
             event = TextOutputEvent(
                 text=f"[monitor] INTERRUPT — {alert.alert_type}: {alert.details}"
             )
             self.log.append(event)
-            if self.runner:
-                await self.runner.interrupt()
+            self._pending_interrupt = True
             self._running = False
 
         elif action.startswith("inject:"):

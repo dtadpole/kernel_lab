@@ -6,6 +6,7 @@
  *
  * Uses cublasLtMatmulAlgoGetHeuristic to get top 20 algorithm candidates,
  * benchmarks each on first call per matrix size, caches the fastest.
+ * Descriptors are cached per size to avoid per-call API overhead.
  *
  * Harness contract:
  *   inputs[0]  = A (M×K BF16)
@@ -56,12 +57,16 @@ static cublasLtHandle_t get_lt_handle() {
     return g_lt_handle;
 }
 
-/* Per-size cached best algorithm */
-struct CachedAlgo {
+/* Per-size cached state: algorithm + descriptors */
+struct CachedState {
     cublasLtMatmulAlgo_t algo;
     size_t workspace_size;
+    cublasLtMatmulDesc_t op_desc;
+    cublasLtMatrixLayout_t layout_a;
+    cublasLtMatrixLayout_t layout_b;
+    cublasLtMatrixLayout_t layout_c;
 };
-static std::map<int, CachedAlgo> g_best_algo;
+static std::map<int, CachedState> g_cache;
 
 /* Workspace for split-K reductions etc. */
 static void *g_workspace = nullptr;
@@ -75,61 +80,60 @@ static void ensure_workspace() {
     }
 }
 
-static CachedAlgo autotune_lt(
+static CachedState create_and_autotune(
     cublasLtHandle_t handle, cudaStream_t stream,
     int M, int N, int K,
     __nv_bfloat16 *A, __nv_bfloat16 *B, __nv_bfloat16 *C)
 {
     ensure_workspace();
 
-    /* Create operation descriptor */
-    cublasLtMatmulDesc_t op_desc;
-    cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    CachedState state;
 
+    /* Create and KEEP descriptors — these are cached for subsequent calls */
+    cublasLtMatmulDescCreate(&state.op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
     cublasOperation_t op_n = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA,
+    cublasLtMatmulDescSetAttribute(state.op_desc, CUBLASLT_MATMUL_DESC_TRANSA,
                                    &op_n, sizeof(op_n));
-    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
+    cublasLtMatmulDescSetAttribute(state.op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
                                    &op_n, sizeof(op_n));
 
-    /* Create layout descriptors.
-     * Row-major C = A @ B  →  col-major C^T = B^T @ A^T
-     * m=N, n=M, k=K, A_cublas=B(lda=N), B_cublas=A(ldb=K), C_cublas=C(ldc=N) */
-    cublasLtMatrixLayout_t layout_a, layout_b, layout_c;
-    cublasLtMatrixLayoutCreate(&layout_a, CUDA_R_16BF, N, K, N);  /* B as A */
-    cublasLtMatrixLayoutCreate(&layout_b, CUDA_R_16BF, K, M, K);  /* A as B */
-    cublasLtMatrixLayoutCreate(&layout_c, CUDA_R_16BF, N, M, N);  /* C */
+    /* Row-major C = A @ B → col-major C^T = B^T @ A^T
+     * m=N, n=M, k=K */
+    cublasLtMatrixLayoutCreate(&state.layout_a, CUDA_R_16BF, N, K, N);
+    cublasLtMatrixLayoutCreate(&state.layout_b, CUDA_R_16BF, K, M, K);
+    cublasLtMatrixLayoutCreate(&state.layout_c, CUDA_R_16BF, N, M, N);
 
-    /* Create preference with workspace limit */
+    /* Get top 20 heuristic candidates */
     cublasLtMatmulPreference_t pref;
     cublasLtMatmulPreferenceCreate(&pref);
     cublasLtMatmulPreferenceSetAttribute(pref,
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
         &g_workspace_size, sizeof(g_workspace_size));
 
-    /* Get top 20 heuristic candidates */
     const int NUM_CANDIDATES = 20;
     cublasLtMatmulHeuristicResult_t results[NUM_CANDIDATES];
     int num_returned = 0;
 
-    cublasLtMatmulAlgoGetHeuristic(handle, op_desc,
-        layout_a, layout_b, layout_c, layout_c,
+    cublasLtMatmulAlgoGetHeuristic(handle, state.op_desc,
+        state.layout_a, state.layout_b, state.layout_c, state.layout_c,
         pref, NUM_CANDIDATES, results, &num_returned);
+
+    cublasLtMatmulPreferenceDestroy(pref);
 
     fprintf(stderr, "cuBLAS-Lt autotune M=%d: %d candidates\n", M, num_returned);
 
     /* Benchmark each candidate */
     float alpha = 1.0f, beta = 0.0f;
-    CachedAlgo best;
-    best.algo = results[0].algo;
-    best.workspace_size = results[0].workspaceSize;
+    state.algo = results[0].algo;
+    state.workspace_size = results[0].workspaceSize;
     float best_time = 1e9f;
+    int best_idx = 0;
 
     cudaEvent_t t_start, t_stop;
     cudaEventCreate(&t_start);
     cudaEventCreate(&t_stop);
 
-    const int NUM_TIMING_RUNS = 3;
+    const int NUM_TIMING_RUNS = 5;
 
     for (int i = 0; i < num_returned; i++) {
         cublasLtMatmulAlgo_t &algo = results[i].algo;
@@ -137,9 +141,9 @@ static CachedAlgo autotune_lt(
         if (ws > g_workspace_size) continue;
 
         /* Warmup */
-        cublasStatus_t st = cublasLtMatmul(handle, op_desc,
-            &alpha, B, layout_a, A, layout_b,
-            &beta, C, layout_c, C, layout_c,
+        cublasStatus_t st = cublasLtMatmul(handle, state.op_desc,
+            &alpha, B, state.layout_a, A, state.layout_b,
+            &beta, C, state.layout_c, C, state.layout_c,
             &algo, g_workspace, ws, stream);
         if (st != CUBLAS_STATUS_SUCCESS) continue;
         cudaStreamSynchronize(stream);
@@ -147,9 +151,9 @@ static CachedAlgo autotune_lt(
         /* Time it */
         cudaEventRecord(t_start, stream);
         for (int r = 0; r < NUM_TIMING_RUNS; r++) {
-            cublasLtMatmul(handle, op_desc,
-                &alpha, B, layout_a, A, layout_b,
-                &beta, C, layout_c, C, layout_c,
+            cublasLtMatmul(handle, state.op_desc,
+                &alpha, B, state.layout_a, A, state.layout_b,
+                &beta, C, state.layout_c, C, state.layout_c,
                 &algo, g_workspace, ws, stream);
         }
         cudaEventRecord(t_stop, stream);
@@ -161,24 +165,19 @@ static CachedAlgo autotune_lt(
 
         if (ms < best_time) {
             best_time = ms;
-            best.algo = algo;
-            best.workspace_size = ws;
+            best_idx = i;
+            state.algo = algo;
+            state.workspace_size = ws;
         }
     }
 
     cudaEventDestroy(t_start);
     cudaEventDestroy(t_stop);
 
-    cublasLtMatmulPreferenceDestroy(pref);
-    cublasLtMatrixLayoutDestroy(layout_a);
-    cublasLtMatrixLayoutDestroy(layout_b);
-    cublasLtMatrixLayoutDestroy(layout_c);
-    cublasLtMatmulDescDestroy(op_desc);
+    fprintf(stderr, "cuBLAS-Lt autotune M=%d: best=candidate #%d (%.4f ms)\n",
+            M, best_idx, best_time);
 
-    fprintf(stderr, "cuBLAS-Lt autotune M=%d: best=candidate %d (%.4f ms)\n",
-            M, 0, best_time);
-
-    return best;
+    return state;
 }
 
 /* ── kernel_run — harness interface ───────────────────────────────── */
@@ -223,39 +222,20 @@ extern "C" int kernel_run(
     if (!handle) return -3;
     ensure_workspace();
 
-    /* Autotune on first call per size */
-    if (g_best_algo.find(M) == g_best_algo.end()) {
-        g_best_algo[M] = autotune_lt(handle, stream, M, N, K, A, B, C);
+    /* Autotune + cache descriptors on first call per size */
+    if (g_cache.find(M) == g_cache.end()) {
+        g_cache[M] = create_and_autotune(handle, stream, M, N, K, A, B, C);
     }
 
-    CachedAlgo &cached = g_best_algo[M];
-
-    /* Create descriptors for the actual call */
-    cublasLtMatmulDesc_t op_desc;
-    cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-
-    cublasOperation_t op_n = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA,
-                                   &op_n, sizeof(op_n));
-    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
-                                   &op_n, sizeof(op_n));
-
-    cublasLtMatrixLayout_t layout_a, layout_b, layout_c;
-    cublasLtMatrixLayoutCreate(&layout_a, CUDA_R_16BF, N, K, N);
-    cublasLtMatrixLayoutCreate(&layout_b, CUDA_R_16BF, K, M, K);
-    cublasLtMatrixLayoutCreate(&layout_c, CUDA_R_16BF, N, M, N);
+    CachedState &s = g_cache[M];
 
     float alpha = 1.0f, beta = 0.0f;
 
-    cublasStatus_t st = cublasLtMatmul(handle, op_desc,
-        &alpha, B, layout_a, A, layout_b,
-        &beta, C, layout_c, C, layout_c,
-        &cached.algo, g_workspace, cached.workspace_size, stream);
-
-    cublasLtMatrixLayoutDestroy(layout_a);
-    cublasLtMatrixLayoutDestroy(layout_b);
-    cublasLtMatrixLayoutDestroy(layout_c);
-    cublasLtMatmulDescDestroy(op_desc);
+    /* Single cublasLtMatmul call — no descriptor creation overhead */
+    cublasStatus_t st = cublasLtMatmul(handle, s.op_desc,
+        &alpha, B, s.layout_a, A, s.layout_b,
+        &beta, C, s.layout_c, C, s.layout_c,
+        &s.algo, g_workspace, s.workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "cublasLtMatmul failed: %d\n", (int)st);

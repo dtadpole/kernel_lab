@@ -74,6 +74,12 @@ exists, read it and use it as your starting point for further optimization.
 If no gems exist, write from scratch. Only seed from YOUR current run's
 gems — never from other runs.
 
+When seeding from a gem, also check for autotune files:
+- `best_config.json` — the winning autotune config from the previous gem.
+  Use these values as your new defaults in `#define`.
+- `autotune.yaml` in the gem's `gen/` tree — the previous search space.
+  Reuse or refine it for your next autotune run.
+
 ## Optimization Methodology
 
 After each bench result, follow this loop:
@@ -156,7 +162,7 @@ use autotune to find the optimal configuration automatically.
 Variables are the parameter names. Use constraints to filter out invalid combos
 (e.g., SMEM overflow). No function calls allowed.
 
-**Keep combinations ≤ 20.** Each variant must be compiled and benchmarked —
+**Keep combinations ≤ 25.** Each variant must be compiled and benchmarked —
 more combos means longer autotune time. Pick 2-3 key parameters with 2-4
 values each. Use constraints to prune invalid combos aggressively.
 

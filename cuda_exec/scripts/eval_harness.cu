@@ -52,8 +52,8 @@ struct HarnessConfig {
     int  rank;
     char shape_kind[64];
     char shape_json[1024];
-    int  num_warmups;
-    int  num_trials;
+    float warmup_ms;    /* target warmup time in ms (time-based) */
+    float rep_ms;       /* target measurement time in ms (time-based) */
 };
 
 /* ------------------------------------------------------------------ */
@@ -67,6 +67,11 @@ static const char* env_or(const char* name, const char* fallback) {
 static int env_int(const char* name, int fallback) {
     const char* v = getenv(name);
     return v ? atoi(v) : fallback;
+}
+
+static float env_float(const char* name, float fallback) {
+    const char* v = getenv(name);
+    return v ? static_cast<float>(atof(v)) : fallback;
 }
 
 /* ------------------------------------------------------------------ */
@@ -99,8 +104,8 @@ static void parse_config(HarnessConfig* cfg) {
                    env_or("CUDA_EXEC_EXTRA_SHAPE", "[1048576]")),
             sizeof(cfg->shape_json) - 1);
 
-    cfg->num_warmups = env_int("CUDA_EXEC_NUM_WARMUPS", 5);
-    cfg->num_trials  = env_int("CUDA_EXEC_NUM_TRIALS", 10);
+    cfg->warmup_ms = env_float("CUDA_EXEC_WARMUP_MS", 25.0f);
+    cfg->rep_ms    = env_float("CUDA_EXEC_REP_MS", 100.0f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -283,8 +288,46 @@ int main() {
         cudaMalloc(&l2_flush_buf, l2_size);
     }
 
-    /* Warmup */
-    for (int i = 0; i < cfg.num_warmups; i++) {
+    /* ── Estimate single-run time ──────────────────────────────────── */
+    /* Run once, then 5 iterations with L2 flush to estimate kernel time. */
+    {
+        int rc = kernel_run(d_inputs.data(), num_inputs,
+                            d_outputs.data(), num_outputs,
+                            cfg.input_size, stream);
+        cudaStreamSynchronize(stream);
+        if (rc != 0) {
+            fprintf(stderr, "kernel_run initial call failed: rc=%d\n", rc);
+            return 4;
+        }
+    }
+
+    cudaEvent_t est_start, est_end;
+    cudaEventCreate(&est_start);
+    cudaEventCreate(&est_end);
+    cudaEventRecord(est_start, stream);
+    for (int i = 0; i < 5; i++) {
+        if (l2_flush_buf != nullptr)
+            cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
+        kernel_run(d_inputs.data(), num_inputs,
+                   d_outputs.data(), num_outputs,
+                   cfg.input_size, stream);
+    }
+    cudaEventRecord(est_end, stream);
+    cudaDeviceSynchronize();
+
+    float est_total_ms = 0.0f;
+    cudaEventElapsedTime(&est_total_ms, est_start, est_end);
+    float est_ms = est_total_ms / 5.0f;
+    if (est_ms <= 0.0f) est_ms = 0.001f;
+    cudaEventDestroy(est_start);
+    cudaEventDestroy(est_end);
+
+    /* ── Time-based warmup (default 25 ms) ──────────────────────── */
+    const int n_warmup = (int)(cfg.warmup_ms / est_ms);
+    const int actual_warmup = n_warmup > 1 ? n_warmup : 1;
+    for (int i = 0; i < actual_warmup; i++) {
+        if (l2_flush_buf != nullptr)
+            cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,
                             cfg.input_size, stream);
@@ -305,11 +348,11 @@ int main() {
     }
     cudaStreamSynchronize(stream);
 
-    /* Timed trials — pipelined measurement.
-     * L2 flush + kernel_run enqueued back-to-back with NO sync between
-     * iterations.  The GPU stays busy with the L2 flush while the CPU
-     * prepares the next kernel launch, hiding CPU submission overhead. */
-    const int N = cfg.num_trials;
+    /* ── Time-based measurement (default 100 ms) ────────────────── */
+    /* At least 10 trials for statistical robustness. */
+    const int n_trials = (int)(cfg.rep_ms / est_ms);
+    const int N = n_trials > 10 ? n_trials : 10;
+
     std::vector<cudaEvent_t> start_events(N), end_events(N);
     for (int i = 0; i < N; i++) {
         cudaEventCreate(&start_events[i]);

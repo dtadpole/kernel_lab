@@ -83,10 +83,12 @@ def _config_from_env() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class Model(nn.Module):
-    """PyTorch BF16 GEMM reference (dispatches to cuBLAS internally)."""
+    """PyTorch BF16 GEMM reference (dispatches to cuBLAS-Lt internally)."""
 
     def __init__(self):
         super().__init__()
+        # Use cublasLt backend for better algorithm selection
+        torch.backends.cuda.preferred_blas_library('cublaslt')
 
     def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
         if A.ndim != 2 or B.ndim != 2:

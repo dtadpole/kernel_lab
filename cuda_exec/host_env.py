@@ -148,7 +148,7 @@ def resolve_host_env() -> Dict[str, str]:
         host_env = entry.get("env", {})
         include_dirs: list[str] = []
         lib_dirs: list[str] = []
-        libs: list[str] = ["cuda", "cublas", "cublasLt"]  # always link libcuda + libcublas + libcublasLt
+        libs: list[str] = ["cuda", "cublas", "cublasLt", "nvidia-ml"]  # always link libcuda + libcublas + libcublasLt + libnvidia-ml (NVML)
 
         def _expand(path: str) -> str:
             """Expand @venv and @uv_cache placeholders."""

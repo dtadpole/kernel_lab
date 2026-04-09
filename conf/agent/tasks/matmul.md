@@ -9,6 +9,11 @@ IMPORTANT: Write raw CUDA/PTX code only. Do NOT use CUTLASS, cuDNN, cuBLAS,
 or any high-level GPU library. Implement WGMMA, TMA, mbarrier, and all
 optimization logic yourself.
 
-Start by writing a plan (architecture, tile sizes, scheduling strategy)
-BEFORE writing kernel code. Then implement step by step — compile after
-each change.
+A high-quality reference implementation is available at:
+  ~/kernel_lab_kb/runs/<run_tag>/pick/sm90/matmul/cuda/cuda.cu
+Read this code first — it represents the current peak performance.
+Study its architecture (tile sizes, warp specialization, TMA, pipeline
+strategy) and use it as a starting point for your optimization.
+
+Start by reading the pick code, then write a plan for improvements.
+Implement step by step — compile after each change.

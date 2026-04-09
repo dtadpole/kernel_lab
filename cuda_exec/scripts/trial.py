@@ -119,24 +119,20 @@ def _run_cu_impl(
 # Correctness comparison
 # ---------------------------------------------------------------------------
 
-def _harness_fill_random_bf16(count: int, seed: int) -> torch.Tensor:
-    """Reproduce eval_harness.cu fill_random_bf16 PRNG in Python.
+def _harness_fill_random_bf16(count: int, seed: int, device: str = "cuda") -> torch.Tensor:
+    """Reproduce eval_harness.cu fill_random_bf16 PRNG on GPU via torch.
 
-    Must match the C code exactly:
-        h = idx ^ seed; h = (h^61)^(h>>16); h += h<<3;
-        h ^= h>>4; h *= 0x27d4eb2d; h ^= h>>15;
-        val = (float)(h & 0xFFFF) / 65536.0f - 0.5f;
+    Bit-identical to the C kernel. Uses int64 to emulate uint32 arithmetic.
+    GPU: ~0.01s for 67M elements (vs 1.6s on CPU with numpy).
     """
-    import numpy as np
-    idx = np.arange(count, dtype=np.uint32)
-    h = idx ^ np.uint32(seed)
-    h = (h ^ np.uint32(61)) ^ (h >> np.uint32(16))
-    h = (h + (h << np.uint32(3))) & np.uint32(0xFFFFFFFF)
-    h = h ^ (h >> np.uint32(4))
-    h = (h * np.uint32(0x27d4eb2d)) & np.uint32(0xFFFFFFFF)
-    h = h ^ (h >> np.uint32(15))
-    f = (h & np.uint32(0xFFFF)).astype(np.float32) / 65536.0 - 0.5
-    return torch.from_numpy(f).to(torch.bfloat16)
+    idx = torch.arange(count, dtype=torch.int64, device=device)
+    h = idx ^ seed
+    h = (h ^ 61) ^ (h >> 16)
+    h = (h + (h << 3)) & 0xFFFFFFFF
+    h = h ^ (h >> 4)
+    h = (h * 0x27D4EB2D) & 0xFFFFFFFF
+    h = h ^ (h >> 15)
+    return ((h & 0xFFFF).float() / 65536.0 - 0.5).to(torch.bfloat16)
 
 
 def _check_correctness(golden_tensor, impl_tensor, atol=1e-2, rtol=1e-2) -> dict:

@@ -278,6 +278,10 @@ class ImplTrialResult(BaseModel):
         default=None,
         description="Correctness vs golden (first ref-*). None for the golden impl itself.",
     )
+    gpu_state: Dict[str, Any] | None = Field(
+        default=None,
+        description="GPU clock/temp snapshot from eval_harness (sm_clock_mhz, temp_c, throttled).",
+    )
 
 
 class TrialConfigOutput(BaseModel):

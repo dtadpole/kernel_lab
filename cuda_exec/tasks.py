@@ -1270,6 +1270,7 @@ def trial_endpoint(request: TrialRequest) -> TrialResponse:
                 slug: ImplTrialResult(
                     performance=impl_data.get("performance", {}),
                     correctness=impl_data.get("correctness"),
+                    gpu_state=impl_data.get("gpu_state"),
                 )
                 for slug, impl_data in item.get("impls", {}).items()
             },

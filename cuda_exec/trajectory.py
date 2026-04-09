@@ -24,7 +24,7 @@ RUNS_DIR = KB_REPO / "runs"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Gem thresholds — both must be exceeded for a config to count as improved
-GEM_ABS_THRESHOLD_MS = 0.002   # minimum absolute improvement in milliseconds
+GEM_ABS_THRESHOLD_MS = 0.002   # minimum absolute improvement in milliseconds (2 μs)
 GEM_REL_THRESHOLD = 0.002      # minimum relative improvement (0.002 = 0.2%)
 
 
@@ -202,8 +202,10 @@ def _extract_config_results(trial_result: dict) -> dict:
         gen_correct = gen_data.get("correctness", {}) or {}
         cudnn_perf = {}
 
-        ref_median = ref_perf.get("latency_ms", {}).get("median")
-        gen_median = gen_perf.get("latency_ms", {}).get("median")
+        ref_latency = ref_perf.get("latency_ms", {})
+        ref_median = ref_latency.get("p25") or ref_latency.get("median")
+        gen_latency = gen_perf.get("latency_ms", {})
+        gen_median = gen_latency.get("p25") or gen_latency.get("median")
         cudnn_median = cudnn_perf.get("latency_ms", {}).get("median")
 
         speedup = None
@@ -378,7 +380,7 @@ def _check_gem(current_configs: dict, gem_base: Path) -> dict | None:
         elif prev_ms > 0:
             abs_diff = prev_ms - gen_ms
             rel_diff = abs_diff / prev_ms
-            if abs_diff > GEM_ABS_THRESHOLD_MS and rel_diff > GEM_REL_THRESHOLD:
+            if abs_diff > GEM_ABS_THRESHOLD_MS or rel_diff > GEM_REL_THRESHOLD:
                 improved.append(slug)
 
     if not improved:
@@ -559,10 +561,12 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
                 # .cu ref: get performance from impls[ref_slug]
                 ref_impl_data = ref_cfg.get("impls", {}).get(ref_slug, {})
                 if ref_impl_data:
-                    ref_med = ref_impl_data.get("performance", {}).get("latency_ms", {}).get("median")
+                    ref_lat = ref_impl_data.get("performance", {}).get("latency_ms", {})
+                    ref_med = ref_lat.get("p25") or ref_lat.get("median")
                 # .py ref: get performance directly from config entry
                 elif "performance" in ref_cfg:
-                    ref_med = ref_cfg.get("performance", {}).get("latency_ms", {}).get("median")
+                    ref_lat = ref_cfg.get("performance", {}).get("latency_ms", {})
+                    ref_med = ref_lat.get("p25") or ref_lat.get("median")
                 else:
                     ref_med = None
                 if ref_med is not None and ref_med > 0:

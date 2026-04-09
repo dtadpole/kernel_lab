@@ -107,6 +107,7 @@ def _run_cu_impl(
 
     return {
         "performance": payload.get("performance", {}),
+        "gpu_state": payload.get("gpu_state"),
         "output_tensor": output_tensor,
         "returncode": completed.returncode,
         "stdout": completed.stdout,
@@ -411,6 +412,8 @@ def main() -> int:
                 entry["correctness"] = r["correctness"]
             if "error" in r:
                 entry["error"] = r["error"]
+            if r.get("gpu_state") is not None:
+                entry["gpu_state"] = r["gpu_state"]
             output_impls[slug] = entry
 
         result = {

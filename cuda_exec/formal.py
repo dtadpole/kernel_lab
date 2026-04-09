@@ -408,6 +408,26 @@ def format_results_table(bench_result: dict) -> str:
         elif passed_configs:
             lines.append(f"✅  {slug}: correctness PASSED on all {len(passed_configs)} configs")
 
+    # GPU clock lock status
+    clock_lock = bench_result.get("gpu_clock_lock", {})
+    if clock_lock:
+        status = clock_lock.get("status", "unknown")
+        lines.append("")
+        if status == "ok":
+            sm = clock_lock.get("locked_sm_mhz", "?")
+            mem = clock_lock.get("locked_mem_mhz", "?")
+            lines.append(f"GPU clocks locked: SM {sm} MHz, Mem {mem} MHz")
+        elif status == "warning":
+            sm = clock_lock.get("locked_sm_mhz", "?")
+            lines.append(f"GPU clocks locked: SM {sm} MHz — WARNING: throttling detected")
+            for w in clock_lock.get("warnings", []):
+                lines.append(f"  - {w}")
+        elif status == "error":
+            err = clock_lock.get("error", "unknown")
+            lines.append(f"GPU clock lock FAILED: {err}")
+        elif status == "skipped":
+            lines.append("GPU clock lock: skipped (disabled)")
+
     return "\n".join(lines)
 
 
@@ -421,6 +441,7 @@ def formal_benchmark(
     kb_repo: str | None = None,
     runtime_root: str | None = None,
     data_root: str | None = None,
+    gpu_lockdown: bool = True,
 ) -> dict:
     """Atomic compile + trial ALL configs for specified implementations.
 
@@ -560,188 +581,223 @@ print(json.dumps({{"ok": True, "configs": results}}))
     py_impls = [i for i in all_impls if i["file_type"] == "py"]
     cu_impls = [i for i in all_impls if i["file_type"] == "cu"]
 
-    # ================================================================
-    # Phase A: Benchmark .py impls (unchanged — subprocess per impl)
-    # ================================================================
-    for impl in py_impls:
-        logger.info("[%s] measure_py start (%d configs)", impl["slug"], len(configs))
-        impl_start = time.time()
-        r = _run_py_impl(impl)
-        if r["ok"]:
-            for cs, cr in r["configs"].items():
-                cr.pop("output_tensor", None)
-            results[impl["slug"]] = {
-                "impl": impl["slug"],
-                "compile_ok": None, "trial_ok": True,
-                "compile_result": None,
-                "trial_result": {"all_ok": True, "configs": r["configs"]},
-            }
-        else:
-            results[impl["slug"]] = {
-                "impl": impl["slug"], "compile_ok": None, "trial_ok": False,
-                "error": r.get("error", ""),
-            }
-        logger.info("[%s] measure_py done (%.1fs)", impl["slug"], time.time() - impl_start)
+    # --- GPU Clock Lock ---
+    from cuda_exec.gpu_clocks import gpu_clock_context
+    gpu_lockdown_enabled = gpu_lockdown
+    clock_lock_ctx = gpu_clock_context(enabled=gpu_lockdown_enabled)
+    clock_lock_info = clock_lock_ctx.__enter__()
 
-    # ================================================================
-    # Phase B: Compile ALL .cu impls, collect binary paths
-    # ================================================================
-    compiled_binaries: Dict[str, str] = {}     # slug → binary path
-    compile_results: Dict[str, dict] = {}      # slug → compile result
-    compile_metadata: Dict[str, object] = {}   # slug → Metadata
-    autotune_results: Dict[str, object] = {}   # slug → autotune result
+    try:
 
-    for cu_impl in cu_impls:
-        unique_rev = int(time.time()) % 100000
-        meta = Metadata(
-            run_tag=run_tag,
-            version="v1",
-            direction_id=0,
-            direction_slug=f"{kernel}-{cu_impl['slug']}",
-            revision=unique_rev,
-        )
-        compile_metadata[cu_impl["slug"]] = meta
-
-        # --- Autotune (gen impls only) ---
-        autotune_defines = ""
-        if cu_impl["source"] == "gen":
-            autotune_yaml = Path(cu_impl["entry_point"]).parent / "autotune.yaml"
-            if autotune_yaml.exists():
-                try:
-                    from cuda_exec.autotune import run_autotune, format_autotune_report
-                    from cuda_exec.host_env import resolve_compile_arch, resolve_host_env
-
-                    compile_arch = resolve_compile_arch()
-                    autotune_env = os.environ.copy()
-                    autotune_env.update(resolve_host_env())
-                    if "CUDA_VISIBLE_DEVICES" in os.environ:
-                        autotune_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
-
-                    logger.info("[%s] autotune start", cu_impl["slug"])
-                    at_start = time.time()
-                    at_result = run_autotune(
-                        cu_path=Path(cu_impl["entry_point"]),
-                        autotune_yaml=autotune_yaml,
-                        configs=configs,
-                        arch=compile_arch,
-                        env_base=autotune_env,
-                    )
-                    autotune_defines = at_result.defines_flags
-                    at_report = format_autotune_report(at_result)
-                    logger.info("[%s] autotune done (%.1fs)\n%s",
-                                cu_impl["slug"], time.time() - at_start, at_report)
-                    print(at_report, file=sys.stderr)
-                    autotune_results[cu_impl["slug"]] = at_result
-                except Exception as exc:
-                    logger.warning("[%s] autotune failed: %s — compiling with defaults",
-                                   cu_impl["slug"], exc)
-
-        # --- Compile: only stage THIS impl's .cu + .py impls for trial ---
-        compile_impls = {}
-        compile_impls[cu_impl["slug"]] = dict(cu_impl["files"])
-        for py_impl in py_impls:
-            compile_impls[py_impl["slug"]] = dict(py_impl["files"])
-
-        old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")
-        if autotune_defines:
-            existing = old_extra_flags or ""
-            os.environ["NVCC_EXTRA_FLAGS"] = f"{existing} {autotune_defines}".strip()
-
-        logger.info("[%s] compile start%s", cu_impl["slug"],
-                    f" (autotune: {autotune_defines})" if autotune_defines else "")
-        compile_start = time.time()
-        compile_req = CompileRequest(
-            metadata=meta,
-            timeout_seconds=timeout_seconds,
-            impls=compile_impls,
-        )
-        compile_resp = compile_endpoint(compile_req)
-        cr = compile_resp.model_dump(mode="json")
-        compile_results[cu_impl["slug"]] = cr
-        logger.info("[%s] compile done (%.1fs)", cu_impl["slug"], time.time() - compile_start)
-
-        if autotune_defines:
-            if old_extra_flags is not None:
-                os.environ["NVCC_EXTRA_FLAGS"] = old_extra_flags
-            else:
-                os.environ.pop("NVCC_EXTRA_FLAGS", None)
-
-        if not compile_resp.all_ok:
-            results[cu_impl["slug"]] = {
-                "impl": cu_impl["slug"],
-                "compile_ok": False, "trial_ok": False,
-                "compile_result": cr, "trial_result": None,
-            }
-            continue
-
-        # Find compiled binary path
-        try:
-            workspace = resolve_workspace_bundle(**meta.model_dump())
-            target_path, _ = _primary_artifact_from_manifest(workspace)
-            compiled_binaries[cu_impl["slug"]] = str(target_path)
-            logger.info("[%s] binary: %s", cu_impl["slug"], target_path)
-        except Exception as exc:
-            logger.warning("[%s] failed to resolve binary: %s", cu_impl["slug"], exc)
-            results[cu_impl["slug"]] = {
-                "impl": cu_impl["slug"],
-                "compile_ok": True, "trial_ok": False,
-                "compile_result": cr, "trial_result": None,
-                "error": f"binary resolution failed: {exc}",
-            }
-
-    # ================================================================
-    # Phase C: Trial per-config — ONE trial.py call per config,
-    #          all impls run once via --binary-map
-    # ================================================================
-    if compiled_binaries:
-        # Use the first successfully compiled impl's workspace for trial
-        first_slug = next(iter(compiled_binaries))
-        trial_meta = compile_metadata[first_slug]
-
-        # Build binary-map string: slug=/path/to/bin,...
-        binary_map_str = ",".join(f"{s}={p}" for s, p in compiled_binaries.items())
-
-        logger.info("Trial phase: %d configs × %d cu_impls + %d py_impls (single pass)",
-                     len(configs), len(compiled_binaries), len(py_impls))
-
-        trial_start = time.time()
-        trial_req = TrialRequest(
-            metadata=trial_meta,
-            timeout_seconds=timeout_seconds,
-            configs=configs,
-            binary_map=binary_map_str,
-        )
-        trial_resp = trial_endpoint(trial_req)
-        trial_result = trial_resp.model_dump(mode="json")
-        logger.info("Trial phase done (%.1fs)", time.time() - trial_start)
-
-        # Distribute trial results to each impl
-        for cu_impl in cu_impls:
-            slug = cu_impl["slug"]
-            if slug not in compiled_binaries:
-                continue  # compile failed, already recorded
-            impl_result = {
-                "impl": slug,
-                "compile_ok": compile_results.get(slug, {}).get("all_ok", False),
-                "trial_ok": trial_resp.all_ok,
-                "compile_result": compile_results.get(slug),
-                "trial_result": trial_result,
-            }
-            at = autotune_results.get(slug)
-            if at is not None:
-                impl_result["autotune"] = {
-                    "best_combo": at.best_combo,
-                    "best_tag": at.best_tag,
-                    "best_median_ms": at.best_median_ms,
-                    "defines_flags": at.defines_flags,
-                    "total_combos": at.total_combos,
-                    "valid_combos": at.valid_combos,
-                    "compiled_ok": at.compiled_ok,
-                    "benchmarked_ok": at.benchmarked_ok,
-                    "duration_s": round(at.duration_s, 1),
-                    "top_results": at.all_results[:5],
+        # ================================================================
+        # Phase A: Benchmark .py impls (unchanged — subprocess per impl)
+        # ================================================================
+        for impl in py_impls:
+            logger.info("[%s] measure_py start (%d configs)", impl["slug"], len(configs))
+            impl_start = time.time()
+            r = _run_py_impl(impl)
+            if r["ok"]:
+                for cs, cr in r["configs"].items():
+                    cr.pop("output_tensor", None)
+                results[impl["slug"]] = {
+                    "impl": impl["slug"],
+                    "compile_ok": None, "trial_ok": True,
+                    "compile_result": None,
+                    "trial_result": {"all_ok": True, "configs": r["configs"]},
                 }
-            results[slug] = impl_result
+            else:
+                results[impl["slug"]] = {
+                    "impl": impl["slug"], "compile_ok": None, "trial_ok": False,
+                    "error": r.get("error", ""),
+                }
+            logger.info("[%s] measure_py done (%.1fs)", impl["slug"], time.time() - impl_start)
+
+        # ================================================================
+        # Phase B: Compile ALL .cu impls, collect binary paths
+        # ================================================================
+        compiled_binaries: Dict[str, str] = {}     # slug → binary path
+        compile_results: Dict[str, dict] = {}      # slug → compile result
+        compile_metadata: Dict[str, object] = {}   # slug → Metadata
+        autotune_results: Dict[str, object] = {}   # slug → autotune result
+
+        for cu_impl in cu_impls:
+            unique_rev = int(time.time()) % 100000
+            meta = Metadata(
+                run_tag=run_tag,
+                version="v1",
+                direction_id=0,
+                direction_slug=f"{kernel}-{cu_impl['slug']}",
+                revision=unique_rev,
+            )
+            compile_metadata[cu_impl["slug"]] = meta
+
+            # --- Autotune (gen impls only) ---
+            autotune_defines = ""
+            if cu_impl["source"] == "gen":
+                autotune_yaml = Path(cu_impl["entry_point"]).parent / "autotune.yaml"
+                if autotune_yaml.exists():
+                    try:
+                        from cuda_exec.autotune import run_autotune, format_autotune_report
+                        from cuda_exec.host_env import resolve_compile_arch, resolve_host_env
+
+                        compile_arch = resolve_compile_arch()
+                        autotune_env = os.environ.copy()
+                        autotune_env.update(resolve_host_env())
+                        if "CUDA_VISIBLE_DEVICES" in os.environ:
+                            autotune_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+
+                        logger.info("[%s] autotune start", cu_impl["slug"])
+                        at_start = time.time()
+                        at_result = run_autotune(
+                            cu_path=Path(cu_impl["entry_point"]),
+                            autotune_yaml=autotune_yaml,
+                            configs=configs,
+                            arch=compile_arch,
+                            env_base=autotune_env,
+                        )
+                        autotune_defines = at_result.defines_flags
+                        at_report = format_autotune_report(at_result)
+                        logger.info("[%s] autotune done (%.1fs)\n%s",
+                                    cu_impl["slug"], time.time() - at_start, at_report)
+                        print(at_report, file=sys.stderr)
+                        autotune_results[cu_impl["slug"]] = at_result
+                    except Exception as exc:
+                        logger.warning("[%s] autotune failed: %s — compiling with defaults",
+                                       cu_impl["slug"], exc)
+
+            # --- Compile: only stage THIS impl's .cu + .py impls for trial ---
+            compile_impls = {}
+            compile_impls[cu_impl["slug"]] = dict(cu_impl["files"])
+            for py_impl in py_impls:
+                compile_impls[py_impl["slug"]] = dict(py_impl["files"])
+
+            old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")
+            if autotune_defines:
+                existing = old_extra_flags or ""
+                os.environ["NVCC_EXTRA_FLAGS"] = f"{existing} {autotune_defines}".strip()
+
+            logger.info("[%s] compile start%s", cu_impl["slug"],
+                        f" (autotune: {autotune_defines})" if autotune_defines else "")
+            compile_start = time.time()
+            compile_req = CompileRequest(
+                metadata=meta,
+                timeout_seconds=timeout_seconds,
+                impls=compile_impls,
+            )
+            compile_resp = compile_endpoint(compile_req)
+            cr = compile_resp.model_dump(mode="json")
+            compile_results[cu_impl["slug"]] = cr
+            logger.info("[%s] compile done (%.1fs)", cu_impl["slug"], time.time() - compile_start)
+
+            if autotune_defines:
+                if old_extra_flags is not None:
+                    os.environ["NVCC_EXTRA_FLAGS"] = old_extra_flags
+                else:
+                    os.environ.pop("NVCC_EXTRA_FLAGS", None)
+
+            if not compile_resp.all_ok:
+                results[cu_impl["slug"]] = {
+                    "impl": cu_impl["slug"],
+                    "compile_ok": False, "trial_ok": False,
+                    "compile_result": cr, "trial_result": None,
+                }
+                continue
+
+            # Find compiled binary path
+            try:
+                workspace = resolve_workspace_bundle(**meta.model_dump())
+                target_path, _ = _primary_artifact_from_manifest(workspace)
+                compiled_binaries[cu_impl["slug"]] = str(target_path)
+                logger.info("[%s] binary: %s", cu_impl["slug"], target_path)
+            except Exception as exc:
+                logger.warning("[%s] failed to resolve binary: %s", cu_impl["slug"], exc)
+                results[cu_impl["slug"]] = {
+                    "impl": cu_impl["slug"],
+                    "compile_ok": True, "trial_ok": False,
+                    "compile_result": cr, "trial_result": None,
+                    "error": f"binary resolution failed: {exc}",
+                }
+
+        # ================================================================
+        # Phase C: Trial per-config — ONE trial.py call per config,
+        #          all impls run once via --binary-map
+        # ================================================================
+        if compiled_binaries:
+            # Use the first successfully compiled impl's workspace for trial
+            first_slug = next(iter(compiled_binaries))
+            trial_meta = compile_metadata[first_slug]
+
+            # Build binary-map string: slug=/path/to/bin,...
+            binary_map_str = ",".join(f"{s}={p}" for s, p in compiled_binaries.items())
+
+            logger.info("Trial phase: %d configs × %d cu_impls + %d py_impls (single pass)",
+                         len(configs), len(compiled_binaries), len(py_impls))
+
+            trial_start = time.time()
+            trial_req = TrialRequest(
+                metadata=trial_meta,
+                timeout_seconds=timeout_seconds,
+                configs=configs,
+                binary_map=binary_map_str,
+            )
+            trial_resp = trial_endpoint(trial_req)
+            trial_result = trial_resp.model_dump(mode="json")
+            logger.info("Trial phase done (%.1fs)", time.time() - trial_start)
+
+            # Distribute trial results to each impl
+            for cu_impl in cu_impls:
+                slug = cu_impl["slug"]
+                if slug not in compiled_binaries:
+                    continue  # compile failed, already recorded
+                impl_result = {
+                    "impl": slug,
+                    "compile_ok": compile_results.get(slug, {}).get("all_ok", False),
+                    "trial_ok": trial_resp.all_ok,
+                    "compile_result": compile_results.get(slug),
+                    "trial_result": trial_result,
+                }
+                at = autotune_results.get(slug)
+                if at is not None:
+                    impl_result["autotune"] = {
+                        "best_combo": at.best_combo,
+                        "best_tag": at.best_tag,
+                        "best_median_ms": at.best_median_ms,
+                        "defines_flags": at.defines_flags,
+                        "total_combos": at.total_combos,
+                        "valid_combos": at.valid_combos,
+                        "compiled_ok": at.compiled_ok,
+                        "benchmarked_ok": at.benchmarked_ok,
+                        "duration_s": round(at.duration_s, 1),
+                        "top_results": at.all_results[:5],
+                    }
+                results[slug] = impl_result
+
+    finally:
+        # --- Unlock GPU clocks ---
+        clock_lock_ctx.__exit__(None, None, None)
+
+    # --- Collect GPU throttle warnings from trial results ---
+    throttle_warnings: List[str] = []
+    for slug, impl_result in results.items():
+        trial = impl_result.get("trial_result")
+        if not trial:
+            continue
+        for config_slug, entry in trial.get("configs", {}).items():
+            for impl_slug, impl_data in entry.get("impls", {}).items():
+                gs = impl_data.get("gpu_state") if isinstance(impl_data, dict) else None
+                if gs and gs.get("throttled"):
+                    before_mhz = gs.get("before", {}).get("sm_clock_mhz", "?")
+                    during_mhz = gs.get("during", {}).get("sm_clock_mhz", "?")
+                    throttle_warnings.append(
+                        f"{config_slug}/{impl_slug}: {before_mhz}->{during_mhz} MHz"
+                    )
+
+    # --- Build gpu_clock_lock status ---
+    gpu_clock_lock = dict(clock_lock_info)
+    if throttle_warnings:
+        gpu_clock_lock["warnings"] = throttle_warnings
+        if gpu_clock_lock.get("status") == "ok":
+            gpu_clock_lock["status"] = "warning"
 
     bench_result = {
         "kernel": kernel,
@@ -752,6 +808,7 @@ print(json.dumps({{"ok": True, "configs": results}}))
         "gens": [r["slug"] for r in gens],
         "source_paths": {r["slug"]: str(Path(r["entry_point"]).resolve()) for r in resolved},
         "results": results,
+        "gpu_clock_lock": gpu_clock_lock,
     }
 
     # --- Phase 4: Restore runtime env + finalize ---
@@ -948,6 +1005,7 @@ def cli_main() -> None:
         kb_repo=bench_cfg.get("kb_repo"),
         runtime_root=bench_cfg.get("runtime_root"),
         data_root=bench_cfg.get("data_root"),
+        gpu_lockdown=bench_cfg.get("gpu_lockdown", True),
     )
 
     if num_runs <= 1:

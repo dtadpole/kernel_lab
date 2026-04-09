@@ -194,7 +194,12 @@ class LatencySummary(BaseModel):
     """Structured latency statistics in milliseconds."""
 
     min: float | None = None
-    median: float | None = None
+    p10: float | None = None
+    p25: float | None = None
+    p50: float | None = None
+    median: float | None = None   # legacy alias for p50
+    p75: float | None = None
+    p90: float | None = None
     max: float | None = None
     mean: float | None = None
     std: float | None = None

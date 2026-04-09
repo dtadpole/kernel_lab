@@ -411,6 +411,7 @@ def measure_reference(
         last_output.detach().cpu().contiguous().numpy().tofile(bin_path)
 
     std_val = statistics.stdev(latencies_ms) if len(latencies_ms) > 1 else 0.0
+    sorted_ms = sorted(latencies_ms)
 
     return {
         "output": [],  # binary file, not JSON (same as eval_harness.cu)
@@ -422,7 +423,11 @@ def measure_reference(
             },
             "latency_ms": {
                 "min": min(latencies_ms),
-                "median": statistics.median(latencies_ms),
+                "p10": sorted_ms[len(sorted_ms) // 10],
+                "p25": sorted_ms[len(sorted_ms) // 4],
+                "p50": statistics.median(latencies_ms),
+                "p75": sorted_ms[len(sorted_ms) * 3 // 4],
+                "p90": sorted_ms[len(sorted_ms) * 9 // 10],
                 "max": max(latencies_ms),
                 "mean": statistics.fmean(latencies_ms),
                 "std": std_val,

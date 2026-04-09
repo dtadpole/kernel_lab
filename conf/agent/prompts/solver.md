@@ -109,6 +109,43 @@ architecture (e.g., switch from 1-WG to warp-specialization).
 Performance numbers are meaningless when correctness is wrong.
 Do NOT request another formal_bench until all configs pass ✓.
 
+## Autotune
+
+When your kernel has tunable tile/pipeline parameters (BM, BN, BK, STAGES, etc.),
+use autotune to find the optimal configuration automatically.
+
+**How to use:**
+1. Wrap tunable parameters with `#ifndef`:
+   ```cuda
+   #ifndef BM
+   #define BM 128
+   #endif
+   #ifndef BN
+   #define BN 128
+   #endif
+   ```
+2. Write `autotune.yaml` in the same directory as your `.cu` file:
+   ```yaml
+   params:
+     BM: [64, 128, 256]
+     BN: [64, 128, 256]
+     BK: [32, 64]
+     STAGES: [2, 3, 4]
+   constraints:
+     - "(BM * BK + BK * BN) * STAGES * 2 <= 227328"
+   ```
+3. `request_formal_bench` will automatically detect `autotune.yaml`, compile
+   all valid parameter combinations in parallel, benchmark each, and use the
+   best config for the formal benchmark.
+
+**Constraint syntax:** Simple arithmetic expressions with `<=`, `>=`, `<`, `>`.
+Variables are the parameter names. Use constraints to filter out invalid combos
+(e.g., SMEM overflow). No function calls allowed.
+
+**When to use:** After your kernel is correct and you want to find the optimal
+tile/pipeline configuration. Do NOT use autotune for initial development — get
+correctness first with hardcoded defaults, then add autotune.yaml for tuning.
+
 ## Formal Benchmark
 
 **request_formal_bench is the only way to get official results.**

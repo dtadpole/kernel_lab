@@ -36,9 +36,8 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
 
 
 def _peak_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
-    if data_root:
-        # Bench snapshots still use data_root/peak/ (copied during snapshot)
-        return data_root / "peak" / arch / kernel
+    # peak/ is always read from the canonical .peak/ directory —
+    # it's static and never copied into snapshots.
     return _PROJECT_ROOT / ".peak" / arch / kernel
 
 

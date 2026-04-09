@@ -471,21 +471,33 @@ class AgentRunner:
     def _is_path_blocked(self, path: str, rule) -> bool:
         """Check if a resolved absolute path is blocked by a rule.
 
-        Returns True if path matches a blocked_path and does NOT match
-        any allowed_path exception.
+        Uses "most specific prefix wins" semantics:
+        - Find the longest matching blocked_path prefix
+        - Find the longest matching allowed_path prefix
+        - The longer (more specific) match determines the result
+        - This allows re-blocking subdirectories within an allowed area
+          (e.g., block peak/ within an allowed run directory)
         """
         import os
         path_dir = path.rstrip("/") + "/"
+
+        best_blocked_len = 0
         for blocked in rule.blocked_paths:
             blocked_resolved = self._resolve_path_pattern(blocked).rstrip("/") + "/"
             if path_dir.startswith(blocked_resolved) or path == blocked_resolved.rstrip("/"):
-                # Check allowed_paths exceptions
-                for allowed in rule.allowed_paths:
-                    allowed_resolved = self._resolve_path_pattern(allowed).rstrip("/") + "/"
-                    if path_dir.startswith(allowed_resolved) or path == allowed_resolved.rstrip("/"):
-                        return False
-                return True
-        return False
+                best_blocked_len = max(best_blocked_len, len(blocked_resolved))
+
+        if best_blocked_len == 0:
+            return False  # Not in any blocked path
+
+        best_allowed_len = 0
+        for allowed in rule.allowed_paths:
+            allowed_resolved = self._resolve_path_pattern(allowed).rstrip("/") + "/"
+            if path_dir.startswith(allowed_resolved) or path == allowed_resolved.rstrip("/"):
+                best_allowed_len = max(best_allowed_len, len(allowed_resolved))
+
+        # Most specific match wins
+        return best_blocked_len > best_allowed_len
 
     @staticmethod
     def _deny(reason: str) -> dict:

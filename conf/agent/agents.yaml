@@ -62,6 +62,7 @@ agents:
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/
+          - ~/kernel_lab_kb/runs/<run_tag>/peak/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
@@ -89,6 +90,7 @@ agents:
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/
+          - ~/kernel_lab_kb/runs/<run_tag>/peak/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
@@ -117,6 +119,7 @@ agents:
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/
+          - ~/kernel_lab_kb/runs/<run_tag>/peak/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/
@@ -139,6 +142,7 @@ agents:
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/
+          - ~/kernel_lab_kb/runs/<run_tag>/peak/
           - ~/.claude/worktrees/
           - ~/.claude/projects/
           - ~/.cuda_exec/

@@ -572,6 +572,42 @@ def formal_benchmark(
         )
 
         if gen["file_type"] == "cu":
+            # --- Autotune: detect autotune.yaml next to .cu source ---
+            autotune_result = None
+            autotune_defines = ""
+            if gen["source"] == "gen":
+                autotune_yaml = Path(gen["entry_point"]).parent / "autotune.yaml"
+                if autotune_yaml.exists():
+                    try:
+                        from cuda_exec.autotune import run_autotune, format_autotune_report
+                        from cuda_exec.host_env import resolve_compile_arch, resolve_host_env
+
+                        compile_arch = resolve_compile_arch()
+                        autotune_env = os.environ.copy()
+                        autotune_env.update(resolve_host_env())
+                        # Use the same GPU as the bench
+                        if "CUDA_VISIBLE_DEVICES" in os.environ:
+                            autotune_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+
+                        logger.info("[%s] autotune start", gen["slug"])
+                        at_start = time.time()
+                        autotune_result = run_autotune(
+                            cu_path=Path(gen["entry_point"]),
+                            autotune_yaml=autotune_yaml,
+                            configs=configs,
+                            arch=compile_arch,
+                            env_base=autotune_env,
+                        )
+                        autotune_defines = autotune_result.defines_flags
+                        at_report = format_autotune_report(autotune_result)
+                        logger.info("[%s] autotune done (%.1fs)\n%s",
+                                    gen["slug"], time.time() - at_start, at_report)
+                        # Print autotune report to stderr for Solver visibility
+                        print(at_report, file=sys.stderr)
+                    except Exception as exc:
+                        logger.warning("[%s] autotune failed: %s — compiling with defaults",
+                                       gen["slug"], exc)
+
             # .cu needs compile — build impl-keyed request
             # Include ALL impls so trial.py can compare against the right golden
             compile_impls = {}
@@ -585,7 +621,14 @@ def formal_benchmark(
             # Include this .cu gen impl
             compile_impls[gen["slug"]] = dict(gen["files"])
 
-            logger.info("[%s] compile start", gen["slug"])
+            # Set autotune defines for this compile
+            old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")
+            if autotune_defines:
+                existing = old_extra_flags or ""
+                os.environ["NVCC_EXTRA_FLAGS"] = f"{existing} {autotune_defines}".strip()
+
+            logger.info("[%s] compile start%s", gen["slug"],
+                        f" (autotune: {autotune_defines})" if autotune_defines else "")
             compile_start = time.time()
             compile_req = CompileRequest(
                 metadata=metadata,
@@ -595,6 +638,13 @@ def formal_benchmark(
             compile_resp = compile_endpoint(compile_req)
             compile_result = compile_resp.model_dump(mode="json")
             logger.info("[%s] compile done (%.1fs)", gen["slug"], time.time() - compile_start)
+
+            # Restore NVCC_EXTRA_FLAGS
+            if autotune_defines:
+                if old_extra_flags is not None:
+                    os.environ["NVCC_EXTRA_FLAGS"] = old_extra_flags
+                else:
+                    os.environ.pop("NVCC_EXTRA_FLAGS", None)
 
             if not compile_resp.all_ok:
                 results[gen["slug"]] = {
@@ -621,13 +671,27 @@ def formal_benchmark(
         trial_result = trial_resp.model_dump(mode="json")
         logger.info("[%s] trial done (%.1fs)", gen["slug"], time.time() - trial_start)
 
-        results[gen["slug"]] = {
+        impl_result = {
             "impl": gen["slug"],
             "compile_ok": compile_result.get("all_ok", False),
             "trial_ok": trial_resp.all_ok,
             "compile_result": compile_result,
             "trial_result": trial_result,
         }
+        if autotune_result is not None:
+            impl_result["autotune"] = {
+                "best_combo": autotune_result.best_combo,
+                "best_tag": autotune_result.best_tag,
+                "best_median_ms": autotune_result.best_median_ms,
+                "defines_flags": autotune_result.defines_flags,
+                "total_combos": autotune_result.total_combos,
+                "valid_combos": autotune_result.valid_combos,
+                "compiled_ok": autotune_result.compiled_ok,
+                "benchmarked_ok": autotune_result.benchmarked_ok,
+                "duration_s": round(autotune_result.duration_s, 1),
+                "top_results": autotune_result.all_results[:5],
+            }
+        results[gen["slug"]] = impl_result
 
     bench_result = {
         "kernel": kernel,

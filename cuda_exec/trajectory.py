@@ -463,11 +463,9 @@ def prepare_run(
     if ref_src.exists() and not ref_dst.exists():
         shutil.copytree(ref_src, ref_dst)
 
-    # 2b. Snapshot .peak/<arch>/<kernel>/ → peak/<arch>/<kernel>/
-    peak_src = PROJECT_ROOT / ".peak" / arch / kernel
-    peak_dst = run_dir / "peak" / arch / kernel
-    if peak_src.exists() and not peak_dst.exists():
-        shutil.copytree(peak_src, peak_dst)
+    # peak/ is NOT copied into snapshots — it's static and always read
+    # from the canonical .peak/ directory. This also prevents Solver
+    # from reading peak code through the snapshot's allowed path.
 
     # 3. Ensure gen code exists at gen/<arch>/<kernel>/
     #    Since we reuse the same run_dir, gen/ may already exist.
@@ -579,8 +577,17 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
             if gen_dst.exists():
                 shutil.copytree(gen_dst, gem_dir / "gen")
 
+            # Save autotune config if autotune was used
+            autotune_info = impl_data.get("autotune")
+            if autotune_info:
+                (gem_dir / "best_config.json").write_text(
+                    json.dumps(autotune_info, indent=2) + "\n"
+                )
+
             # Write gem results.json
             gem_results = {**results, "gem": gem_info}
+            if autotune_info:
+                gem_results["autotune"] = autotune_info
             (gem_dir / "results.json").write_text(json.dumps(gem_results, indent=2) + "\n")
 
             # Write gem report.md

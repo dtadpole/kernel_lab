@@ -452,3 +452,48 @@ def test_read_data_peak_blocked():
         "file_path": "/home/zhenc/kernel_lab/.peak/sm90/matmul/cuda.cu"
     })
     assert _is_denied(result)
+
+
+@pytest.mark.quick
+def test_read_peak_in_snapshot_blocked():
+    """Read peak/ inside an allowed run snapshot — should block.
+
+    The run directory ~/kernel_lab_kb/runs/<run_tag>/ is allowed,
+    but peak/ within it must be blocked (more specific blocked_path wins).
+    """
+    runner = _make_runner(
+        blocked_paths=[
+            "~/kernel_lab_kb/",
+            "~/kernel_lab_kb/runs/<run_tag>/peak/",
+        ],
+        allowed_paths=[
+            "~/kernel_lab_kb/runs/<run_tag>/",
+        ],
+        run_tag="supervisor_run_20260408_163625",
+    )
+    result = runner._check_tool_rules("Read", {
+        "file_path": "/home/zhenc/kernel_lab_kb/runs/supervisor_run_20260408_163625/peak/sm90/matmul/cuda/cuda.cu"
+    })
+    assert _is_denied(result)
+
+
+@pytest.mark.quick
+def test_read_gen_in_snapshot_allowed():
+    """Read gen/ inside an allowed run snapshot — should pass.
+
+    gen/ is not in blocked_paths, so the allowed run directory exception applies.
+    """
+    runner = _make_runner(
+        blocked_paths=[
+            "~/kernel_lab_kb/",
+            "~/kernel_lab_kb/runs/<run_tag>/peak/",
+        ],
+        allowed_paths=[
+            "~/kernel_lab_kb/runs/<run_tag>/",
+        ],
+        run_tag="supervisor_run_20260408_163625",
+    )
+    result = runner._check_tool_rules("Read", {
+        "file_path": "/home/zhenc/kernel_lab_kb/runs/supervisor_run_20260408_163625/gen/sm90/matmul/cuda/cuda.cu"
+    })
+    assert not _is_denied(result)

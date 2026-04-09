@@ -322,18 +322,25 @@ int main() {
     cudaEventDestroy(est_start);
     cudaEventDestroy(est_end);
 
-    /* ── Time-based warmup (default 25 ms, no L2 flush — matches triton do_bench) */
+    /* ── Time-based warmup (default 25 ms, no L2 flush, no per-iter sync)
+     * Matches triton do_bench: fire-and-forget to keep GPU pipeline full.
+     * Only check return code on first warmup call. */
     const int n_warmup = (int)(cfg.warmup_ms / est_ms);
     const int actual_warmup = n_warmup > 1 ? n_warmup : 1;
-    for (int i = 0; i < actual_warmup; i++) {
+    {
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,
                             cfg.input_size, stream);
-        cudaStreamSynchronize(stream);
         if (rc != 0) {
+            cudaStreamSynchronize(stream);
             fprintf(stderr, "kernel_run warmup failed: rc=%d\n", rc);
             return 4;
         }
+    }
+    for (int i = 1; i < actual_warmup; i++) {
+        kernel_run(d_inputs.data(), num_inputs,
+                   d_outputs.data(), num_outputs,
+                   cfg.input_size, stream);
     }
 
     /* Randomize inputs before the timed loop */

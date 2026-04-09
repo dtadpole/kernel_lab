@@ -142,6 +142,10 @@ use autotune to find the optimal configuration automatically.
 Variables are the parameter names. Use constraints to filter out invalid combos
 (e.g., SMEM overflow). No function calls allowed.
 
+**Keep combinations ≤ 20.** Each variant must be compiled and benchmarked —
+more combos means longer autotune time. Pick 2-3 key parameters with 2-4
+values each. Use constraints to prune invalid combos aggressively.
+
 **When to use:** After your kernel is correct and you want to find the optimal
 tile/pipeline configuration. Do NOT use autotune for initial development — get
 correctness first with hardcoded defaults, then add autotune.yaml for tuning.

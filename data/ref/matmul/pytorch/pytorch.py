@@ -105,5 +105,24 @@ class Model(nn.Module):
         return torch.mm(A, B)
 
 
+def get_inputs(config: dict[str, Any] | None = None) -> list[torch.Tensor]:
+    """Generate input tensors for a given config.
+
+    Returns [A, B] where A is (M, K) and B is (K, N), both BF16 on CUDA.
+    """
+    if config is None:
+        config = _config_from_env()
+    else:
+        config = _normalize_config(config)
+
+    shape = config["shape"]
+    M, N = shape[0], shape[1]
+    K = M  # square matmul
+
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
+    return [A, B]
+
+
 def get_init_inputs() -> list[Any]:
     return []

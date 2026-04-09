@@ -513,7 +513,7 @@ def formal_benchmark(
         runner.write_text(f"""
 import json, sys, os
 sys.path.insert(0, {str(tmp_dir)!r})
-sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
 from pathlib import Path
 from cuda_exec.scripts.eval_support import load_reference_module, measure_reference
 import torch

@@ -87,8 +87,10 @@ After each bench result, follow this loop:
    - **NVIDIA docs** (`ik:docs`): PTX ISA, CUDA C programming guide, tuning guides
    - **NCU profile comparison**: your kernel vs cuDNN/cuBLAS — what are they doing
      differently? What stalls do they avoid?
-   - **Web search** (`WebSearch`): search for CUDA optimization techniques,
-     SM90 WGMMA patterns, flash attention implementation details
+   - **Web search** (`WebSearch`, `WebFetch`): search for CUDA optimization
+     techniques, SM90 WGMMA patterns, flash attention implementation details.
+     Read public kernel code from GitHub, blogs, papers, and NVIDIA samples.
+     You can't copy-paste, but you can learn techniques and adapt them.
    - **Reference code** (`data/ref/`): study how cuDNN and CuTe DSL structure
      their kernels — you can't use their libraries but you can learn their approach
 4. **Brainstorm** — each idea must be: data-backed (grounded in profile data),

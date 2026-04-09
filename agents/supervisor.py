@@ -53,7 +53,7 @@ def _run_subprocess(
     cmd: list[str],
     cwd: str,
     log_path: Path,
-    timeout: int = 1200,
+    timeout: int = 1800,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess with real-time stdout/stderr logging to a file.
 
@@ -539,7 +539,7 @@ class Supervisor(DefaultHandler):
 
         loop = asyncio.get_event_loop()
         proc_result = await loop.run_in_executor(
-            None, lambda: _run_subprocess(cmd, cwd, bench_log_path, timeout=1200)
+            None, lambda: _run_subprocess(cmd, cwd, bench_log_path, timeout=1800)
         )
 
         # stdout = JSON result, stderr = Markdown table + source paths

@@ -78,24 +78,36 @@ gems — never from other runs.
 
 After each bench result, follow this loop:
 1. **Profile both** — use `ik:exec profile` on the largest config for BOTH
-   your gen-cuda AND ref-cublas. Compare NCU metrics side by side.
-   See ik:exec `artifacts/profiling-guide.md` for key metrics.
+   your gen-cuda AND the reference impls (ref-cudnn, ref-cutedsl, peak-cuda).
+   Compare NCU metrics side by side — tensor core utilization, memory
+   throughput, warp stall breakdown, occupancy, instruction mix.
 2. **Compare and find the gap** — where does your kernel lose to the reference?
    Which metric has the biggest gap? This is your optimization target.
-3. **Brainstorm** — each idea must be: data-backed (grounded in profile data),
+3. **Research** — look for ideas from multiple sources:
+   - **NVIDIA docs** (`ik:docs`): PTX ISA, CUDA C programming guide, tuning guides
+   - **NCU profile comparison**: your kernel vs cuDNN/cuBLAS — what are they doing
+     differently? What stalls do they avoid?
+   - **Web search** (`WebSearch`): search for CUDA optimization techniques,
+     SM90 WGMMA patterns, flash attention implementation details
+   - **Reference code** (`data/ref/`): study how cuDNN and CuTe DSL structure
+     their kernels — you can't use their libraries but you can learn their approach
+4. **Brainstorm** — each idea must be: data-backed (grounded in profile data),
    specific (exact code change), measurable (predicts NCU effect), and
    feasible (within register/SMEM budget). Pick highest impact first.
-4. **Target the gap** — choose one optimization that closes the specific gap.
 5. **Implement → compile → trial → bench** — one change at a time.
 
 If 4 consecutive attempts show no improvement, try a fundamentally different
-architecture (e.g., switch from 1-WG to warp-specialization).
+architecture (e.g., switch from 1-WG to warp-specialization, or change
+tile sizes, or restructure the pipeline).
+
+**Keep pushing.** Do not settle for "good enough". After each gem, immediately
+start the next optimization cycle. There is always another bottleneck to find.
 
 ## Key Principles
 
 - **Correctness first** — fix ✗ before optimizing performance
 - **One change at a time** — isolate variables
-- **Stop on improvement** — when bench shows a new gem, record it and stop
+- **Keep pushing** — after each gem, start the next optimization immediately
 - **Keep trying on failure** — revert and try next idea immediately
 - **Profile failed attempts** — extract learning before reverting
 - **Verbatim output** — when reporting benchmark or trial results, copy the

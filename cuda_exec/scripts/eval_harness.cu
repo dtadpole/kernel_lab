@@ -282,11 +282,31 @@ static void print_json(const HarnessConfig* cfg,
                snap_before.sm_clock_mhz, snap_before.temp_c);
     }
     if (snap_after.valid) {
-        printf("    \"during\": { \"sm_clock_mhz\": %u, \"temp_c\": %u }\n",
+        printf("    \"during\": { \"sm_clock_mhz\": %u, \"temp_c\": %u },\n",
                snap_after.sm_clock_mhz, snap_after.temp_c);
     }
-    printf("  }\n");
+
+    /* Flag clock throttling: before vs during comparison */
+    bool throttled = false;
+    int clock_drop_mhz = 0;
+    if (snap_before.valid && snap_after.valid &&
+        snap_after.sm_clock_mhz < snap_before.sm_clock_mhz) {
+        throttled = true;
+        clock_drop_mhz = (int)snap_before.sm_clock_mhz - (int)snap_after.sm_clock_mhz;
+    }
+    printf("    \"throttled\": %s", throttled ? "true" : "false");
+    if (throttled) {
+        printf(",\n    \"clock_drop_mhz\": %d", clock_drop_mhz);
+    }
+    printf("\n  }\n");
     printf("}\n");
+
+    /* Warn on stderr if clock dropped during measurement */
+    if (throttled) {
+        fprintf(stderr, "WARNING: GPU clock throttled during measurement: "
+                "%u MHz → %u MHz (-%d MHz). Results may be affected.\n",
+                snap_before.sm_clock_mhz, snap_after.sm_clock_mhz, clock_drop_mhz);
+    }
 }
 
 /* ------------------------------------------------------------------ */

@@ -542,6 +542,40 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
         trial_result = impl_data.get("trial_result", {})
         config_results = _extract_config_results(trial_result) if trial_result else {}
 
+        # Patch ref_median_ms from ref impls' OWN trial results.
+        # In the gen-cuda trial, all .cu impls run gen-cuda's binary,
+        # so ref-cublas numbers there are actually gen-cuda's performance.
+        # The real ref numbers come from ref-cublas's own compile+trial cycle.
+        ref_slugs = set(bench_result.get("refs", []))
+        for ref_slug in ref_slugs:
+            ref_result = bench_result.get("results", {}).get(ref_slug)
+            if not ref_result:
+                continue
+            ref_trial = ref_result.get("trial_result", {})
+            if not ref_trial:
+                continue
+            for cfg_slug in config_results:
+                ref_cfg = ref_trial.get("configs", {}).get(cfg_slug, {})
+                # .cu ref: get performance from impls[ref_slug]
+                ref_impl_data = ref_cfg.get("impls", {}).get(ref_slug, {})
+                if ref_impl_data:
+                    ref_med = ref_impl_data.get("performance", {}).get("latency_ms", {}).get("median")
+                # .py ref: get performance directly from config entry
+                elif "performance" in ref_cfg:
+                    ref_med = ref_cfg.get("performance", {}).get("latency_ms", {}).get("median")
+                else:
+                    ref_med = None
+                if ref_med is not None and ref_med > 0:
+                    config_results[cfg_slug]["ref_median_ms"] = ref_med
+                    config_results[cfg_slug]["ref_latency"] = (
+                        ref_impl_data.get("performance", {}).get("latency_ms", {})
+                        or ref_cfg.get("performance", {}).get("latency_ms", {})
+                    )
+                    gen_med = config_results[cfg_slug].get("gen_median_ms")
+                    if gen_med and gen_med > 0:
+                        config_results[cfg_slug]["speedup"] = round(ref_med / gen_med, 3)
+                    break  # use first ref that has data
+
         results = {
             "kernel": kernel,
             "arch": arch,

@@ -104,14 +104,7 @@ def _run_cu_impl(
     output_tensor = None
     if output_bin.exists():
         raw = output_bin.read_bytes()
-        n_elems = len(raw) // 2
-        bf16_ints = struct.unpack(f"<{n_elems}H", raw)
-        # Convert BF16 → float32
-        vals = []
-        for v in bf16_ints:
-            fp32_bits = v << 16
-            vals.append(struct.unpack("<f", struct.pack("<I", fp32_bits))[0])
-        output_tensor = torch.tensor(vals, dtype=torch.float32)
+        output_tensor = torch.frombuffer(bytearray(raw), dtype=torch.bfloat16).float()
 
     return {
         "performance": payload.get("performance", {}),

@@ -610,16 +610,17 @@ def formal_benchmark(
 
             # .cu needs compile — build impl-keyed request
             # Include ALL impls so trial.py can compare against the right golden
+            # Target impl MUST be first — run_compile_task picks the first
+            # .cu slug for compilation into generated/generated.cu
             compile_impls = {}
-            # Include .py impls
+            compile_impls[gen["slug"]] = dict(gen["files"])
+            # Include .py impls for correctness comparison
             for py_impl in py_impls:
                 compile_impls[py_impl["slug"]] = dict(py_impl["files"])
-            # Include ALL other .cu impls (ref-cublas etc.) for correctness comparison
+            # Include other .cu impls for correctness comparison
             for other_cu in cu_impls:
                 if other_cu["slug"] != gen["slug"]:
                     compile_impls[other_cu["slug"]] = dict(other_cu["files"])
-            # Include this .cu gen impl
-            compile_impls[gen["slug"]] = dict(gen["files"])
 
             # Set autotune defines for this compile
             old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")

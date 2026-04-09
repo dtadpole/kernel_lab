@@ -71,10 +71,13 @@ def _run_cu_impl(
     env: dict[str, str],
     workspace_path: str,
     timeout_seconds: int,
+    binary_path: str | None = None,
 ) -> dict:
     """Run a compiled .cu impl binary and return performance payload."""
-    # Find the compiled binary
-    target_path, _ = _primary_artifact_from_manifest(workspace)
+    if binary_path:
+        target_path = Path(binary_path)
+    else:
+        target_path, _ = _primary_artifact_from_manifest(workspace)
 
     output_dir = Path(workspace_path) / f"_output_{impl['slug']}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +181,9 @@ def main() -> int:
     parser.add_argument("--impls", required=True,
                         help="Comma-separated impl slugs in order. First ref-* is golden. "
                              "Example: ref-pytorch,gen-cutedsl,gen-cuda")
+    parser.add_argument("--binary-map", default="",
+                        help="Comma-separated slug=path pairs for .cu impl binaries. "
+                             "Example: ref-cublas=/path/to/cublas.bin,gen-cuda=/path/to/gen.bin")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--num-warmups", type=int, default=NUM_WARMUP_RUNS)
@@ -198,6 +204,14 @@ def main() -> int:
 
     device = torch.device("cuda")
     lock_fd: int | None = None
+
+    # Parse binary map: slug=/path/to/bin,...
+    binary_map: dict[str, str] = {}
+    if args.binary_map:
+        for pair in args.binary_map.split(","):
+            if "=" in pair:
+                slug, path = pair.split("=", 1)
+                binary_map[slug.strip()] = path.strip()
 
     old_handler = signal.signal(signal.SIGALRM, watchdog_handler)
     signal.alarm(args.timeout)
@@ -222,13 +236,20 @@ def main() -> int:
         inputs_dir = Path(workspace_path) / "inputs"
         impls = []
         for slug in impl_slugs:
-            impl_dir = inputs_dir / slug
-            if not impl_dir.is_dir():
-                raise RuntimeError(f"Impl directory not found: {impl_dir}")
             source = slug.split("-", 1)[0]
             name = slug.split("-", 1)[1] if "-" in slug else slug
+            impl_dir = inputs_dir / slug
 
-            # Detect type from files present
+            # If binary-map provides a path for this slug, it's a .cu impl
+            if slug in binary_map:
+                impls.append({"slug": slug, "source": source, "name": name,
+                              "type": "cu", "dir": impl_dir})
+                continue
+
+            # Otherwise, resolve from staged inputs/ directory
+            if not impl_dir.is_dir():
+                raise RuntimeError(f"Impl directory not found: {impl_dir}")
+
             cu_files = list(impl_dir.glob("*.cu"))
             py_files = [f for f in impl_dir.glob("*.py")
                         if "class Model" in f.read_text(errors="ignore")]
@@ -284,9 +305,10 @@ def main() -> int:
                         sys.path[:] = old_path
 
                 elif impl["type"] == "cu":
-                    # Run compiled binary
+                    # Run compiled binary (use binary-map if available)
+                    bp = binary_map.get(impl["slug"])
                     r = _run_cu_impl(workspace, impl, env, workspace_path,
-                                     args.timeout)
+                                     args.timeout, binary_path=bp)
                     if "error" in r and "performance" not in r:
                         impl_results[slug] = {"error": r["error"]}
                     else:

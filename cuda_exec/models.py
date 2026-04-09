@@ -86,6 +86,11 @@ class TrialRequest(RequestBase):
         min_length=1,
         description="Slug-keyed kernel-specific runtime config payloads for trial",
     )
+    binary_map: str = Field(
+        default="",
+        description="Comma-separated slug=path pairs for .cu impl binaries. "
+                    "Passed to trial.py --binary-map for per-impl binary dispatch.",
+    )
 
 
 class ProfileRequest(RequestBase):

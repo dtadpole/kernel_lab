@@ -678,6 +678,7 @@ def run_trial_task(
     metadata,
     timeout_seconds: int,
     configs: Dict[str, dict],
+    binary_map: str = "",
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
     target_path, target_artifact = _primary_artifact_from_manifest(workspace)
@@ -693,14 +694,21 @@ def run_trial_task(
     for config_slug, config in configs.items():
         config_rel = _write_config_record(workspace, "trial", attempt, config_slug, config)
         comparison_rel = _config_artifact_rel("trial", attempt, config_slug, "comparison.json")
-        # Discover impl slugs from staged inputs/{slug}/ directories
+        # Discover impl slugs from staged inputs/{slug}/ directories + binary_map
         inputs_dir = workspace_path / "inputs"
-        impl_slugs = sorted(
+        dir_slugs = set(
             d.name for d in inputs_dir.iterdir()
             if d.is_dir() and "-" in d.name
         )
+        # Add slugs from binary_map that aren't in the directory
+        if binary_map:
+            for pair in binary_map.split(","):
+                if "=" in pair:
+                    slug = pair.split("=", 1)[0].strip()
+                    dir_slugs.add(slug)
+        impl_slugs = sorted(dir_slugs)
         if not impl_slugs:
-            raise RuntimeError(f"No impl directories found in {inputs_dir}")
+            raise RuntimeError(f"No impl directories or binary-map entries found")
 
         command = [
             sys.executable,
@@ -724,6 +732,8 @@ def run_trial_task(
             "--timeout",
             str(timeout_seconds),
         ]
+        if binary_map:
+            command.extend(["--binary-map", binary_map])
         cfg_start = datetime.now()
         logger.info("  trial config %s start [%s]", config_slug, cfg_start.strftime(_ts_fmt))
         run_result = run_generic_command(
@@ -1249,6 +1259,7 @@ def trial_endpoint(request: TrialRequest) -> TrialResponse:
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
+        binary_map=getattr(request, "binary_map", ""),
     )
     attempt = result["attempt"]
     items = {

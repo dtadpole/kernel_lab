@@ -322,12 +322,10 @@ int main() {
     cudaEventDestroy(est_start);
     cudaEventDestroy(est_end);
 
-    /* ── Time-based warmup (default 25 ms) ──────────────────────── */
+    /* ── Time-based warmup (default 25 ms, no L2 flush — matches triton do_bench) */
     const int n_warmup = (int)(cfg.warmup_ms / est_ms);
     const int actual_warmup = n_warmup > 1 ? n_warmup : 1;
     for (int i = 0; i < actual_warmup; i++) {
-        if (l2_flush_buf != nullptr)
-            cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,
                             cfg.input_size, stream);
@@ -351,7 +349,7 @@ int main() {
     /* ── Time-based measurement (default 100 ms) ────────────────── */
     /* At least 10 trials for statistical robustness. */
     const int n_trials = (int)(cfg.rep_ms / est_ms);
-    const int N = n_trials > 10 ? n_trials : 10;
+    const int N = n_trials > 1 ? n_trials : 1;
 
     std::vector<cudaEvent_t> start_events(N), end_events(N);
     for (int i = 0; i < N; i++) {

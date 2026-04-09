@@ -189,7 +189,11 @@ static void print_json(const HarnessConfig* cfg,
     std::sort(sorted_lat.begin(), sorted_lat.end());
     double min_ms = sorted_lat.front();
     double max_ms = sorted_lat.back();
+    double p10_ms = sorted_lat[sorted_lat.size() / 10];
+    double p25_ms = sorted_lat[sorted_lat.size() / 4];
     double median_ms = sorted_lat[sorted_lat.size() / 2];
+    double p75_ms = sorted_lat[sorted_lat.size() * 3 / 4];
+    double p90_ms = sorted_lat[sorted_lat.size() * 9 / 10];
     double sum = 0.0;
     for (double v : sorted_lat) sum += v;
     double mean_ms = sum / static_cast<double>(sorted_lat.size());
@@ -243,7 +247,11 @@ static void print_json(const HarnessConfig* cfg,
     printf("    },\n");
     printf("    \"latency_ms\": {\n");
     printf("      \"min\": %.6f,\n", min_ms);
-    printf("      \"median\": %.6f,\n", median_ms);
+    printf("      \"p10\": %.6f,\n", p10_ms);
+    printf("      \"p25\": %.6f,\n", p25_ms);
+    printf("      \"p50\": %.6f,\n", median_ms);
+    printf("      \"p75\": %.6f,\n", p75_ms);
+    printf("      \"p90\": %.6f,\n", p90_ms);
     printf("      \"max\": %.6f,\n", max_ms);
     printf("      \"mean\": %.6f\n", mean_ms);
     printf("    },\n");
@@ -260,7 +268,11 @@ static void print_json(const HarnessConfig* cfg,
     printf("    },\n");
     printf("    \"latency_ms\": {\n");
     printf("      \"min\": %.6f,\n", min_ms);
-    printf("      \"median\": %.6f,\n", median_ms);
+    printf("      \"p10\": %.6f,\n", p10_ms);
+    printf("      \"p25\": %.6f,\n", p25_ms);
+    printf("      \"p50\": %.6f,\n", median_ms);
+    printf("      \"p75\": %.6f,\n", p75_ms);
+    printf("      \"p90\": %.6f,\n", p90_ms);
     printf("      \"max\": %.6f,\n", max_ms);
     printf("      \"mean\": %.6f\n", mean_ms);
     printf("    },\n");

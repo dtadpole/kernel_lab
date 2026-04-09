@@ -94,10 +94,10 @@ def _extract_impl_metrics(
             if "impls" in entry:
                 # cu trial: configs[c]["impls"][slug]["performance"]
                 impl_data = entry.get("impls", {}).get(slug, {})
-                median_ms = impl_data.get("performance", {}).get("latency_ms", {}).get("median")
+                median_ms = impl_data.get("performance", {}).get("latency_ms", {}).get("p25")
             elif "performance" in entry:
                 # py impl: configs[c]["performance"]
-                median_ms = entry.get("performance", {}).get("latency_ms", {}).get("median")
+                median_ms = entry.get("performance", {}).get("latency_ms", {}).get("p25")
             metrics[slug][config_slug] = {"median_ms": median_ms, "correct": False}  # default: fail until proven correct
 
     # Correctness comes from cu trial results (which compare all impls vs golden)

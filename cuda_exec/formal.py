@@ -416,7 +416,7 @@ def formal_benchmark(
     *,
     run_tag: str | None = None,
     impls: str | List[str] = "all",
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 300,
     kb_repo: str | None = None,
     runtime_root: str | None = None,
     data_root: str | None = None,

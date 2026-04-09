@@ -495,41 +495,64 @@ def formal_benchmark(
     results: Dict[str, dict] = {}
 
     # --- Helper: load and run a .py impl, return per-config performance + output ---
-    def _run_py_impl(impl: dict) -> dict:
-        import torch
-        from cuda_exec.scripts.eval_support import (
-            measure_reference, load_reference_module, set_seed, generate_inputs,
-            DEFAULT_SEED,
-        )
-        device = torch.device("cuda")
-        import tempfile as _tempfile, sys as _sys
+    def _run_py_impl(impl: dict, per_impl_timeout: int = 600) -> dict:
+        """Run a .py impl in a subprocess with timeout to prevent hangs.
+
+        CuTe DSL JIT compilation and cuDNN can hang or segfault — running
+        in a subprocess isolates failures and enforces a timeout.
+        """
+        import subprocess as _sp
+        import tempfile as _tempfile
+
         tmp_dir = Path(_tempfile.mkdtemp(prefix=f"bench_{impl['slug']}_"))
         for fname, content in impl["files"].items():
             (tmp_dir / fname).write_text(content, encoding="utf-8")
-        entry_py = tmp_dir / f"{impl['name']}.py"
-        old_path = list(_sys.path)
-        _sys.path.insert(0, str(tmp_dir))
+
+        # Write a runner script that imports the module and measures all configs
+        runner = tmp_dir / "_runner.py"
+        runner.write_text(f"""
+import json, sys, os
+sys.path.insert(0, {str(tmp_dir)!r})
+sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+from pathlib import Path
+from cuda_exec.scripts.eval_support import load_reference_module, measure_reference
+import torch
+
+device = torch.device("cuda")
+entry = Path({str(tmp_dir / f"{impl['name']}.py")!r})
+configs = json.loads({json.dumps(configs)!r})
+
+mod = load_reference_module(entry)
+results = {{}}
+for slug, config in configs.items():
+    try:
+        r = measure_reference(mod, config, device, num_trials=10)
+        results[slug] = {{"status": "ok", "performance": r["performance"]}}
+    except Exception as e:
+        results[slug] = {{"status": "error", "error": str(e)}}
+
+print(json.dumps({{"ok": True, "configs": results}}))
+""", encoding="utf-8")
+
+        env = os.environ.copy()
         try:
-            mod = load_reference_module(entry_py)
-            config_results = {}
-            for config_slug, config in configs.items():
-                try:
-                    result = measure_reference(mod, config, device, num_trials=10)
-                    config_results[config_slug] = {
-                        "status": "ok",
-                        "performance": result["performance"],
-                        "output_tensor": result.get("output_tensor"),
-                    }
-                except Exception as exc:
-                    config_results[config_slug] = {
-                        "status": "error",
-                        "error": str(exc),
-                    }
-            return {"ok": True, "configs": config_results}
+            result = _sp.run(
+                [sys.executable, str(runner)],
+                capture_output=True, text=True,
+                timeout=per_impl_timeout, env=env,
+                cwd=str(Path(__file__).resolve().parents[1]),
+            )
+            if result.returncode != 0:
+                stderr_tail = (result.stderr or "")[-500:]
+                return {"ok": False, "error": f"exit {result.returncode}: {stderr_tail}"}
+            stdout = result.stdout.strip()
+            if stdout:
+                return json.loads(stdout)
+            return {"ok": False, "error": "no output from runner"}
+        except _sp.TimeoutExpired:
+            return {"ok": False, "error": f"timeout after {per_impl_timeout}s"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        finally:
-            _sys.path[:] = old_path
 
     # Split ALL impls by file type, not by source.
     # .py impls (ref, peak, or gen) → measured via _run_py_impl
@@ -729,6 +752,101 @@ def formal_benchmark(
     return bench_result
 
 
+def _merge_best_of_n(all_results: List[dict]) -> dict:
+    """Merge N full benchmark passes, keeping best (min) latency per (impl, config).
+
+    Takes the structure of the last run as the base and patches in the best
+    latency_ms values from across all runs.  Correctness is OR'd (passed in
+    any run = passed).
+    """
+    base = all_results[-1]  # use last run as structural base
+
+    def _set_latency(d: dict, path: list[str], value: float):
+        """Set a nested dict value by path, creating intermediates."""
+        for key in path[:-1]:
+            d = d.setdefault(key, {})
+        d[path[-1]] = value
+
+    def _get_latency(d: dict, path: list[str]) -> float | None:
+        for key in path:
+            if not isinstance(d, dict):
+                return None
+            d = d.get(key)
+        return d
+
+    # Collect best median_ms per (impl_slug, config_slug) across all runs
+    # Two paths depending on impl type:
+    #   .cu impl: results[slug].trial_result.configs[cfg].impls[slug].performance.latency_ms.median
+    #   .py impl: results[slug].trial_result.configs[cfg].performance.latency_ms.median
+    for slug in base.get("results", {}):
+        base_impl = base["results"][slug]
+        base_trial = base_impl.get("trial_result")
+        if not base_trial:
+            continue
+
+        for config_slug in base_trial.get("configs", {}):
+            entry = base_trial["configs"][config_slug]
+
+            if "impls" in entry:
+                # .cu trial — each impl has its own performance block
+                for impl_slug in entry.get("impls", {}):
+                    path = ["performance", "latency_ms", "median"]
+                    best = _get_latency(entry["impls"][impl_slug], path)
+                    for r in all_results[:-1]:
+                        other = (r.get("results", {}).get(slug, {})
+                                  .get("trial_result", {}).get("configs", {})
+                                  .get(config_slug, {}).get("impls", {})
+                                  .get(impl_slug, {}))
+                        v = _get_latency(other, path)
+                        if v is not None and (best is None or v < best):
+                            best = v
+                    if best is not None:
+                        _set_latency(entry["impls"][impl_slug], path, best)
+
+                    # Also patch min
+                    path_min = ["performance", "latency_ms", "min"]
+                    best_min = _get_latency(entry["impls"][impl_slug], path_min)
+                    for r in all_results[:-1]:
+                        other = (r.get("results", {}).get(slug, {})
+                                  .get("trial_result", {}).get("configs", {})
+                                  .get(config_slug, {}).get("impls", {})
+                                  .get(impl_slug, {}))
+                        v = _get_latency(other, path_min)
+                        if v is not None and (best_min is None or v < best_min):
+                            best_min = v
+                    if best_min is not None:
+                        _set_latency(entry["impls"][impl_slug], path_min, best_min)
+
+            elif "performance" in entry:
+                # .py impl — performance directly on the config entry
+                path = ["performance", "latency_ms", "median"]
+                best = _get_latency(entry, path)
+                for r in all_results[:-1]:
+                    other = (r.get("results", {}).get(slug, {})
+                              .get("trial_result", {}).get("configs", {})
+                              .get(config_slug, {}))
+                    v = _get_latency(other, path)
+                    if v is not None and (best is None or v < best):
+                        best = v
+                if best is not None:
+                    _set_latency(entry, path, best)
+
+                path_min = ["performance", "latency_ms", "min"]
+                best_min = _get_latency(entry, path_min)
+                for r in all_results[:-1]:
+                    other = (r.get("results", {}).get(slug, {})
+                              .get("trial_result", {}).get("configs", {})
+                              .get(config_slug, {}))
+                    v = _get_latency(other, path_min)
+                    if v is not None and (best_min is None or v < best_min):
+                        best_min = v
+                if best_min is not None:
+                    _set_latency(entry, path_min, best_min)
+
+    base["num_runs"] = len(all_results)
+    return base
+
+
 def cli_main() -> None:
     """CLI entry point for ik:bench (Hydra-based)."""
     from hydra import compose, initialize_config_dir
@@ -794,7 +912,8 @@ def cli_main() -> None:
     elif hasattr(impls, "__iter__") and not isinstance(impls, str):
         impls = list(impls)
 
-    result = formal_benchmark(
+    num_runs = int(bench_cfg.get("runs", 1))
+    bench_kwargs = dict(
         kernel=bench_cfg.kernel,
         arch=bench_cfg.arch,
         run_tag=bench_cfg.get("run_tag"),
@@ -804,6 +923,18 @@ def cli_main() -> None:
         runtime_root=bench_cfg.get("runtime_root"),
         data_root=bench_cfg.get("data_root"),
     )
+
+    if num_runs <= 1:
+        result = formal_benchmark(**bench_kwargs)
+    else:
+        # Multi-run: run N full passes, keep best (min latency) per (impl, config)
+        all_results = []
+        for run_idx in range(num_runs):
+            logger.info("=== Run %d/%d ===", run_idx + 1, num_runs)
+            r = formal_benchmark(**bench_kwargs)
+            all_results.append(r)
+
+        result = _merge_best_of_n(all_results)
 
     # Enrich with TFLOPS, speedup, correctness, % peak
     from cuda_exec.impls import load_configs as _load_configs

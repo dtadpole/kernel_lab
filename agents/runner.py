@@ -130,8 +130,11 @@ class AgentRunner:
         """Resume an existing session with a new prompt."""
         if not self._session_id:
             raise RuntimeError("No session to resume. Call run() first.")
-        if self.log is None:
-            self.log = SessionLog()
+
+        # Reset log so elapsed() starts from zero for this attempt.
+        # Without this, monitor's hard_limit accumulates across all
+        # attempts and triggers immediately after the first hard_limit.
+        self.log = SessionLog()
 
         # Ensure previous monitor is fully stopped before creating new client
         if self._monitor:

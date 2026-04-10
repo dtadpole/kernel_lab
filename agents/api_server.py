@@ -144,10 +144,14 @@ class SupervisorAPIServer:
                         bench_request_count += 1
                     last_event_ts = ev.get("ts", "")
 
-        heartbeat = ""
+        heartbeat = {}
         heartbeat_path = session_dir / "heartbeat" if session_dir else None
         if heartbeat_path and heartbeat_path.exists():
-            heartbeat = heartbeat_path.read_text().strip()
+            text = heartbeat_path.read_text().strip()
+            try:
+                heartbeat = json.loads(text)
+            except json.JSONDecodeError:
+                heartbeat = {"ts": text, "source": "unknown"}
 
         kb_root = Path(self.supervisor.config.storage.kb_root).expanduser()
         run_tag = self.supervisor.state.run_tag

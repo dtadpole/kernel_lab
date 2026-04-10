@@ -231,7 +231,7 @@ class AgentRunner:
         # stderr activity = alive, update heartbeat
         self._last_stream_event_time = datetime.now()
         if self._storage:
-            self._storage.write_heartbeat(self._last_stream_event_time)
+            self._storage.write_heartbeat(self._last_stream_event_time, source="solver_stderr")
 
     def _build_hooks(self) -> dict:
         """Bridge SDK hook callbacks to our EventHandler."""
@@ -656,16 +656,19 @@ class AgentRunner:
                             if self._monitor and self._monitor._pending_interrupt:
                                 self._monitor._pending_interrupt = False
                                 await self._client.interrupt()
-                            # Update heartbeat even during idle polling
-                            self._last_stream_event_time = datetime.now()
-                            if self._storage:
-                                self._storage.write_heartbeat(self._last_stream_event_time)
+                            # No heartbeat update here — idle poll means no
+                            # activity from Solver. Heartbeat should only
+                            # reflect real Solver output.
                             continue
                         except StopAsyncIteration:
                             break
 
+                        # Determine heartbeat trigger from message type
+                        heartbeat_trigger = "unknown"
+
                         # Init message — capture session_id
                         if isinstance(message, SystemMessage):
+                            heartbeat_trigger = "system_init"
                             if message.subtype == "init":
                                 sid = message.data.get("session_id", "")
                                 self._session_id = sid
@@ -675,12 +678,26 @@ class AgentRunner:
 
                         # Assistant message — complete, fully assembled
                         elif isinstance(message, AssistantMessage):
+                            # Determine trigger from content blocks
+                            has_thinking = False
+                            has_text = False
+                            has_tool = False
                             for block in message.content:
                                 if isinstance(block, TextBlock):
+                                    has_text = True
                                     event = TextOutputEvent(text=block.text)
                                     result.log.append(event)
                                     await self.handler.on_text(event)
-                                # ThinkingBlock: heartbeat only (updated below), not logged
+                                elif isinstance(block, ThinkingBlock):
+                                    has_thinking = True
+                            if has_tool:
+                                heartbeat_trigger = "tool_use"
+                            elif has_text:
+                                heartbeat_trigger = "text"
+                            elif has_thinking:
+                                heartbeat_trigger = "thinking"
+                            else:
+                                heartbeat_trigger = "assistant"
                             # Accumulate usage
                             if message.usage:
                                 for k, v in message.usage.items():
@@ -689,6 +706,7 @@ class AgentRunner:
 
                         # Result message — session complete
                         elif isinstance(message, ResultMessage):
+                            heartbeat_trigger = "result"
                             result.result_text = message.result or ""
                             result.stop_reason = getattr(message, "stop_reason", "end_turn")
                             stop_event = StopEvent(
@@ -700,6 +718,7 @@ class AgentRunner:
 
                         # Rate limit — log warning and wait
                         elif isinstance(message, RateLimitEvent):
+                            heartbeat_trigger = "rate_limit"
                             info = message.rate_limit_info
                             status = getattr(info, "status", None)
                             resets_at = getattr(info, "resets_at", None)
@@ -718,6 +737,7 @@ class AgentRunner:
 
                         # Subagent task events
                         elif isinstance(message, TaskStartedMessage):
+                            heartbeat_trigger = "subagent_start"
                             event = SubagentEvent(
                                 agent_id=getattr(message, "task_id", ""),
                                 agent_type="subagent",
@@ -726,6 +746,7 @@ class AgentRunner:
                             result.log.append(event)
 
                         elif isinstance(message, TaskProgressMessage):
+                            heartbeat_trigger = "subagent_progress"
                             tool_name = getattr(message, "last_tool_name", "")
                             if tool_name:
                                 event = TextOutputEvent(
@@ -734,6 +755,7 @@ class AgentRunner:
                                 result.log.append(event)
 
                         elif isinstance(message, TaskNotificationMessage):
+                            heartbeat_trigger = "subagent_done"
                             event = SubagentEvent(
                                 agent_id=getattr(message, "task_id", ""),
                                 agent_type="subagent",
@@ -741,14 +763,14 @@ class AgentRunner:
                             )
                             result.log.append(event)
 
-                        # StreamEvent — heartbeat (don't log to journal, just update timestamp)
+                        # StreamEvent — streaming keepalive from LLM
                         elif isinstance(message, StreamEvent):
-                            pass  # handled below
+                            heartbeat_trigger = "stream"
 
-                        # Update heartbeat on ANY message
+                        # Update heartbeat on ANY message with specific trigger
                         self._last_stream_event_time = datetime.now()
                         if self._storage:
-                            self._storage.write_heartbeat(self._last_stream_event_time)
+                            self._storage.write_heartbeat(self._last_stream_event_time, source=heartbeat_trigger)
 
                         # Check monitor flags after processing each message
                         if self._monitor and self._monitor._pending_terminate:

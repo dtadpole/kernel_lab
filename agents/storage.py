@@ -68,16 +68,28 @@ class SessionStorage:
         with open(self.meta_path, "w") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False, default=str)
 
-    def write_heartbeat(self, ts: datetime) -> None:
-        """Write last stream event timestamp to heartbeat file."""
-        heartbeat_path = self.session_dir / "heartbeat"
-        heartbeat_path.write_text(ts.isoformat())
+    def write_heartbeat(self, ts: datetime, source: str) -> None:
+        """Write heartbeat as JSON with timestamp and source identity.
 
-    def read_heartbeat(self) -> str | None:
-        """Read last heartbeat timestamp."""
+        source is required — every heartbeat must identify its trigger
+        (e.g. "thinking", "text", "tool_use", "stream", "stderr").
+        """
+        if not source:
+            raise ValueError("heartbeat source must not be empty")
+        heartbeat_path = self.session_dir / "heartbeat"
+        data = {"ts": ts.isoformat(), "source": source}
+        heartbeat_path.write_text(json.dumps(data))
+
+    def read_heartbeat(self) -> dict | None:
+        """Read heartbeat JSON. Returns {"ts": ..., "source": ...} or None."""
         heartbeat_path = self.session_dir / "heartbeat"
         if heartbeat_path.exists():
-            return heartbeat_path.read_text().strip()
+            text = heartbeat_path.read_text().strip()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # Legacy plain-text heartbeat
+                return {"ts": text, "source": "unknown"}
         return None
 
     def write_config_snapshot(self, config_text: str) -> None:

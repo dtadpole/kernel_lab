@@ -41,7 +41,7 @@ def print_result(result: TaskResult) -> None:
     print(f"  SESSION RESULT")
     print(f"{'='*60}")
     print(f"  Success:    {result.success}")
-    print(f"  Iterations: {result.iterations}")
+    print(f"  Waves:      {result.waves}")
     print(f"  Tool calls: {result.total_tool_calls}")
     print(f"  Errors:     {result.total_errors}")
     print(f"  Elapsed:    {result.elapsed_seconds:.0f}s ({result.elapsed_seconds/60:.1f}m)")
@@ -51,7 +51,7 @@ def print_result(result: TaskResult) -> None:
         print(f"    [{i}] {br['kernel']} — {improved}")
     print(f"\n  Verdict history:")
     for v in result.verdict_history:
-        print(f"    iter {v['iteration']}: {v['action']} — {v['detail'][:80]}")
+        print(f"    wave {v['wave']}: {v['action']} — {v['detail'][:80]}")
     print(f"\n  Result (first 500 chars):")
     print(f"  {result.result_text[:500]}")
     print(f"{'='*60}\n")
@@ -63,7 +63,7 @@ async def run_continuous(args: argparse.Namespace) -> None:
 
     supervisor = Supervisor(
         config=config,
-        max_iterations=args.max_iterations,
+        max_waves=args.max_waves,
         response_prompts_dir=args.prompts_dir,
     )
 
@@ -84,7 +84,7 @@ async def run_single(args: argparse.Namespace) -> TaskResult:
 
     supervisor = Supervisor(
         config=config,
-        max_iterations=args.max_iterations,
+        max_waves=args.max_waves,
         response_prompts_dir=args.prompts_dir,
     )
 
@@ -114,7 +114,7 @@ async def run_single(args: argparse.Namespace) -> TaskResult:
             "timestamp": datetime.now().isoformat(),
             "kernel": args.kernel,
             "success": result.success,
-            "iterations": result.iterations,
+            "waves": result.waves,
             "elapsed_seconds": result.elapsed_seconds,
             "bench_results": result.bench_results,
             "verdict_history": result.verdict_history,
@@ -159,8 +159,8 @@ def main():
                         help="Config file path")
     parser.add_argument("--prompts-dir", default="conf/agent/response_prompts",
                         help="Steward prompts directory")
-    parser.add_argument("--max-iterations", type=int, default=0,
-                        help="Max iterations per session (0 = unlimited)")
+    parser.add_argument("--max-waves", type=int, default=0,
+                        help="Max waves per run (0 = unlimited)")
     parser.add_argument("--run-tag", default=None,
                         help="Custom run_tag (single mode only)")
     parser.add_argument("--single", action="store_true",

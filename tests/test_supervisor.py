@@ -454,14 +454,14 @@ def test_supervisor_get_status():
     sup.state = SupervisorState(
         phase="solving",
         task="Optimize matmul",
-        iteration=1,
+        wave=1,
         turns_completed=5,
         error_count=1,
         started_at=datetime.now(),
     )
     status = sup.get_status()
     assert status["phase"] == "solving"
-    assert status["iteration"] == 1
+    assert status["wave"] == 1
     assert status["turns"] == 5
 
 
@@ -530,16 +530,16 @@ def test_supervisor_simple_task():
         solver = config.get_agent("solver")
         solver.max_turns = 5
 
-        sup = Supervisor(config, max_iterations=1)
+        sup = Supervisor(config, max_waves=1)
 
         result = anyio.run(sup.run_task, "Read the file agents/__init__.py and tell me if it is empty.")
 
         print(f"  Success: {result.success}")
         print(f"  Result: {result.result_text[:200]}")
-        print(f"  Iterations: {result.iterations}")
+        print(f"  Waves: {result.waves}")
         print(f"  Verdicts: {result.verdict_history}")
         print(f"  Elapsed: {result.elapsed_seconds:.1f}s")
 
         assert result.result_text  # got some output
-        assert result.iterations >= 1
+        assert result.waves >= 1
         assert result.verdict_history  # at least one verdict was made

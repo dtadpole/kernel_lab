@@ -4,7 +4,7 @@ Decision loop:
   1. Solver optimizes kernel code
   2. Solver calls request_formal_bench → Supervisor dispatches Benchmarker
   3. Benchmarker runs ik:bench → returns results
-  4. If improved → record, stop Solver, start new iteration
+  4. If improved → record, stop Solver, start new wave
   5. If not improved → Solver retries
   6. If 4-hour time limit hit → stop and restart
   7. Every 15 min → Steward progress check
@@ -117,7 +117,7 @@ class SupervisorState:
     run_tag: str = ""
     kernel: str = ""               # kernel name (matmul, fa4, etc.)
     gpu: int = 4                   # GPU index for exec/trial/bench
-    iteration: int = 0
+    wave: int = 0
     turns_completed: int = 0
     error_count: int = 0
     current_action: str = ""
@@ -131,7 +131,7 @@ class SupervisorState:
 class TaskResult:
     success: bool
     result_text: str
-    iterations: int
+    waves: int
     total_tool_calls: int
     total_errors: int
     elapsed_seconds: float
@@ -146,11 +146,11 @@ class Supervisor(DefaultHandler):
     def __init__(
         self,
         config: SystemConfig,
-        max_iterations: int = 0,  # 0 = unlimited (run until SUCCESS or hard_limit)
+        max_waves: int = 0,  # 0 = unlimited (run until SUCCESS or hard_limit)
         response_prompts_dir: str | Path = "conf/agent/response_prompts",
     ):
         self.config = config
-        self.max_iterations = max_iterations
+        self.max_waves = max_waves
         self.state = SupervisorState()
 
         steward_config = config.steward
@@ -245,7 +245,7 @@ class Supervisor(DefaultHandler):
                     "run_tag": run_tag,
                     "success": result.success,
                     "verdict": result.verdict_history[-1]["action"] if result.verdict_history else "?",
-                    "iterations": result.iterations,
+                    "waves": result.waves,
                     "elapsed": f"{result.elapsed_seconds:.0f}s",
                     "benchmarks": len(result.bench_results),
                     "improved": any(b["improved"] for b in result.bench_results),
@@ -377,27 +377,27 @@ class Supervisor(DefaultHandler):
 
         solver_prompt = self._build_initial_prompt(task, run_tag, kernel, gpu)
 
-        iteration = 0
+        wave = 0
         consecutive_quick_exits = 0
         max_quick_exits = 3
         min_session_seconds = 30  # sessions shorter than this are "quick exits"
 
         while True:  # run until SUCCESS or hard_limit
-            if self.max_iterations > 0 and iteration >= self.max_iterations:
+            if self.max_waves > 0 and wave >= self.max_waves:
                 break
-            self.state.iteration = iteration
+            self.state.wave = wave
             self.state.consecutive_stuck = 0
             self.state.phase = "solving"
 
             print(f"\n{'='*60}")
-            print(f"[Supervisor] Iteration {iteration} — phase: solving")
+            print(f"[Supervisor] Wave {wave} — phase: solving")
             print(f"[Supervisor] Run tag: {run_tag}")
             print(f"{'='*60}\n")
 
             self._pending_stop_event = None
 
-            if iteration == 0:
-                # First iteration — fresh session
+            if wave == 0:
+                # First wave — fresh session
                 last_result = await self._solver_runner.run(
                     prompt=solver_prompt,
                     task_slug=task_slug,
@@ -410,7 +410,7 @@ class Supervisor(DefaultHandler):
 
             # Detect quick exits (Solver stops almost immediately)
             session_duration = last_result.log.elapsed().total_seconds() if last_result.log else 0
-            if iteration > 0 and session_duration < min_session_seconds:
+            if wave > 0 and session_duration < min_session_seconds:
                 consecutive_quick_exits += 1
                 print(f"[Supervisor] Quick exit detected ({session_duration:.0f}s < {min_session_seconds}s) "
                       f"— {consecutive_quick_exits}/{max_quick_exits}")
@@ -449,13 +449,13 @@ class Supervisor(DefaultHandler):
                 )
 
             self.state.verdict_history.append({
-                "iteration": iteration,
+                "wave": wave,
                 "action": verdict.action,
                 "detail": verdict.detail,
                 "reasoning": verdict.reasoning[:200],
             })
 
-            print(f"\n[Supervisor] Iteration {iteration} verdict: {verdict.action}")
+            print(f"\n[Supervisor] Wave {wave} verdict: {verdict.action}")
 
             if verdict.action == "SUCCESS":
                 self.state.phase = "done"
@@ -469,14 +469,14 @@ class Supervisor(DefaultHandler):
                 # Unknown verdict — treat as CONTINUE
                 solver_prompt = self._build_continue_prompt(verdict)
 
-            iteration += 1
+            wave += 1
 
         elapsed = (datetime.now() - self.state.started_at).total_seconds() if self.state.started_at else 0
 
         return TaskResult(
             success=(verdict.action == "SUCCESS") if verdict else False,
             result_text=last_result.result_text if last_result else "",
-            iterations=self.state.iteration + 1,
+            waves=self.state.wave + 1,
             total_tool_calls=self.state.turns_completed,
             total_errors=self.state.error_count,
             elapsed_seconds=elapsed,
@@ -698,7 +698,7 @@ class Supervisor(DefaultHandler):
             bench_ts = bench_data.get("bench_timestamp", "")
 
             self.state.bench_results.append({
-                "iteration": self.state.iteration,
+                "wave": self.state.wave,
                 "kernel": kernel,
                 "improved": improved,
                 "summary": bench_result.result_text[:500],
@@ -732,7 +732,7 @@ class Supervisor(DefaultHandler):
             elif gem_matches:
                 prev_gem_path = gem_matches[-1]
             else:
-                prev_gem_path = "(none — first iteration)"
+                prev_gem_path = "(none — first wave)"
 
             template_vars = {
                 "bench_result_text": bench_result.result_text,
@@ -852,7 +852,7 @@ class Supervisor(DefaultHandler):
             "kernel": self.state.kernel,
             "gpu": self.state.gpu,
             "run_tag": self.state.run_tag,
-            "iteration": self.state.iteration,
+            "wave": self.state.wave,
             "turns": self.state.turns_completed,
             "errors": self.state.error_count,
             "consecutive_stuck": self.state.consecutive_stuck,

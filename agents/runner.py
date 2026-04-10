@@ -221,6 +221,10 @@ class AgentRunner:
 
                 continue
             except StopAsyncIteration:
+                # Stream ended. If no ResultMessage was received,
+                # set a fallback stop_reason so Steward review runs.
+                if not result.stop_reason:
+                    result.stop_reason = "stream_ended"
                 break
 
             # ── Process message ──

@@ -38,3 +38,17 @@ dist/
 *.sqlite
 
 # Doc retrieval runtime artifacts live in ~/.doc_retrieval/ (not in repo)
+
+# Compiled object files
+*.o
+
+# Ninja build artifacts
+.ninja_deps
+.ninja_log
+build.ninja
+
+# CSV data files
+*.csv
+
+# FlashAttention build artifacts
+fa3/lib/

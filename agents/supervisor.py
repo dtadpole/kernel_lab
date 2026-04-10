@@ -34,6 +34,7 @@ from agents.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agents.api_server import SupervisorAPIServer
 from agents.runner import AgentRunner, RunResult
 from agents.session_log import SessionLog
 from agents.steward import Steward, StewardResponse
@@ -163,6 +164,7 @@ class Supervisor(DefaultHandler):
         self._solver_runner: AgentRunner | None = None
         self._current_log: SessionLog | None = None
         self._pending_stop_event: StopEvent | None = None
+        self._api_server: SupervisorAPIServer | None = None
 
     # ── Continuous loop ──
 
@@ -186,11 +188,32 @@ class Supervisor(DefaultHandler):
         # Set run_tag on storage config so all agents inherit it
         self.config.storage.run_tag = run_tag
 
+        # Initialize state early so API server can read kernel/gpu/run_tag
+        self.state = SupervisorState(
+            phase="starting",
+            task=task,
+            task_slug=_slugify(task),
+            run_tag=run_tag,
+            kernel=kernel,
+            gpu=gpu,
+            started_at=datetime.now(),
+        )
+
+        # Start API server
+        self._api_server = SupervisorAPIServer(self)
+        try:
+            api_port = await self._api_server.start()
+        except Exception as e:
+            print(f"[Supervisor] API server failed to start: {e}")
+            self._api_server = None
+
         print(f"\n{'='*60}")
         print(f"[Supervisor] CONTINUOUS MODE — will run indefinitely")
         print(f"[Supervisor] Kernel: {kernel}")
         print(f"[Supervisor] GPU: {gpu}")
         print(f"[Supervisor] Run tag: {run_tag}")
+        if self._api_server:
+            print(f"[Supervisor] API: http://127.0.0.1:{api_port}")
         print(f"[Supervisor] Kill with Ctrl+C or hard_limit to stop")
         print(f"{'='*60}\n")
 
@@ -263,6 +286,7 @@ class Supervisor(DefaultHandler):
 
             except KeyboardInterrupt:
                 print(f"\n[Supervisor] Interrupted by user after {session_number} sessions")
+                await self._stop_api_server()
                 break
             except BaseException as e:
                 consecutive_errors += 1
@@ -320,6 +344,12 @@ class Supervisor(DefaultHandler):
         with open(log_path, "w") as f:
             for h in history:
                 f.write(json.dumps(h, default=str) + "\n")
+
+    async def _stop_api_server(self) -> None:
+        """Stop the API server if running."""
+        if self._api_server:
+            await self._api_server.stop()
+            self._api_server = None
 
     # ── Single task ──
 
@@ -857,6 +887,7 @@ class Supervisor(DefaultHandler):
             "errors": self.state.error_count,
             "consecutive_stuck": self.state.consecutive_stuck,
             "current_action": self.state.current_action,
+            "started_at": self.state.started_at.isoformat() if self.state.started_at else None,
             "elapsed": str(
                 (datetime.now() - self.state.started_at) if self.state.started_at else "not started"
             ),

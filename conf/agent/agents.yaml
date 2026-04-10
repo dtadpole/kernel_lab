@@ -236,22 +236,34 @@ agents:
     tool_rules:
       - tool: Write
         allow: true
-        constraint: "Only write to canonical wiki (~/kernel_lab_kb/wiki/)"
+        constraint: "Write to canonical wiki only — NOT _proposals/"
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/runs/
+          - ~/kernel_lab_kb/wiki/_proposals/
         allowed_paths:
           - ~/kernel_lab_kb/wiki/
       - tool: Edit
         allow: true
-        constraint: "Only edit canonical wiki pages"
+        constraint: "Edit canonical wiki pages only — NOT _proposals/"
         blocked_paths:
           - ~/kernel_lab/
           - ~/kernel_lab_kb/runs/
+          - ~/kernel_lab_kb/wiki/_proposals/
         allowed_paths:
           - ~/kernel_lab_kb/wiki/
       - tool: Read
         allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+      - tool: Glob
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+      - tool: Grep
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
     system_prompt_file: prompts/librarian.md
 
   information_analyst:
@@ -264,22 +276,38 @@ agents:
       builtin:
         - Read
         - Write
+        - Edit
         - Glob
         - Grep
     tool_rules:
       - tool: Write
         allow: true
-        constraint: "Only write proposals to _proposals/"
+        constraint: "Only write to _proposals/pending/"
         blocked_paths:
-          - ~/kernel_lab_kb/wiki/concepts/
-          - ~/kernel_lab_kb/wiki/patterns/
-          - ~/kernel_lab_kb/wiki/problems/
-          - ~/kernel_lab_kb/wiki/decisions/
-          - ~/kernel_lab_kb/wiki/references/
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/
         allowed_paths:
-          - ~/kernel_lab_kb/wiki/_proposals/
+          - ~/kernel_lab_kb/wiki/_proposals/pending/
+      - tool: Edit
+        allow: true
+        constraint: "Only edit files in _proposals/pending/"
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/_proposals/pending/
       - tool: Read
         allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+      - tool: Glob
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+      - tool: Grep
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
     system_prompt_file: prompts/analyst.md
 
   taxonomist:
@@ -292,6 +320,28 @@ agents:
         - Read
         - Glob
         - Grep
+    tool_rules:
+      - tool: Read
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
+      - tool: Glob
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
+      - tool: Grep
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
     system_prompt_file: prompts/taxonomist.md
 
   auditor:
@@ -304,4 +354,26 @@ agents:
         - Read
         - Glob
         - Grep
+    tool_rules:
+      - tool: Read
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
+      - tool: Glob
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
+      - tool: Grep
+        allow: true
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
     system_prompt_file: prompts/auditor.md

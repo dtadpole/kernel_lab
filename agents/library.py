@@ -187,25 +187,36 @@ class Library(DefaultHandler):
             print(f"[Library]   Starting Librarian agent...")
             await runner.start(prompt)
 
+            # Count wiki pages before to detect if Librarian wrote anything
+            wiki_pages_before = set(
+                str(p) for p in WIKI_ROOT.rglob("*.md") if p.name != "_index.md"
+            )
+
             # Librarian may need multiple sessions:
-            # Session 0: analyze proposal, plan actions
-            # Session 1+: write wiki pages (if not done in session 0)
-            max_sessions = 3
+            # Session 0: analyze + possibly consult experts
+            # Session 1+: write wiki pages
+            max_sessions = 5
             for session in range(max_sessions):
                 result = await runner.run_until_result()
                 print(f"[Library]   Session {session} done (stop_reason={result.stop_reason})")
 
-                # Check if Librarian actually wrote wiki pages
-                if result.result_text and ("wrote" in result.result_text.lower()
-                                           or "created" in result.result_text.lower()
-                                           or "updated" in result.result_text.lower()):
+                # Check if new wiki pages appeared
+                wiki_pages_after = set(
+                    str(p) for p in WIKI_ROOT.rglob("*.md") if p.name != "_index.md"
+                )
+                new_pages = wiki_pages_after - wiki_pages_before
+                if new_pages:
+                    self.state.wiki_writes += len(new_pages)
+                    for p in new_pages:
+                        print(f"[Library]   Wiki page created: {Path(p).name}")
                     break
 
-                # If first session just analyzed, prompt to continue writing
+                # Prompt to continue
                 if session < max_sessions - 1:
                     await runner.send_message(
-                        "Continue. Write the wiki pages now. "
-                        "Use the Write tool to create the files."
+                        "You have not written any wiki pages yet. "
+                        "Please use the Write tool NOW to create the wiki page(s). "
+                        "Write to ~/kernel_lab_kb/wiki/{category}/{slug}.md"
                     )
 
             await runner.stop()
@@ -283,16 +294,64 @@ After writing, report what you did: created/updated which pages, and why.
         - CONSULT_AUDITOR: → spawn Auditor agent
         """
         if event.question.startswith("CONSULT_TAXONOMIST:"):
-            self.state.expert_consults += 1
-            # TODO Phase 3: spawn Taxonomist agent
-            return "(Taxonomist not available yet)"
+            question = event.question[len("CONSULT_TAXONOMIST:"):].strip()
+            return await self._run_expert("taxonomist", question, event.context)
 
         if event.question.startswith("CONSULT_AUDITOR:"):
-            self.state.expert_consults += 1
-            # TODO Phase 3: spawn Auditor agent
-            return "(Auditor not available yet)"
+            question = event.question[len("CONSULT_AUDITOR:"):].strip()
+            return await self._run_expert("auditor", question, event.context)
 
         return "(Unknown request)"
+
+    async def _run_expert(self, agent_name: str, question: str, context: str) -> str:
+        """Spawn a short-lived expert agent and return its response.
+
+        Expert agents are read-only (Taxonomist, Auditor). They receive a
+        question + proposal context, read the wiki to form their advice,
+        and return a structured response.
+        """
+        self.state.phase = "consulting"
+        self.state.expert_consults += 1
+        print(f"[Library]   Consulting {agent_name}...")
+
+        try:
+            expert_config = self.config.get_agent(agent_name)
+            runner = AgentRunner(
+                agent_config=expert_config,
+                storage_config=self.config.storage,
+                handler=DefaultHandler(),
+                monitor_config=MonitorConfig(
+                    hard_limit=120,          # 2 min max per expert
+                    total_timeout=90,
+                    idle_timeout=60,
+                    check_interval=15,
+                ),
+                wave=self.state.expert_consults,
+                task_slug=agent_name,
+            )
+
+            prompt = (
+                f"## Question from Librarian\n\n{question}\n\n"
+                f"## Proposal Context\n\n{context}\n\n"
+                f"## Instructions\n\n"
+                f"Read the existing wiki at ~/kernel_lab_kb/wiki/ to inform your advice.\n"
+                f"Provide your response in the structured format described in your system prompt."
+            )
+
+            await runner.start(prompt)
+            result = await runner.run_until_result()
+            await runner.stop()
+
+            answer = result.result_text or "(no response)"
+            print(f"[Library]   {agent_name} responded ({len(answer)} chars)")
+            return answer
+
+        except Exception as e:
+            print(f"[Library]   {agent_name} ERROR: {e}")
+            return f"(Expert consultation failed: {e})"
+
+        finally:
+            self.state.phase = "processing"
 
     async def on_tool_call(self, event: ToolCallEvent) -> None:
         pass

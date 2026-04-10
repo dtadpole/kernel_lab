@@ -628,7 +628,39 @@ class AgentRunner:
                 await monitor.start()
 
                 try:
-                    async for message in client.receive_response():
+                    # Use manual iterator with timeout so we can check monitor
+                    # flags even when the SDK is blocked (e.g., waiting for a
+                    # long subprocess like formal bench). Without this, the
+                    # hard_limit terminate flag is never checked and the session
+                    # runs forever.
+                    _POLL_INTERVAL = 10  # seconds between flag checks
+                    response_iter = client.receive_response().__aiter__()
+                    while True:
+                        try:
+                            message = await asyncio.wait_for(
+                                response_iter.__anext__(), timeout=_POLL_INTERVAL
+                            )
+                        except asyncio.TimeoutError:
+                            # No event from SDK — check terminate/interrupt flags
+                            if self._monitor and self._monitor._pending_terminate:
+                                self._monitor._pending_terminate = False
+                                result.stop_reason = "terminate"
+                                result.result_text = "Terminated by monitor (hard_limit)"
+                                stop_event = StopEvent(reason="terminate", result_text="hard_limit")
+                                result.log.append(stop_event)
+                                await self.handler.on_stop(stop_event)
+                                break
+                            if self._monitor and self._monitor._pending_interrupt:
+                                self._monitor._pending_interrupt = False
+                                await self._client.interrupt()
+                            # Update heartbeat even during idle polling
+                            self._last_stream_event_time = datetime.now()
+                            if self._storage:
+                                self._storage.write_heartbeat(self._last_stream_event_time)
+                            continue
+                        except StopAsyncIteration:
+                            break
+
                         # Init message — capture session_id
                         if isinstance(message, SystemMessage):
                             if message.subtype == "init":
@@ -715,7 +747,7 @@ class AgentRunner:
                         if self._storage:
                             self._storage.write_heartbeat(self._last_stream_event_time)
 
-                        # Check monitor flags — handle outside anyio cancel scope
+                        # Check monitor flags after processing each message
                         if self._monitor and self._monitor._pending_terminate:
                             self._monitor._pending_terminate = False
                             result.stop_reason = "terminate"

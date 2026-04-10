@@ -16,12 +16,11 @@ Main loop:
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from agents.config import SystemConfig
+from agents.config import MonitorConfig, SystemConfig
 from agents.events import (
     AskEvent,
     DefaultHandler,
@@ -30,14 +29,16 @@ from agents.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agents.runner import AgentRunner
 
 
 # ── Constants ──
 
 WIKI_ROOT = Path.home() / "kernel_lab_kb" / "wiki"
 PROPOSALS_DIR = WIKI_ROOT / "_proposals"
-INJECT_DIR = PROPOSALS_DIR / "_inject"
-DONE_DIR = PROPOSALS_DIR / "_done"
+PENDING_DIR = PROPOSALS_DIR / "pending"
+INJECT_DIR = PROPOSALS_DIR / "inject"
+DONE_DIR = PROPOSALS_DIR / "done"
 
 POLL_INTERVAL = 10  # seconds between queue scans
 
@@ -83,7 +84,7 @@ class Library(DefaultHandler):
         self.state.started_at = now
 
         # Ensure directories exist
-        PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+        PENDING_DIR.mkdir(parents=True, exist_ok=True)
         INJECT_DIR.mkdir(parents=True, exist_ok=True)
         DONE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -126,8 +127,8 @@ class Library(DefaultHandler):
         return self._oldest_yaml(INJECT_DIR)
 
     def _next_proposal(self) -> Path | None:
-        """Return the oldest queued proposal, or None."""
-        return self._oldest_yaml(PROPOSALS_DIR)
+        """Return the oldest queued proposal from pending/, or None."""
+        return self._oldest_yaml(PENDING_DIR)
 
     @staticmethod
     def _oldest_yaml(directory: Path) -> Path | None:
@@ -145,10 +146,13 @@ class Library(DefaultHandler):
     # ── Proposal processing ──
 
     async def _process_proposal(self, proposal_path: Path, source: str = "queue") -> None:
-        """Process one proposal end-to-end.
+        """Process one proposal by spawning a Librarian LLM agent.
 
-        Phase 1: Just log and move to _done/ (no LLM agent yet).
-        Phase 2+: Spawn Librarian agent to read, consult experts, write wiki.
+        1. Read proposal YAML
+        2. Build prompt with proposal content
+        3. Spawn Librarian agent via AgentRunner
+        4. Librarian reads wiki, decides action, writes/updates pages
+        5. Move processed proposal to _done/
         """
         self.state.phase = "processing"
         self.state.current_proposal = proposal_path.name
@@ -157,26 +161,117 @@ class Library(DefaultHandler):
         print(f"[Library] Processing ({source}): {proposal_path.name}")
 
         try:
-            # TODO Phase 2: Spawn Librarian agent here
-            # For now, just read and log
+            # Read proposal content
             content = proposal_path.read_text(encoding="utf-8")
-            print(f"[Library]   Read {len(content)} chars from {proposal_path.name}")
+            print(f"[Library]   Read {len(content)} chars")
+
+            # Build Librarian prompt with proposal
+            prompt = self._build_librarian_prompt(proposal_path.name, content)
+
+            # Spawn Librarian agent
+            librarian_config = self.config.get_agent("librarian")
+            runner = AgentRunner(
+                agent_config=librarian_config,
+                storage_config=self.config.storage,
+                handler=self,
+                monitor_config=MonitorConfig(
+                    hard_limit=600,           # 10 min per proposal
+                    total_timeout=300,        # 5 min soft limit
+                    idle_timeout=120,         # 2 min idle
+                    check_interval=30,
+                ),
+                wave=self.state.proposals_processed,
+                task_slug="librarian",
+            )
+
+            print(f"[Library]   Starting Librarian agent...")
+            await runner.start(prompt)
+
+            # Librarian may need multiple sessions:
+            # Session 0: analyze proposal, plan actions
+            # Session 1+: write wiki pages (if not done in session 0)
+            max_sessions = 3
+            for session in range(max_sessions):
+                result = await runner.run_until_result()
+                print(f"[Library]   Session {session} done (stop_reason={result.stop_reason})")
+
+                # Check if Librarian actually wrote wiki pages
+                if result.result_text and ("wrote" in result.result_text.lower()
+                                           or "created" in result.result_text.lower()
+                                           or "updated" in result.result_text.lower()):
+                    break
+
+                # If first session just analyzed, prompt to continue writing
+                if session < max_sessions - 1:
+                    await runner.send_message(
+                        "Continue. Write the wiki pages now. "
+                        "Use the Write tool to create the files."
+                    )
+
+            await runner.stop()
+
+            if result.result_text:
+                print(f"[Library]   Result: {result.result_text[:200]}")
 
             # Move to _done/
             done_path = DONE_DIR / proposal_path.name
             proposal_path.rename(done_path)
-            print(f"[Library]   Moved to _done/")
 
             self.state.proposals_processed += 1
 
         except Exception as e:
             self.state.errors += 1
-            print(f"[Library]   ERROR: {e}")
+            print(f"[Library]   ERROR: {type(e).__name__}: {e}")
 
         elapsed = (datetime.now() - start).total_seconds()
         print(f"[Library]   Done ({elapsed:.1f}s). "
               f"Total processed: {self.state.proposals_processed}")
         self.state.current_proposal = None
+
+    def _build_librarian_prompt(self, filename: str, content: str) -> str:
+        """Build the prompt for the Librarian agent."""
+        return f"""Process the following knowledge proposal and update the wiki accordingly.
+
+## Proposal: {filename}
+
+```yaml
+{content}
+```
+
+## Instructions
+
+1. Read the proposal carefully — understand the knowledge claims and evidence.
+2. Check the existing wiki at ~/kernel_lab_kb/wiki/ for related pages.
+3. Decide: create a new page, update an existing page, or defer.
+4. If creating/updating, write the wiki page with proper YAML frontmatter.
+5. Update any related pages that should link to/from this new content.
+
+## Wiki Location
+
+Write pages to: ~/kernel_lab_kb/wiki/{{category}}/{{page-slug}}.md
+Categories: concepts, patterns, problems, decisions, references
+
+## Page Format
+
+Every wiki page MUST have this frontmatter:
+```yaml
+---
+id: "page-slug"
+title: "Human Readable Title"
+category: "concepts"
+tags: ["tag1", "tag2"]
+status: active
+created: {datetime.now().strftime('%Y-%m-%d')}
+updated: {datetime.now().strftime('%Y-%m-%d')}
+sources:
+  - "evidence reference"
+---
+```
+
+Use [[page-slug]] for cross-references between wiki pages.
+
+After writing, report what you did: created/updated which pages, and why.
+"""
 
     # ── EventHandler callbacks (for future LLM agent integration) ──
 
@@ -222,8 +317,8 @@ class Library(DefaultHandler):
             "expert_consults": self.state.expert_consults,
             "errors": self.state.errors,
             "started_at": self.state.started_at.isoformat() if self.state.started_at else None,
-            "queue_size": len(list(PROPOSALS_DIR.glob("*.yaml"))),
-            "inject_size": len(list(INJECT_DIR.glob("*.yaml"))),
+            "queue_size": len(list(PENDING_DIR.glob("*.yaml"))) if PENDING_DIR.exists() else 0,
+            "inject_size": len(list(INJECT_DIR.glob("*.yaml"))) if INJECT_DIR.exists() else 0,
         }
 
 

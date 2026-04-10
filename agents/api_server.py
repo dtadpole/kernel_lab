@@ -44,7 +44,7 @@ class WorkshopAPIServer:
     """FastAPI server for Workshop introspection and control."""
 
     def __init__(self, workshop: Workshop):
-        self.workshop = supervisor
+        self.workshop = workshop
         self._port: int = 0
         self._api_json_path: Path | None = None
         self._serve_task: asyncio.Task | None = None

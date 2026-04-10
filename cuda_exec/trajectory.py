@@ -326,27 +326,55 @@ def _next_gem_version(gem_base: Path) -> int:
     return max_ver + 1
 
 
-def _load_latest_gem_results(gem_base: Path) -> dict | None:
-    """Load results.json from the most recent gem."""
+def _load_best_historical_gem_results(gem_base: Path) -> dict | None:
+    """Load the best-ever gem results (per-config best across ALL gem versions).
+
+    For each config, picks the lowest gen_median_ms across all historical gems.
+    This prevents regression: a new gem must beat the historical best, not just
+    the most recent (possibly regressed) gem.
+    """
     if not gem_base.exists():
         return None
     versions = sorted(
         [d.name for d in gem_base.iterdir() if d.is_dir() and d.name.startswith("v")],
-        reverse=True,
     )
+    if not versions:
+        return None
+
+    # Start with the latest gem as the base (for non-config fields like timestamp)
+    best_result = None
+    best_configs: dict[str, dict] = {}
+
     for ver_dir in versions:
         results_file = gem_base / ver_dir / "results.json"
-        if results_file.exists():
-            try:
-                return json.loads(results_file.read_text())
-            except (json.JSONDecodeError, OSError):
+        if not results_file.exists():
+            continue
+        try:
+            data = json.loads(results_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        if best_result is None:
+            best_result = data
+
+        for slug, cfg in data.get("configs", {}).items():
+            cur_ms = cfg.get("gen_median_ms")
+            if cur_ms is None or cur_ms <= 0:
                 continue
-    return None
+            prev_ms = best_configs.get(slug, {}).get("gen_median_ms")
+            if prev_ms is None or cur_ms < prev_ms:
+                best_configs[slug] = cfg
+
+    if best_result is None:
+        return None
+
+    best_result["configs"] = best_configs
+    return best_result
 
 
 def _check_gem(current_configs: dict, gem_base: Path) -> dict | None:
     """Check if any config beats the latest gem. Returns gem_info or None."""
-    previous = _load_latest_gem_results(gem_base)
+    previous = _load_best_historical_gem_results(gem_base)
 
     if previous is None:
         # First run — still require correctness

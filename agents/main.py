@@ -1,28 +1,22 @@
-"""Entry point for running the Supervisor → Solver → Benchmarker loop.
+"""Entry point for running the Supervisor.
 
 Usage:
-    # Continuous mode (default) — runs forever, spawning new Solvers
     cd /home/zhenc/kernel_lab
     .venv/bin/python -m agents.main --kernel matmul --gpu 4
     .venv/bin/python -m agents.main --kernel fa4 --gpu 0
-
-    # Single session mode
-    .venv/bin/python -m agents.main --kernel matmul --gpu 4 --single
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import signal
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from agents.config import SystemConfig
-from agents.supervisor import Supervisor, TaskResult
+from agents.supervisor import Supervisor
 
 
 TASKS_DIR = Path("conf/agent/tasks")
@@ -36,110 +30,16 @@ def _load_task(kernel: str) -> str:
     raise FileNotFoundError(f"No task file for kernel '{kernel}' at {task_file}")
 
 
-def print_result(result: TaskResult) -> None:
-    print(f"\n{'='*60}")
-    print(f"  SESSION RESULT")
-    print(f"{'='*60}")
-    print(f"  Success:    {result.success}")
-    print(f"  Waves:      {result.waves}")
-    print(f"  Tool calls: {result.total_tool_calls}")
-    print(f"  Errors:     {result.total_errors}")
-    print(f"  Elapsed:    {result.elapsed_seconds:.0f}s ({result.elapsed_seconds/60:.1f}m)")
-    print(f"  Benchmarks: {len(result.bench_results)}")
-    for i, br in enumerate(result.bench_results):
-        improved = "✓ IMPROVED" if br["improved"] else "✗ no improvement"
-        print(f"    [{i}] {br['kernel']} — {improved}")
-    print(f"\n  Verdict history:")
-    for v in result.verdict_history:
-        print(f"    wave {v['wave']}: {v['action']} — {v['detail'][:80]}")
-    print(f"\n  Result (first 500 chars):")
-    print(f"  {result.result_text[:500]}")
-    print(f"{'='*60}\n")
-
-
-async def run_continuous(args: argparse.Namespace) -> None:
-    """Continuous mode — run Solver sessions forever."""
-    config = SystemConfig.from_yaml(args.config)
-
-    supervisor = Supervisor(
-        config=config,
-        max_waves=args.max_waves,
-        response_prompts_dir=args.prompts_dir,
-    )
-
-    task = args.task or _load_task(args.kernel)
-
-    print(f"[Main] Starting Supervisor — CONTINUOUS MODE")
-    print(f"[Main] Kernel: {args.kernel}")
-    print(f"[Main] GPU: {args.gpu}")
-    print(f"[Main] Task: {task[:100]}...")
-    print(f"[Main] Config: {args.config}")
-
-    await supervisor.run_continuous(task=task, kernel=args.kernel, gpu=args.gpu)
-
-
-async def run_single(args: argparse.Namespace) -> TaskResult:
-    """Single session mode — run one Solver session."""
-    config = SystemConfig.from_yaml(args.config)
-
-    supervisor = Supervisor(
-        config=config,
-        max_waves=args.max_waves,
-        response_prompts_dir=args.prompts_dir,
-    )
-
-    task = args.task or _load_task(args.kernel)
-
-    print(f"[Main] Starting Supervisor — SINGLE SESSION")
-    print(f"[Main] Kernel: {args.kernel}")
-    print(f"[Main] GPU: {args.gpu}")
-    print(f"[Main] Task: {task[:100]}...")
-    print(f"[Main] Config: {args.config}")
-
-    result = await supervisor.run_task(
-        task=task,
-        kernel=args.kernel,
-        gpu=args.gpu,
-        run_tag=args.run_tag,
-    )
-
-    print_result(result)
-
-    # Save result to journal
-    journal_dir = Path(config.storage.kb_root).expanduser() / config.storage.journal_dir
-    result_file = journal_dir / "supervisor_results.jsonl"
-    result_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(result_file, "a") as f:
-        f.write(json.dumps({
-            "timestamp": datetime.now().isoformat(),
-            "kernel": args.kernel,
-            "success": result.success,
-            "waves": result.waves,
-            "elapsed_seconds": result.elapsed_seconds,
-            "bench_results": result.bench_results,
-            "verdict_history": result.verdict_history,
-        }, default=str) + "\n")
-
-    return result
-
-
 def _setup_process_group():
-    """Create a new process group so all children can be killed together.
-
-    When this process is killed (SIGTERM/SIGINT), the signal handler
-    kills the entire process group, ensuring no orphan Claude CLI
-    or MCP server processes are left behind.
-    """
-    os.setpgrp()  # become process group leader
+    """Create a new process group so all children can be killed together."""
+    os.setpgrp()
 
     def _kill_group(signum, frame):
         print(f"\n[Main] Received signal {signum} ({signal.Signals(signum).name}), killing process group...")
-        # Kill children first (exclude self to avoid re-entry)
         try:
             os.killpg(os.getpgrp(), signal.SIGTERM)
         except ProcessLookupError:
             pass
-        # Exit with 128+signal (Unix convention: killed by signal)
         os._exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _kill_group)
@@ -148,7 +48,7 @@ def _setup_process_group():
 
 def main():
     _setup_process_group()
-    parser = argparse.ArgumentParser(description="Run Supervisor → Solver → Benchmarker loop")
+    parser = argparse.ArgumentParser(description="Run Supervisor")
     parser.add_argument("--kernel", default="matmul", choices=["matmul", "fa4", "vecadd"],
                         help="Kernel to optimize (default: matmul)")
     parser.add_argument("--gpu", type=int, default=4,
@@ -159,19 +59,22 @@ def main():
                         help="Config file path")
     parser.add_argument("--prompts-dir", default="conf/agent/response_prompts",
                         help="Steward prompts directory")
-    parser.add_argument("--max-waves", type=int, default=0,
-                        help="Max waves per run (0 = unlimited)")
-    parser.add_argument("--run-tag", default=None,
-                        help="Custom run_tag (single mode only)")
-    parser.add_argument("--single", action="store_true",
-                        help="Run a single session instead of continuous mode")
     args = parser.parse_args()
 
-    if args.single:
-        result = asyncio.run(run_single(args))
-        sys.exit(0 if result.success else 1)
-    else:
-        asyncio.run(run_continuous(args))
+    config = SystemConfig.from_yaml(args.config)
+    supervisor = Supervisor(
+        config=config,
+        response_prompts_dir=args.prompts_dir,
+    )
+
+    task = args.task or _load_task(args.kernel)
+
+    print(f"[Main] Kernel: {args.kernel}")
+    print(f"[Main] GPU: {args.gpu}")
+    print(f"[Main] Task: {task[:100]}...")
+    print(f"[Main] Config: {args.config}")
+
+    asyncio.run(supervisor.run_continuous(task=task, kernel=args.kernel, gpu=args.gpu))
 
 
 if __name__ == "__main__":

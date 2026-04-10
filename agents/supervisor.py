@@ -152,11 +152,9 @@ class Supervisor(DefaultHandler):
     def __init__(
         self,
         config: SystemConfig,
-        max_waves: int = 0,  # 0 = unlimited (run until SUCCESS or hard_limit)
         response_prompts_dir: str | Path = "conf/agent/response_prompts",
     ):
         self.config = config
-        self.max_waves = max_waves
         self.state = SupervisorState()
 
         steward_config = config.steward
@@ -171,7 +169,7 @@ class Supervisor(DefaultHandler):
         self._pending_stop_event: StopEvent | None = None
         self._api_server: SupervisorAPIServer | None = None
 
-    # ── Continuous loop ──
+    # ── Main loop ──
 
     async def run_continuous(
         self,
@@ -179,30 +177,35 @@ class Supervisor(DefaultHandler):
         kernel: str = "matmul",
         gpu: int = 4,
     ) -> None:
-        """Run Solver sessions in an infinite loop until manually stopped.
+        """Run forever: Task → Wave → Session.
 
-        Each session is a fresh Solver with a new run_tag, picking up from
-        the current state of the KB gen directory. Sessions accumulate experience —
-        each new Solver gets a summary of what previous sessions tried.
+        Task: one optimization job, runs until external kill.
+        Wave: one subprocess (one PID). Fresh AgentRunner per Wave.
+        Session: one dialogue round within a Wave (query → ResultMessage).
         """
-        session_number = 0
-        session_history: list[dict] = []
+        import time as _time
+
         now = datetime.now()
         run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
+        task_slug = _slugify(task)
 
-        # Set run_tag on storage config so all agents inherit it
         self.config.storage.run_tag = run_tag
 
-        # Initialize state early so API server can read kernel/gpu/run_tag
         self.state = SupervisorState(
             phase="starting",
             task=task,
-            task_slug=_slugify(task),
+            task_slug=task_slug,
             run_tag=run_tag,
             kernel=kernel,
             gpu=gpu,
-            started_at=datetime.now(),
+            started_at=now,
         )
+
+        # Create run directories
+        kb_run_dir = Path(self.config.storage.kb_root).expanduser() / "runs" / run_tag
+        scratch_dir = Path.home() / ".cuda_exec" / run_tag
+        kb_run_dir.mkdir(parents=True, exist_ok=True)
+        scratch_dir.mkdir(parents=True, exist_ok=True)
 
         # Start API server
         self._api_server = SupervisorAPIServer(self)
@@ -213,138 +216,178 @@ class Supervisor(DefaultHandler):
             self._api_server = None
 
         print(f"\n{'='*60}")
-        print(f"[Supervisor] CONTINUOUS MODE — will run indefinitely")
-        print(f"[Supervisor] Kernel: {kernel}")
-        print(f"[Supervisor] GPU: {gpu}")
+        print(f"[Supervisor] Task: {kernel} on GPU {gpu}")
         print(f"[Supervisor] Run tag: {run_tag}")
         if self._api_server:
             print(f"[Supervisor] API: http://127.0.0.1:{api_port}")
-        print(f"[Supervisor] Kill with Ctrl+C or hard_limit to stop")
+        print(f"[Supervisor] Kill with Ctrl+C to stop")
         print(f"{'='*60}\n")
 
+        wave = 0
+        wave_history: list[dict] = []
         consecutive_errors = 0
         max_consecutive_errors = 5
-        error_cooldown_seconds = 60
-        recent_session_starts: list[float] = []  # timestamps
-        max_sessions_per_minute = 10
+        recent_wave_starts: list[float] = []
 
-        while True:
-            session_number += 1
-
-            # Rate limit: prevent crash loops from creating millions of sessions
-            import time
-            now = time.time()
-            recent_session_starts.append(now)
-            recent_session_starts = [t for t in recent_session_starts if now - t < 60]
-            if len(recent_session_starts) > max_sessions_per_minute:
-                print(f"[Supervisor] CRASH LOOP DETECTED: {len(recent_session_starts)} sessions in 60s. "
-                      f"Cooling down {error_cooldown_seconds}s...")
-                await asyncio.sleep(error_cooldown_seconds)
-                recent_session_starts.clear()
+        while True:  # Task loop — runs forever
+            # ── Crash loop protection ──
+            now_ts = _time.time()
+            recent_wave_starts.append(now_ts)
+            recent_wave_starts = [t for t in recent_wave_starts if now_ts - t < 60]
+            if len(recent_wave_starts) > 10:
+                print(f"[Supervisor] CRASH LOOP: {len(recent_wave_starts)} waves in 60s — cooling down 60s")
+                await asyncio.sleep(60)
+                recent_wave_starts.clear()
                 consecutive_errors = 0
 
-            # Build prompt with history from previous sessions
-            session_prompt = self._build_continuous_prompt(
-                task, kernel, session_number, session_history,
+            # ── Create fresh Runner for this Wave ──
+            solver_config = self.config.get_agent("solver")
+            self._solver_runner = AgentRunner(
+                agent_config=solver_config,
+                storage_config=self.config.storage,
+                handler=self,
+                monitor_config=self.config.monitor,
+                wave=wave,
+                task_slug=task_slug,
             )
 
+            self.state.wave = wave
+            self.state.phase = "solving"
+            self._gem_produced = False
+            self._reflection_received = False
+
+            wave_start = datetime.now()
+            initial_prompt = self._build_initial_prompt(task, run_tag, kernel, gpu)
+            if wave_history:
+                initial_prompt += self._build_wave_history_prompt(wave_history)
+
             print(f"\n{'='*60}")
-            print(f"[Supervisor] Session {session_number} starting")
-            print(f"[Supervisor] Run tag: {run_tag}")
-            if session_history:
-                last = session_history[-1]
-                print(f"[Supervisor] Previous session: {last.get('verdict', '?')} "
-                      f"— {last.get('summary', '')[:100]}")
+            print(f"[Supervisor] Wave {wave} starting")
             print(f"{'='*60}\n")
 
             try:
-                result = await self.run_task(
-                    task=session_prompt,
-                    kernel=kernel,
-                    gpu=gpu,
-                    run_tag=run_tag,
-                )
+                await self._solver_runner.start(initial_prompt)
+                session = 0
 
-                consecutive_errors = 0  # reset on success
+                while True:  # Session loop within Wave
+                    self.state.phase = "solving"
+                    result = await self._solver_runner.run_until_result()
+                    self._current_log = result.log
 
-                # Record session result
-                session_record = {
-                    "session": session_number,
-                    "run_tag": run_tag,
-                    "success": result.success,
-                    "verdict": result.verdict_history[-1]["action"] if result.verdict_history else "?",
-                    "waves": result.waves,
-                    "elapsed": f"{result.elapsed_seconds:.0f}s",
-                    "benchmarks": len(result.bench_results),
-                    "improved": any(b["improved"] for b in result.bench_results),
-                    "summary": result.result_text[:300],
-                }
-                session_history.append(session_record)
+                    # ── Gem + reflection → SUCCESS → end Wave ──
+                    if self._gem_produced and self._reflection_received:
+                        print(f"[Supervisor] Wave {wave} — gem produced + reflection received → SUCCESS")
+                        await self._solver_runner.send_message(
+                            "SUCCESS. Thank you for your contribution. This wave is complete."
+                        )
+                        await asyncio.sleep(10)
+                        self.state.verdict_history.append({
+                            "wave": wave, "session": session,
+                            "action": "SUCCESS", "detail": "gem + reflection",
+                        })
+                        break
 
-                print(f"\n[Supervisor] Session {session_number} ended: "
-                      f"verdict={session_record['verdict']}, "
-                      f"improved={session_record['improved']}, "
-                      f"elapsed={session_record['elapsed']}")
+                    # ── Steward review ──
+                    self.state.phase = "deciding"
+                    stop_event = self._pending_stop_event
+                    if stop_event:
+                        print(f"[Supervisor] Wave {wave} session {session} ended (stop_reason={stop_event.reason})")
+                        verdict = await self.steward.review_session_end(
+                            transcript_path=self._get_transcript_path(),
+                            result_text=stop_event.result_text or result.result_text,
+                            stop_reason=stop_event.reason,
+                            elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
+                            total_tool_calls=self.state.turns_completed,
+                            error_count=self.state.error_count,
+                        )
+                    else:
+                        verdict = None
 
-                # Save session history to journal
-                self._save_continuous_log(kernel, session_history)
+                    if verdict is None or not verdict.action:
+                        verdict = StewardResponse(
+                            action="CONTINUE", detail="Steward could not produce a verdict",
+                            reasoning="No verdict available", intervention_level=2,
+                        )
+
+                    self.state.verdict_history.append({
+                        "wave": wave, "session": session,
+                        "action": verdict.action,
+                        "detail": verdict.detail,
+                        "reasoning": verdict.reasoning[:200],
+                    })
+
+                    print(f"[Supervisor] Wave {wave} session {session} verdict: {verdict.action}")
+
+                    if verdict.action == "ABORT":
+                        break  # End Wave
+
+                    # ── CONTINUE → new Session in same Wave ──
+                    session += 1
+                    self._pending_stop_event = None
+                    continue_prompt = self._build_continue_prompt(verdict)
+                    await self._solver_runner.send_message(continue_prompt)
+
+                consecutive_errors = 0
 
             except KeyboardInterrupt:
-                print(f"\n[Supervisor] Interrupted by user after {session_number} sessions")
+                print(f"\n[Supervisor] Interrupted by user at wave {wave}")
+                await self._solver_runner.stop()
                 await self._stop_api_server()
                 break
-            except BaseException as e:
-                consecutive_errors += 1
-                print(f"\n[Supervisor] Session {session_number} error ({consecutive_errors}/{max_consecutive_errors}): "
-                      f"{type(e).__name__}: {e}")
-                session_history.append({
-                    "session": session_number,
-                    "run_tag": run_tag,
-                    "success": False,
-                    "verdict": "ERROR",
-                    "elapsed": "0s",
-                    "improved": False,
-                    "summary": f"{type(e).__name__}: {str(e)[:280]}",
-                })
 
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"[Supervisor] Wave {wave} error ({consecutive_errors}/{max_consecutive_errors}): "
+                      f"{type(e).__name__}: {e}")
                 if consecutive_errors >= max_consecutive_errors:
-                    print(f"[Supervisor] {max_consecutive_errors} consecutive errors — "
-                          f"cooling down {error_cooldown_seconds}s before retry")
-                    await asyncio.sleep(error_cooldown_seconds)
+                    print(f"[Supervisor] {max_consecutive_errors} consecutive errors — cooling down 60s")
+                    await asyncio.sleep(60)
                     consecutive_errors = 0
 
-    def _build_continuous_prompt(
-        self, task: str, kernel: str,
-        session_number: int, history: list[dict],
-    ) -> str:
-        """Build prompt for a new session, including history from previous sessions."""
-        parts = [task]
+            finally:
+                # Always clean up subprocess
+                try:
+                    await self._solver_runner.stop()
+                except Exception as e:
+                    print(f"[Supervisor] Wave {wave} cleanup error: {e}")
 
-        if history:
-            parts.append("\n---\n")
-            parts.append(f"## Previous Sessions ({len(history)} completed)\n")
-            # Show last 5 sessions in detail, earlier ones summarized
-            recent = history[-5:]
-            for h in recent:
-                improved = "✓ IMPROVED" if h.get("improved") else "✗ no improvement"
-                parts.append(
-                    f"- Session {h['session']} ({h['elapsed']}): "
-                    f"verdict={h['verdict']}, {improved}\n"
-                    f"  {h.get('summary', '')[:200]}\n"
-                )
+            # ── Record wave result ──
+            elapsed = (datetime.now() - wave_start).total_seconds()
+            wave_record = {
+                "wave": wave,
+                "elapsed": f"{elapsed:.0f}s",
+                "benchmarks": len(self.state.bench_results),
+                "improved": self._gem_produced,
+                "verdict": self.state.verdict_history[-1]["action"] if self.state.verdict_history else "?",
+            }
+            wave_history.append(wave_record)
+            self._save_wave_log(kernel, wave_history)
+
+            print(f"[Supervisor] Wave {wave} ended ({wave_record['elapsed']}, "
+                  f"verdict={wave_record['verdict']}, improved={wave_record['improved']})")
+
+            wave += 1
+
+    # ── Helpers ──
+
+    def _build_wave_history_prompt(self, history: list[dict]) -> str:
+        """Append previous wave summaries to the initial prompt."""
+        parts = ["\n---\n", f"## Previous Waves ({len(history)} completed)\n"]
+        for h in history[-5:]:
+            improved = "✓ IMPROVED" if h.get("improved") else "✗ no improvement"
             parts.append(
-                "\nBuild on what previous sessions learned. "
-                "Do NOT repeat approaches that already failed. "
-                "Try something fundamentally different if prior approaches "
-                "did not produce improvement.\n"
+                f"- Wave {h['wave']} ({h['elapsed']}): "
+                f"verdict={h['verdict']}, {improved}\n"
             )
-
+        parts.append(
+            "\nBuild on what previous waves learned. "
+            "Do NOT repeat approaches that already failed.\n"
+        )
         return "\n".join(parts)
 
-    def _save_continuous_log(self, kernel: str, history: list[dict]) -> None:
-        """Save the continuous session history to the run's journal."""
-        import json
-        log_path = self.config.storage.journal_path / f"continuous_{kernel}.jsonl"
+    def _save_wave_log(self, kernel: str, history: list[dict]) -> None:
+        """Save wave history to the run's journal."""
+        log_path = self.config.storage.journal_path / f"waves_{kernel}.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w") as f:
             for h in history:
@@ -355,185 +398,6 @@ class Supervisor(DefaultHandler):
         if self._api_server:
             await self._api_server.stop()
             self._api_server = None
-
-    # ── Single task ──
-
-    async def run_task(
-        self,
-        task: str,
-        kernel: str = "matmul",
-        gpu: int = 4,
-        run_tag: str | None = None,
-    ) -> TaskResult:
-        """Run the full Solver → Benchmarker → decide loop.
-
-        Args:
-            task: Task description for the Solver.
-            kernel: Kernel name for ik:bench (matmul, fa4, vecadd).
-            run_tag: Optional run_tag. Auto-generated if not provided.
-        """
-        now = datetime.now()
-        task_slug = _slugify(task)
-        if run_tag is None:
-            run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
-
-        # Set run_tag on storage so journal goes under runs/<run_tag>/journal/
-        # and CUDA_EXEC_RUN_TAG env var is propagated to all agents
-        self.config.storage.run_tag = run_tag
-
-        # Create run directories: KB run dir + scratch dir
-        kb_run_dir = Path(self.config.storage.kb_root).expanduser() / "runs" / run_tag
-        scratch_dir = Path.home() / ".cuda_exec" / run_tag
-        kb_run_dir.mkdir(parents=True, exist_ok=True)
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-
-        self.state = SupervisorState(
-            phase="planning",
-            task=task,
-            task_slug=task_slug,
-            run_tag=run_tag,
-            kernel=kernel,
-            gpu=gpu,
-            started_at=now,
-        )
-
-        solver_config = self.config.get_agent("solver")
-        last_result: RunResult | None = None
-        verdict: StewardResponse | None = None
-
-        # Create AgentRunner once — CONTINUE will resume the same session
-        self._solver_runner = AgentRunner(
-            agent_config=solver_config,
-            storage_config=self.config.storage,
-            handler=self,
-            monitor_config=self.config.monitor,
-            steward=None,
-        )
-
-        solver_prompt = self._build_initial_prompt(task, run_tag, kernel, gpu)
-
-        wave = 0
-        consecutive_quick_exits = 0
-        max_quick_exits = 3
-        min_session_seconds = 30  # sessions shorter than this are "quick exits"
-
-        while True:  # run until SUCCESS or hard_limit
-            if self.max_waves > 0 and wave >= self.max_waves:
-                break
-            self.state.wave = wave
-            self.state.consecutive_stuck = 0
-            self.state.phase = "solving"
-
-            print(f"\n{'='*60}")
-            print(f"[Supervisor] Wave {wave} — phase: solving")
-            print(f"[Supervisor] Run tag: {run_tag}")
-            print(f"{'='*60}\n")
-
-            self._pending_stop_event = None
-
-            # Run solver with a hard timeout at the supervisor level.
-            # This catches cases where the solver process dies silently
-            # and the Monitor/runner never returns. If the wave doesn't
-            # finish within hard_limit, we treat it as dead and move on.
-            wave_timeout = self.monitor_config.hard_limit + 60  # hard_limit + 1min grace
-            try:
-                if wave == 0:
-                    last_result = await asyncio.wait_for(
-                        self._solver_runner.run(
-                            prompt=solver_prompt,
-                            task_slug=task_slug,
-                        ),
-                        timeout=wave_timeout,
-                    )
-                else:
-                    last_result = await asyncio.wait_for(
-                        self._solver_runner.resume(solver_prompt),
-                        timeout=wave_timeout,
-                    )
-            except asyncio.TimeoutError:
-                print(f"[Supervisor] Wave {wave} timed out ({wave_timeout}s) — treating as dead, starting new wave")
-                last_result = RunResult(log=SessionLog())
-                last_result.stop_reason = "timeout"
-                last_result.result_text = f"Wave timed out after {wave_timeout}s (supervisor-level timeout)"
-
-            self._current_log = last_result.log
-
-            # Detect quick exits (Solver stops almost immediately)
-            session_duration = last_result.log.elapsed().total_seconds() if last_result.log else 0
-            if wave > 0 and session_duration < min_session_seconds:
-                consecutive_quick_exits += 1
-                print(f"[Supervisor] Quick exit detected ({session_duration:.0f}s < {min_session_seconds}s) "
-                      f"— {consecutive_quick_exits}/{max_quick_exits}")
-                if consecutive_quick_exits >= max_quick_exits:
-                    print(f"[Supervisor] {max_quick_exits} consecutive quick exits — aborting run_task")
-                    break
-            else:
-                consecutive_quick_exits = 0
-
-            # ── Post-session Steward review ──
-            # Solver has stopped (end_turn), safe to call Steward.
-            # On CONTINUE, we resume the same session with guidance.
-            self.state.phase = "deciding"
-
-            stop_event = self._pending_stop_event
-            if stop_event:
-                print(f"[Supervisor] Reviewing session end (stop_reason={stop_event.reason})")
-                verdict = await self.steward.review_session_end(
-                    transcript_path=self._get_transcript_path(),
-                    result_text=stop_event.result_text or last_result.result_text,
-                    stop_reason=stop_event.reason,
-                    elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
-                    total_tool_calls=self.state.turns_completed,
-                    error_count=self.state.error_count,
-                )
-            else:
-                verdict = None
-
-            if verdict is None or not verdict.action:
-                # No verdict or empty action — default to CONTINUE so we don't
-                # silently accept incomplete work
-                verdict = StewardResponse(
-                    action="CONTINUE", detail="Steward could not produce a verdict",
-                    reasoning="No verdict available — continuing with fresh approach",
-                    intervention_level=2,
-                )
-
-            self.state.verdict_history.append({
-                "wave": wave,
-                "action": verdict.action,
-                "detail": verdict.detail,
-                "reasoning": verdict.reasoning[:200],
-            })
-
-            print(f"\n[Supervisor] Wave {wave} verdict: {verdict.action}")
-
-            if verdict.action == "SUCCESS":
-                self.state.phase = "done"
-                break
-            elif verdict.action == "ABORT":
-                self.state.phase = "done"
-                break
-            elif verdict.action == "CONTINUE":
-                solver_prompt = self._build_continue_prompt(verdict)
-            else:
-                # Unknown verdict — treat as CONTINUE
-                solver_prompt = self._build_continue_prompt(verdict)
-
-            wave += 1
-
-        elapsed = (datetime.now() - self.state.started_at).total_seconds() if self.state.started_at else 0
-
-        return TaskResult(
-            success=(verdict.action == "SUCCESS") if verdict else False,
-            result_text=last_result.result_text if last_result else "",
-            waves=self.state.wave + 1,
-            total_tool_calls=self.state.turns_completed,
-            total_errors=self.state.error_count,
-            elapsed_seconds=elapsed,
-            verdict_history=self.state.verdict_history,
-            bench_results=self.state.bench_results,
-            solver_result=last_result,
-        )
 
     # ── Prompt builders ──
 
@@ -717,6 +581,8 @@ class Supervisor(DefaultHandler):
         files = result.get("files_written", [])
         print(f"[Supervisor] Reflection saved: {files}")
 
+        self._reflection_received = True
+
         parts = [f"Reflection saved to {result.get('reflection_path', '?')}."]
         if result.get("gem_notes_path"):
             parts.append(f"Gem notes saved to {result['gem_notes_path']}.")
@@ -751,6 +617,9 @@ class Supervisor(DefaultHandler):
                 "summary": bench_result.result_text[:500],
                 "bench_data": bench_data,
             })
+
+            if improved:
+                self._gem_produced = True
 
             has_correctness_failure = self._check_correctness_failure(
                 bench_data, bench_result.result_text

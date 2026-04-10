@@ -426,15 +426,30 @@ class Supervisor(DefaultHandler):
 
             self._pending_stop_event = None
 
-            if wave == 0:
-                # First wave — fresh session
-                last_result = await self._solver_runner.run(
-                    prompt=solver_prompt,
-                    task_slug=task_slug,
-                )
-            else:
-                # CONTINUE — resume the same session with Steward guidance
-                last_result = await self._solver_runner.resume(solver_prompt)
+            # Run solver with a hard timeout at the supervisor level.
+            # This catches cases where the solver process dies silently
+            # and the Monitor/runner never returns. If the wave doesn't
+            # finish within hard_limit, we treat it as dead and move on.
+            wave_timeout = self.monitor_config.hard_limit + 60  # hard_limit + 1min grace
+            try:
+                if wave == 0:
+                    last_result = await asyncio.wait_for(
+                        self._solver_runner.run(
+                            prompt=solver_prompt,
+                            task_slug=task_slug,
+                        ),
+                        timeout=wave_timeout,
+                    )
+                else:
+                    last_result = await asyncio.wait_for(
+                        self._solver_runner.resume(solver_prompt),
+                        timeout=wave_timeout,
+                    )
+            except asyncio.TimeoutError:
+                print(f"[Supervisor] Wave {wave} timed out ({wave_timeout}s) — treating as dead, starting new wave")
+                last_result = RunResult(log=SessionLog())
+                last_result.stop_reason = "timeout"
+                last_result.result_text = f"Wave timed out after {wave_timeout}s (supervisor-level timeout)"
 
             self._current_log = last_result.log
 

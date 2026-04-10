@@ -808,18 +808,6 @@ def _load_task(kernel: str) -> str:
 def main():
     import argparse
 
-    os.setpgrp()
-
-    def _kill_group(signum, frame):
-        try:
-            os.killpg(os.getpgrp(), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        os._exit(128 + signum)
-
-    signal.signal(signal.SIGTERM, _kill_group)
-    signal.signal(signal.SIGINT, _kill_group)
-
     parser = argparse.ArgumentParser(description="Run Workshop")
     parser.add_argument("--kernel", default="matmul", choices=["matmul", "fa4", "vecadd"])
     parser.add_argument("--gpu", type=int, default=4)

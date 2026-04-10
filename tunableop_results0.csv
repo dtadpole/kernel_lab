@@ -1,0 +1,7 @@
+Validator,PT_VERSION,2.11.0
+GemmTunableOp_BFloat16_TN,tn_256_256_256_ld_256_256_256,Default,0.00779232
+GemmTunableOp_BFloat16_TN,tn_512_512_512_ld_512_512_512,Default,0.00805632
+GemmTunableOp_BFloat16_TN,tn_1024_1024_1024_ld_1024_1024_1024,Default,0.0103091
+GemmTunableOp_BFloat16_TN,tn_2048_2048_2048_ld_2048_2048_2048,Default,0.0266896
+GemmTunableOp_BFloat16_TN,tn_4096_4096_4096_ld_4096_4096_4096,Default,0.159678
+GemmTunableOp_BFloat16_TN,tn_8192_8192_8192_ld_8192_8192_8192,Default,1.32163

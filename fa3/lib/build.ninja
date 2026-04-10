@@ -1,0 +1,309 @@
+ninja_required_version = 1.3
+cxx = c++
+nvcc = /usr/local/cuda-13.0/bin/nvcc
+
+cflags = -DTORCH_EXTENSION_NAME=fa3_kernels -DTORCH_API_INCLUDE_EXTENSION_H -I/data/users/zhenc/fbsource/fbcode/fa3/hopper -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/include -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/tools/util/include -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/tools/library/include -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/tools/library/src -isystem /home/zhenc/kernel_lab/.venv/lib/python3.12/site-packages/torch/include -isystem /home/zhenc/kernel_lab/.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /home/zhenc/.local/share/uv/python/cpython-3.12.11-linux-x86_64-gnu/include/python3.12 -fPIC -std=c++17 -Wno-strict-aliasing
+post_cflags = 
+cuda_cflags = -DTORCH_EXTENSION_NAME=fa3_kernels -DTORCH_API_INCLUDE_EXTENSION_H -I/data/users/zhenc/fbsource/fbcode/fa3/hopper -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/include -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/tools/util/include -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/tools/library/include -I/data/users/zhenc/fbsource/third-party/cutlass/4.3.5/tools/library/src -isystem /home/zhenc/kernel_lab/.venv/lib/python3.12/site-packages/torch/include -isystem /home/zhenc/kernel_lab/.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-13.0/include -isystem /home/zhenc/.local/share/uv/python/cpython-3.12.11-linux-x86_64-gnu/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 --use_fast_math --expt-relaxed-constexpr --ftemplate-backtrace-limit=0 --resource-usage -lineinfo -DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED -DCUTLASS_ENABLE_GDC_FOR_SM90 -DNDEBUG -gencode=arch=compute_90a,code=sm_90a -gencode=arch=compute_80,code=sm_80 -std=c++17
+cuda_post_cflags = 
+cuda_dlink_post_cflags = 
+sycl_dlink_post_cflags = 
+ldflags = -shared -L/home/zhenc/kernel_lab/.venv/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda-13.0/lib64 -lcudart
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags
+  depfile = $out.d
+  deps = gcc
+
+rule cuda_compile
+  depfile = $out.d
+  deps = gcc
+  command = $nvcc -MD -MF $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags
+
+
+
+
+
+rule link
+  command = $cxx $in $ldflags -o $out
+
+build flash_api.o: compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/flash_api.cpp
+build flash_fwd_combine.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/flash_fwd_combine.cu
+build flash_bwd_hdim128_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_bf16_sm80.cu
+build flash_bwd_hdim128_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_bf16_sm90.cu
+build flash_bwd_hdim128_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_bf16_softcap_sm80.cu
+build flash_bwd_hdim128_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_bf16_softcap_sm90.cu
+build flash_bwd_hdim128_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_fp16_sm80.cu
+build flash_bwd_hdim128_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_fp16_sm90.cu
+build flash_bwd_hdim128_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_fp16_softcap_sm80.cu
+build flash_bwd_hdim128_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim128_fp16_softcap_sm90.cu
+build flash_bwd_hdim192_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_bf16_sm80.cu
+build flash_bwd_hdim192_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_bf16_sm90.cu
+build flash_bwd_hdim192_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_bf16_softcap_sm80.cu
+build flash_bwd_hdim192_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_bf16_softcap_sm90.cu
+build flash_bwd_hdim192_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_fp16_sm80.cu
+build flash_bwd_hdim192_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_fp16_sm90.cu
+build flash_bwd_hdim192_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_fp16_softcap_sm80.cu
+build flash_bwd_hdim192_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim192_fp16_softcap_sm90.cu
+build flash_bwd_hdim256_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_bf16_sm80.cu
+build flash_bwd_hdim256_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_bf16_sm90.cu
+build flash_bwd_hdim256_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_bf16_softcap_sm80.cu
+build flash_bwd_hdim256_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_bf16_softcap_sm90.cu
+build flash_bwd_hdim256_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_fp16_sm80.cu
+build flash_bwd_hdim256_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_fp16_sm90.cu
+build flash_bwd_hdim256_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_fp16_softcap_sm80.cu
+build flash_bwd_hdim256_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim256_fp16_softcap_sm90.cu
+build flash_bwd_hdim64_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_bf16_sm80.cu
+build flash_bwd_hdim64_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_bf16_sm90.cu
+build flash_bwd_hdim64_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_bf16_softcap_sm80.cu
+build flash_bwd_hdim64_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_bf16_softcap_sm90.cu
+build flash_bwd_hdim64_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_fp16_sm80.cu
+build flash_bwd_hdim64_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_fp16_sm90.cu
+build flash_bwd_hdim64_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_fp16_softcap_sm80.cu
+build flash_bwd_hdim64_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim64_fp16_softcap_sm90.cu
+build flash_bwd_hdim96_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_bf16_sm80.cu
+build flash_bwd_hdim96_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_bf16_sm90.cu
+build flash_bwd_hdim96_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_bf16_softcap_sm80.cu
+build flash_bwd_hdim96_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_bf16_softcap_sm90.cu
+build flash_bwd_hdim96_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_fp16_sm80.cu
+build flash_bwd_hdim96_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_fp16_sm90.cu
+build flash_bwd_hdim96_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_fp16_softcap_sm80.cu
+build flash_bwd_hdim96_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_bwd_hdim96_fp16_softcap_sm90.cu
+build flash_fwd_hdim128_bf16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_packgqa_sm90.cu
+build flash_fwd_hdim128_bf16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_sm80.cu
+build flash_fwd_hdim128_bf16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_sm90.cu
+build flash_fwd_hdim128_bf16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_softcap_sm80.cu
+build flash_fwd_hdim128_bf16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_softcap_sm90.cu
+build flash_fwd_hdim128_bf16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_split_sm80.cu
+build flash_fwd_hdim128_bf16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_split_sm90.cu
+build flash_fwd_hdim128_bf16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim128_bf16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim128_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_sm80.cu
+build flash_fwd_hdim128_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_sm90.cu
+build flash_fwd_hdim128_bf16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim128_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_softcap_sm80.cu
+build flash_fwd_hdim128_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_softcap_sm90.cu
+build flash_fwd_hdim128_bf16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_split_sm80.cu
+build flash_fwd_hdim128_bf16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_split_sm90.cu
+build flash_fwd_hdim128_bf16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_split_softcap_sm80.cu
+build flash_fwd_hdim128_bf16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_bf16_split_softcap_sm90.cu
+build flash_fwd_hdim128_e4m3_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_packgqa_sm90.cu
+build flash_fwd_hdim128_e4m3_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_paged_sm90.cu
+build flash_fwd_hdim128_e4m3_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_paged_softcap_sm90.cu
+build flash_fwd_hdim128_e4m3_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_paged_split_sm90.cu
+build flash_fwd_hdim128_e4m3_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_paged_split_softcap_sm90.cu
+build flash_fwd_hdim128_e4m3_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_sm90.cu
+build flash_fwd_hdim128_e4m3_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_softcap_packgqa_sm90.cu
+build flash_fwd_hdim128_e4m3_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_softcap_sm90.cu
+build flash_fwd_hdim128_e4m3_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_split_sm90.cu
+build flash_fwd_hdim128_e4m3_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_e4m3_split_softcap_sm90.cu
+build flash_fwd_hdim128_fp16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_packgqa_sm90.cu
+build flash_fwd_hdim128_fp16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_sm80.cu
+build flash_fwd_hdim128_fp16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_sm90.cu
+build flash_fwd_hdim128_fp16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_softcap_sm80.cu
+build flash_fwd_hdim128_fp16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_softcap_sm90.cu
+build flash_fwd_hdim128_fp16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_split_sm80.cu
+build flash_fwd_hdim128_fp16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_split_sm90.cu
+build flash_fwd_hdim128_fp16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim128_fp16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim128_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_sm80.cu
+build flash_fwd_hdim128_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_sm90.cu
+build flash_fwd_hdim128_fp16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim128_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_softcap_sm80.cu
+build flash_fwd_hdim128_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_softcap_sm90.cu
+build flash_fwd_hdim128_fp16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_split_sm80.cu
+build flash_fwd_hdim128_fp16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_split_sm90.cu
+build flash_fwd_hdim128_fp16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_split_softcap_sm80.cu
+build flash_fwd_hdim128_fp16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim128_fp16_split_softcap_sm90.cu
+build flash_fwd_hdim192_bf16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_packgqa_sm90.cu
+build flash_fwd_hdim192_bf16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_sm80.cu
+build flash_fwd_hdim192_bf16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_sm90.cu
+build flash_fwd_hdim192_bf16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_softcap_sm80.cu
+build flash_fwd_hdim192_bf16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_softcap_sm90.cu
+build flash_fwd_hdim192_bf16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_split_sm80.cu
+build flash_fwd_hdim192_bf16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_split_sm90.cu
+build flash_fwd_hdim192_bf16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim192_bf16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim192_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_sm80.cu
+build flash_fwd_hdim192_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_sm90.cu
+build flash_fwd_hdim192_bf16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim192_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_softcap_sm80.cu
+build flash_fwd_hdim192_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_softcap_sm90.cu
+build flash_fwd_hdim192_bf16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_split_sm80.cu
+build flash_fwd_hdim192_bf16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_split_sm90.cu
+build flash_fwd_hdim192_bf16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_split_softcap_sm80.cu
+build flash_fwd_hdim192_bf16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_bf16_split_softcap_sm90.cu
+build flash_fwd_hdim192_e4m3_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_packgqa_sm90.cu
+build flash_fwd_hdim192_e4m3_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_paged_sm90.cu
+build flash_fwd_hdim192_e4m3_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_paged_softcap_sm90.cu
+build flash_fwd_hdim192_e4m3_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_paged_split_sm90.cu
+build flash_fwd_hdim192_e4m3_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_paged_split_softcap_sm90.cu
+build flash_fwd_hdim192_e4m3_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_sm90.cu
+build flash_fwd_hdim192_e4m3_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_softcap_packgqa_sm90.cu
+build flash_fwd_hdim192_e4m3_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_softcap_sm90.cu
+build flash_fwd_hdim192_e4m3_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_split_sm90.cu
+build flash_fwd_hdim192_e4m3_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_e4m3_split_softcap_sm90.cu
+build flash_fwd_hdim192_fp16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_packgqa_sm90.cu
+build flash_fwd_hdim192_fp16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_sm80.cu
+build flash_fwd_hdim192_fp16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_sm90.cu
+build flash_fwd_hdim192_fp16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_softcap_sm80.cu
+build flash_fwd_hdim192_fp16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_softcap_sm90.cu
+build flash_fwd_hdim192_fp16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_split_sm80.cu
+build flash_fwd_hdim192_fp16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_split_sm90.cu
+build flash_fwd_hdim192_fp16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim192_fp16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim192_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_sm80.cu
+build flash_fwd_hdim192_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_sm90.cu
+build flash_fwd_hdim192_fp16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim192_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_softcap_sm80.cu
+build flash_fwd_hdim192_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_softcap_sm90.cu
+build flash_fwd_hdim192_fp16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_split_sm80.cu
+build flash_fwd_hdim192_fp16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_split_sm90.cu
+build flash_fwd_hdim192_fp16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_split_softcap_sm80.cu
+build flash_fwd_hdim192_fp16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim192_fp16_split_softcap_sm90.cu
+build flash_fwd_hdim256_bf16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_packgqa_sm90.cu
+build flash_fwd_hdim256_bf16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_sm80.cu
+build flash_fwd_hdim256_bf16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_sm90.cu
+build flash_fwd_hdim256_bf16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_softcap_sm80.cu
+build flash_fwd_hdim256_bf16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_softcap_sm90.cu
+build flash_fwd_hdim256_bf16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_split_sm80.cu
+build flash_fwd_hdim256_bf16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_split_sm90.cu
+build flash_fwd_hdim256_bf16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim256_bf16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim256_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_sm80.cu
+build flash_fwd_hdim256_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_sm90.cu
+build flash_fwd_hdim256_bf16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim256_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_softcap_sm80.cu
+build flash_fwd_hdim256_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_softcap_sm90.cu
+build flash_fwd_hdim256_bf16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_split_sm80.cu
+build flash_fwd_hdim256_bf16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_split_sm90.cu
+build flash_fwd_hdim256_bf16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_split_softcap_sm80.cu
+build flash_fwd_hdim256_bf16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_bf16_split_softcap_sm90.cu
+build flash_fwd_hdim256_e4m3_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_packgqa_sm90.cu
+build flash_fwd_hdim256_e4m3_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_paged_sm90.cu
+build flash_fwd_hdim256_e4m3_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_paged_softcap_sm90.cu
+build flash_fwd_hdim256_e4m3_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_paged_split_sm90.cu
+build flash_fwd_hdim256_e4m3_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_paged_split_softcap_sm90.cu
+build flash_fwd_hdim256_e4m3_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_sm90.cu
+build flash_fwd_hdim256_e4m3_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_softcap_packgqa_sm90.cu
+build flash_fwd_hdim256_e4m3_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_softcap_sm90.cu
+build flash_fwd_hdim256_e4m3_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_split_sm90.cu
+build flash_fwd_hdim256_e4m3_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_e4m3_split_softcap_sm90.cu
+build flash_fwd_hdim256_fp16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_packgqa_sm90.cu
+build flash_fwd_hdim256_fp16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_sm80.cu
+build flash_fwd_hdim256_fp16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_sm90.cu
+build flash_fwd_hdim256_fp16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_softcap_sm80.cu
+build flash_fwd_hdim256_fp16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_softcap_sm90.cu
+build flash_fwd_hdim256_fp16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_split_sm80.cu
+build flash_fwd_hdim256_fp16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_split_sm90.cu
+build flash_fwd_hdim256_fp16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim256_fp16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim256_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_sm80.cu
+build flash_fwd_hdim256_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_sm90.cu
+build flash_fwd_hdim256_fp16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim256_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_softcap_sm80.cu
+build flash_fwd_hdim256_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_softcap_sm90.cu
+build flash_fwd_hdim256_fp16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_split_sm80.cu
+build flash_fwd_hdim256_fp16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_split_sm90.cu
+build flash_fwd_hdim256_fp16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_split_softcap_sm80.cu
+build flash_fwd_hdim256_fp16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim256_fp16_split_softcap_sm90.cu
+build flash_fwd_hdim64_bf16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_packgqa_sm90.cu
+build flash_fwd_hdim64_bf16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_sm80.cu
+build flash_fwd_hdim64_bf16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_sm90.cu
+build flash_fwd_hdim64_bf16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_softcap_sm80.cu
+build flash_fwd_hdim64_bf16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_softcap_sm90.cu
+build flash_fwd_hdim64_bf16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_split_sm80.cu
+build flash_fwd_hdim64_bf16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_split_sm90.cu
+build flash_fwd_hdim64_bf16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim64_bf16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim64_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_sm80.cu
+build flash_fwd_hdim64_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_sm90.cu
+build flash_fwd_hdim64_bf16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim64_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_softcap_sm80.cu
+build flash_fwd_hdim64_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_softcap_sm90.cu
+build flash_fwd_hdim64_bf16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_split_sm80.cu
+build flash_fwd_hdim64_bf16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_split_sm90.cu
+build flash_fwd_hdim64_bf16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_split_softcap_sm80.cu
+build flash_fwd_hdim64_bf16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_bf16_split_softcap_sm90.cu
+build flash_fwd_hdim64_e4m3_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_packgqa_sm90.cu
+build flash_fwd_hdim64_e4m3_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_paged_sm90.cu
+build flash_fwd_hdim64_e4m3_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_paged_softcap_sm90.cu
+build flash_fwd_hdim64_e4m3_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_paged_split_sm90.cu
+build flash_fwd_hdim64_e4m3_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_paged_split_softcap_sm90.cu
+build flash_fwd_hdim64_e4m3_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_sm90.cu
+build flash_fwd_hdim64_e4m3_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_softcap_packgqa_sm90.cu
+build flash_fwd_hdim64_e4m3_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_softcap_sm90.cu
+build flash_fwd_hdim64_e4m3_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_split_sm90.cu
+build flash_fwd_hdim64_e4m3_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_e4m3_split_softcap_sm90.cu
+build flash_fwd_hdim64_fp16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_packgqa_sm90.cu
+build flash_fwd_hdim64_fp16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_sm80.cu
+build flash_fwd_hdim64_fp16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_sm90.cu
+build flash_fwd_hdim64_fp16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_softcap_sm80.cu
+build flash_fwd_hdim64_fp16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_softcap_sm90.cu
+build flash_fwd_hdim64_fp16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_split_sm80.cu
+build flash_fwd_hdim64_fp16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_split_sm90.cu
+build flash_fwd_hdim64_fp16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim64_fp16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim64_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_sm80.cu
+build flash_fwd_hdim64_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_sm90.cu
+build flash_fwd_hdim64_fp16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim64_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_softcap_sm80.cu
+build flash_fwd_hdim64_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_softcap_sm90.cu
+build flash_fwd_hdim64_fp16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_split_sm80.cu
+build flash_fwd_hdim64_fp16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_split_sm90.cu
+build flash_fwd_hdim64_fp16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_split_softcap_sm80.cu
+build flash_fwd_hdim64_fp16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim64_fp16_split_softcap_sm90.cu
+build flash_fwd_hdim96_bf16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_packgqa_sm90.cu
+build flash_fwd_hdim96_bf16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_sm80.cu
+build flash_fwd_hdim96_bf16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_sm90.cu
+build flash_fwd_hdim96_bf16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_softcap_sm80.cu
+build flash_fwd_hdim96_bf16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_softcap_sm90.cu
+build flash_fwd_hdim96_bf16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_split_sm80.cu
+build flash_fwd_hdim96_bf16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_split_sm90.cu
+build flash_fwd_hdim96_bf16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim96_bf16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim96_bf16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_sm80.cu
+build flash_fwd_hdim96_bf16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_sm90.cu
+build flash_fwd_hdim96_bf16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim96_bf16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_softcap_sm80.cu
+build flash_fwd_hdim96_bf16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_softcap_sm90.cu
+build flash_fwd_hdim96_bf16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_split_sm80.cu
+build flash_fwd_hdim96_bf16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_split_sm90.cu
+build flash_fwd_hdim96_bf16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_split_softcap_sm80.cu
+build flash_fwd_hdim96_bf16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_bf16_split_softcap_sm90.cu
+build flash_fwd_hdim96_e4m3_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_packgqa_sm90.cu
+build flash_fwd_hdim96_e4m3_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_paged_sm90.cu
+build flash_fwd_hdim96_e4m3_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_paged_softcap_sm90.cu
+build flash_fwd_hdim96_e4m3_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_paged_split_sm90.cu
+build flash_fwd_hdim96_e4m3_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_paged_split_softcap_sm90.cu
+build flash_fwd_hdim96_e4m3_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_sm90.cu
+build flash_fwd_hdim96_e4m3_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_softcap_packgqa_sm90.cu
+build flash_fwd_hdim96_e4m3_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_softcap_sm90.cu
+build flash_fwd_hdim96_e4m3_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_split_sm90.cu
+build flash_fwd_hdim96_e4m3_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_e4m3_split_softcap_sm90.cu
+build flash_fwd_hdim96_fp16_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_packgqa_sm90.cu
+build flash_fwd_hdim96_fp16_paged_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_sm80.cu
+build flash_fwd_hdim96_fp16_paged_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_sm90.cu
+build flash_fwd_hdim96_fp16_paged_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_softcap_sm80.cu
+build flash_fwd_hdim96_fp16_paged_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_softcap_sm90.cu
+build flash_fwd_hdim96_fp16_paged_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_split_sm80.cu
+build flash_fwd_hdim96_fp16_paged_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_split_sm90.cu
+build flash_fwd_hdim96_fp16_paged_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_split_softcap_sm80.cu
+build flash_fwd_hdim96_fp16_paged_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_paged_split_softcap_sm90.cu
+build flash_fwd_hdim96_fp16_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_sm80.cu
+build flash_fwd_hdim96_fp16_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_sm90.cu
+build flash_fwd_hdim96_fp16_softcap_packgqa_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_softcap_packgqa_sm90.cu
+build flash_fwd_hdim96_fp16_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_softcap_sm80.cu
+build flash_fwd_hdim96_fp16_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_softcap_sm90.cu
+build flash_fwd_hdim96_fp16_split_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_split_sm80.cu
+build flash_fwd_hdim96_fp16_split_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_split_sm90.cu
+build flash_fwd_hdim96_fp16_split_softcap_sm80.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_split_softcap_sm80.cu
+build flash_fwd_hdim96_fp16_split_softcap_sm90.cuda.o: cuda_compile /data/users/zhenc/fbsource/fbcode/fa3/hopper/instantiations/flash_fwd_hdim96_fp16_split_softcap_sm90.cu
+
+
+
+
+
+build fa3_kernels.so: link flash_api.o flash_fwd_combine.cuda.o flash_bwd_hdim128_bf16_sm80.cuda.o flash_bwd_hdim128_bf16_sm90.cuda.o flash_bwd_hdim128_bf16_softcap_sm80.cuda.o flash_bwd_hdim128_bf16_softcap_sm90.cuda.o flash_bwd_hdim128_fp16_sm80.cuda.o flash_bwd_hdim128_fp16_sm90.cuda.o flash_bwd_hdim128_fp16_softcap_sm80.cuda.o flash_bwd_hdim128_fp16_softcap_sm90.cuda.o flash_bwd_hdim192_bf16_sm80.cuda.o flash_bwd_hdim192_bf16_sm90.cuda.o flash_bwd_hdim192_bf16_softcap_sm80.cuda.o flash_bwd_hdim192_bf16_softcap_sm90.cuda.o flash_bwd_hdim192_fp16_sm80.cuda.o flash_bwd_hdim192_fp16_sm90.cuda.o flash_bwd_hdim192_fp16_softcap_sm80.cuda.o flash_bwd_hdim192_fp16_softcap_sm90.cuda.o flash_bwd_hdim256_bf16_sm80.cuda.o flash_bwd_hdim256_bf16_sm90.cuda.o flash_bwd_hdim256_bf16_softcap_sm80.cuda.o flash_bwd_hdim256_bf16_softcap_sm90.cuda.o flash_bwd_hdim256_fp16_sm80.cuda.o flash_bwd_hdim256_fp16_sm90.cuda.o flash_bwd_hdim256_fp16_softcap_sm80.cuda.o flash_bwd_hdim256_fp16_softcap_sm90.cuda.o flash_bwd_hdim64_bf16_sm80.cuda.o flash_bwd_hdim64_bf16_sm90.cuda.o flash_bwd_hdim64_bf16_softcap_sm80.cuda.o flash_bwd_hdim64_bf16_softcap_sm90.cuda.o flash_bwd_hdim64_fp16_sm80.cuda.o flash_bwd_hdim64_fp16_sm90.cuda.o flash_bwd_hdim64_fp16_softcap_sm80.cuda.o flash_bwd_hdim64_fp16_softcap_sm90.cuda.o flash_bwd_hdim96_bf16_sm80.cuda.o flash_bwd_hdim96_bf16_sm90.cuda.o flash_bwd_hdim96_bf16_softcap_sm80.cuda.o flash_bwd_hdim96_bf16_softcap_sm90.cuda.o flash_bwd_hdim96_fp16_sm80.cuda.o flash_bwd_hdim96_fp16_sm90.cuda.o flash_bwd_hdim96_fp16_softcap_sm80.cuda.o flash_bwd_hdim96_fp16_softcap_sm90.cuda.o flash_fwd_hdim128_bf16_packgqa_sm90.cuda.o flash_fwd_hdim128_bf16_paged_sm80.cuda.o flash_fwd_hdim128_bf16_paged_sm90.cuda.o flash_fwd_hdim128_bf16_paged_softcap_sm80.cuda.o flash_fwd_hdim128_bf16_paged_softcap_sm90.cuda.o flash_fwd_hdim128_bf16_paged_split_sm80.cuda.o flash_fwd_hdim128_bf16_paged_split_sm90.cuda.o flash_fwd_hdim128_bf16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim128_bf16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim128_bf16_sm80.cuda.o flash_fwd_hdim128_bf16_sm90.cuda.o flash_fwd_hdim128_bf16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim128_bf16_softcap_sm80.cuda.o flash_fwd_hdim128_bf16_softcap_sm90.cuda.o flash_fwd_hdim128_bf16_split_sm80.cuda.o flash_fwd_hdim128_bf16_split_sm90.cuda.o flash_fwd_hdim128_bf16_split_softcap_sm80.cuda.o flash_fwd_hdim128_bf16_split_softcap_sm90.cuda.o flash_fwd_hdim128_e4m3_packgqa_sm90.cuda.o flash_fwd_hdim128_e4m3_paged_sm90.cuda.o flash_fwd_hdim128_e4m3_paged_softcap_sm90.cuda.o flash_fwd_hdim128_e4m3_paged_split_sm90.cuda.o flash_fwd_hdim128_e4m3_paged_split_softcap_sm90.cuda.o flash_fwd_hdim128_e4m3_sm90.cuda.o flash_fwd_hdim128_e4m3_softcap_packgqa_sm90.cuda.o flash_fwd_hdim128_e4m3_softcap_sm90.cuda.o flash_fwd_hdim128_e4m3_split_sm90.cuda.o flash_fwd_hdim128_e4m3_split_softcap_sm90.cuda.o flash_fwd_hdim128_fp16_packgqa_sm90.cuda.o flash_fwd_hdim128_fp16_paged_sm80.cuda.o flash_fwd_hdim128_fp16_paged_sm90.cuda.o flash_fwd_hdim128_fp16_paged_softcap_sm80.cuda.o flash_fwd_hdim128_fp16_paged_softcap_sm90.cuda.o flash_fwd_hdim128_fp16_paged_split_sm80.cuda.o flash_fwd_hdim128_fp16_paged_split_sm90.cuda.o flash_fwd_hdim128_fp16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim128_fp16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim128_fp16_sm80.cuda.o flash_fwd_hdim128_fp16_sm90.cuda.o flash_fwd_hdim128_fp16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim128_fp16_softcap_sm80.cuda.o flash_fwd_hdim128_fp16_softcap_sm90.cuda.o flash_fwd_hdim128_fp16_split_sm80.cuda.o flash_fwd_hdim128_fp16_split_sm90.cuda.o flash_fwd_hdim128_fp16_split_softcap_sm80.cuda.o flash_fwd_hdim128_fp16_split_softcap_sm90.cuda.o flash_fwd_hdim192_bf16_packgqa_sm90.cuda.o flash_fwd_hdim192_bf16_paged_sm80.cuda.o flash_fwd_hdim192_bf16_paged_sm90.cuda.o flash_fwd_hdim192_bf16_paged_softcap_sm80.cuda.o flash_fwd_hdim192_bf16_paged_softcap_sm90.cuda.o flash_fwd_hdim192_bf16_paged_split_sm80.cuda.o flash_fwd_hdim192_bf16_paged_split_sm90.cuda.o flash_fwd_hdim192_bf16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim192_bf16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim192_bf16_sm80.cuda.o flash_fwd_hdim192_bf16_sm90.cuda.o flash_fwd_hdim192_bf16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim192_bf16_softcap_sm80.cuda.o flash_fwd_hdim192_bf16_softcap_sm90.cuda.o flash_fwd_hdim192_bf16_split_sm80.cuda.o flash_fwd_hdim192_bf16_split_sm90.cuda.o flash_fwd_hdim192_bf16_split_softcap_sm80.cuda.o flash_fwd_hdim192_bf16_split_softcap_sm90.cuda.o flash_fwd_hdim192_e4m3_packgqa_sm90.cuda.o flash_fwd_hdim192_e4m3_paged_sm90.cuda.o flash_fwd_hdim192_e4m3_paged_softcap_sm90.cuda.o flash_fwd_hdim192_e4m3_paged_split_sm90.cuda.o flash_fwd_hdim192_e4m3_paged_split_softcap_sm90.cuda.o flash_fwd_hdim192_e4m3_sm90.cuda.o flash_fwd_hdim192_e4m3_softcap_packgqa_sm90.cuda.o flash_fwd_hdim192_e4m3_softcap_sm90.cuda.o flash_fwd_hdim192_e4m3_split_sm90.cuda.o flash_fwd_hdim192_e4m3_split_softcap_sm90.cuda.o flash_fwd_hdim192_fp16_packgqa_sm90.cuda.o flash_fwd_hdim192_fp16_paged_sm80.cuda.o flash_fwd_hdim192_fp16_paged_sm90.cuda.o flash_fwd_hdim192_fp16_paged_softcap_sm80.cuda.o flash_fwd_hdim192_fp16_paged_softcap_sm90.cuda.o flash_fwd_hdim192_fp16_paged_split_sm80.cuda.o flash_fwd_hdim192_fp16_paged_split_sm90.cuda.o flash_fwd_hdim192_fp16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim192_fp16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim192_fp16_sm80.cuda.o flash_fwd_hdim192_fp16_sm90.cuda.o flash_fwd_hdim192_fp16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim192_fp16_softcap_sm80.cuda.o flash_fwd_hdim192_fp16_softcap_sm90.cuda.o flash_fwd_hdim192_fp16_split_sm80.cuda.o flash_fwd_hdim192_fp16_split_sm90.cuda.o flash_fwd_hdim192_fp16_split_softcap_sm80.cuda.o flash_fwd_hdim192_fp16_split_softcap_sm90.cuda.o flash_fwd_hdim256_bf16_packgqa_sm90.cuda.o flash_fwd_hdim256_bf16_paged_sm80.cuda.o flash_fwd_hdim256_bf16_paged_sm90.cuda.o flash_fwd_hdim256_bf16_paged_softcap_sm80.cuda.o flash_fwd_hdim256_bf16_paged_softcap_sm90.cuda.o flash_fwd_hdim256_bf16_paged_split_sm80.cuda.o flash_fwd_hdim256_bf16_paged_split_sm90.cuda.o flash_fwd_hdim256_bf16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim256_bf16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim256_bf16_sm80.cuda.o flash_fwd_hdim256_bf16_sm90.cuda.o flash_fwd_hdim256_bf16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim256_bf16_softcap_sm80.cuda.o flash_fwd_hdim256_bf16_softcap_sm90.cuda.o flash_fwd_hdim256_bf16_split_sm80.cuda.o flash_fwd_hdim256_bf16_split_sm90.cuda.o flash_fwd_hdim256_bf16_split_softcap_sm80.cuda.o flash_fwd_hdim256_bf16_split_softcap_sm90.cuda.o flash_fwd_hdim256_e4m3_packgqa_sm90.cuda.o flash_fwd_hdim256_e4m3_paged_sm90.cuda.o flash_fwd_hdim256_e4m3_paged_softcap_sm90.cuda.o flash_fwd_hdim256_e4m3_paged_split_sm90.cuda.o flash_fwd_hdim256_e4m3_paged_split_softcap_sm90.cuda.o flash_fwd_hdim256_e4m3_sm90.cuda.o flash_fwd_hdim256_e4m3_softcap_packgqa_sm90.cuda.o flash_fwd_hdim256_e4m3_softcap_sm90.cuda.o flash_fwd_hdim256_e4m3_split_sm90.cuda.o flash_fwd_hdim256_e4m3_split_softcap_sm90.cuda.o flash_fwd_hdim256_fp16_packgqa_sm90.cuda.o flash_fwd_hdim256_fp16_paged_sm80.cuda.o flash_fwd_hdim256_fp16_paged_sm90.cuda.o flash_fwd_hdim256_fp16_paged_softcap_sm80.cuda.o flash_fwd_hdim256_fp16_paged_softcap_sm90.cuda.o flash_fwd_hdim256_fp16_paged_split_sm80.cuda.o flash_fwd_hdim256_fp16_paged_split_sm90.cuda.o flash_fwd_hdim256_fp16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim256_fp16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim256_fp16_sm80.cuda.o flash_fwd_hdim256_fp16_sm90.cuda.o flash_fwd_hdim256_fp16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim256_fp16_softcap_sm80.cuda.o flash_fwd_hdim256_fp16_softcap_sm90.cuda.o flash_fwd_hdim256_fp16_split_sm80.cuda.o flash_fwd_hdim256_fp16_split_sm90.cuda.o flash_fwd_hdim256_fp16_split_softcap_sm80.cuda.o flash_fwd_hdim256_fp16_split_softcap_sm90.cuda.o flash_fwd_hdim64_bf16_packgqa_sm90.cuda.o flash_fwd_hdim64_bf16_paged_sm80.cuda.o flash_fwd_hdim64_bf16_paged_sm90.cuda.o flash_fwd_hdim64_bf16_paged_softcap_sm80.cuda.o flash_fwd_hdim64_bf16_paged_softcap_sm90.cuda.o flash_fwd_hdim64_bf16_paged_split_sm80.cuda.o flash_fwd_hdim64_bf16_paged_split_sm90.cuda.o flash_fwd_hdim64_bf16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim64_bf16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim64_bf16_sm80.cuda.o flash_fwd_hdim64_bf16_sm90.cuda.o flash_fwd_hdim64_bf16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim64_bf16_softcap_sm80.cuda.o flash_fwd_hdim64_bf16_softcap_sm90.cuda.o flash_fwd_hdim64_bf16_split_sm80.cuda.o flash_fwd_hdim64_bf16_split_sm90.cuda.o flash_fwd_hdim64_bf16_split_softcap_sm80.cuda.o flash_fwd_hdim64_bf16_split_softcap_sm90.cuda.o flash_fwd_hdim64_e4m3_packgqa_sm90.cuda.o flash_fwd_hdim64_e4m3_paged_sm90.cuda.o flash_fwd_hdim64_e4m3_paged_softcap_sm90.cuda.o flash_fwd_hdim64_e4m3_paged_split_sm90.cuda.o flash_fwd_hdim64_e4m3_paged_split_softcap_sm90.cuda.o flash_fwd_hdim64_e4m3_sm90.cuda.o flash_fwd_hdim64_e4m3_softcap_packgqa_sm90.cuda.o flash_fwd_hdim64_e4m3_softcap_sm90.cuda.o flash_fwd_hdim64_e4m3_split_sm90.cuda.o flash_fwd_hdim64_e4m3_split_softcap_sm90.cuda.o flash_fwd_hdim64_fp16_packgqa_sm90.cuda.o flash_fwd_hdim64_fp16_paged_sm80.cuda.o flash_fwd_hdim64_fp16_paged_sm90.cuda.o flash_fwd_hdim64_fp16_paged_softcap_sm80.cuda.o flash_fwd_hdim64_fp16_paged_softcap_sm90.cuda.o flash_fwd_hdim64_fp16_paged_split_sm80.cuda.o flash_fwd_hdim64_fp16_paged_split_sm90.cuda.o flash_fwd_hdim64_fp16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim64_fp16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim64_fp16_sm80.cuda.o flash_fwd_hdim64_fp16_sm90.cuda.o flash_fwd_hdim64_fp16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim64_fp16_softcap_sm80.cuda.o flash_fwd_hdim64_fp16_softcap_sm90.cuda.o flash_fwd_hdim64_fp16_split_sm80.cuda.o flash_fwd_hdim64_fp16_split_sm90.cuda.o flash_fwd_hdim64_fp16_split_softcap_sm80.cuda.o flash_fwd_hdim64_fp16_split_softcap_sm90.cuda.o flash_fwd_hdim96_bf16_packgqa_sm90.cuda.o flash_fwd_hdim96_bf16_paged_sm80.cuda.o flash_fwd_hdim96_bf16_paged_sm90.cuda.o flash_fwd_hdim96_bf16_paged_softcap_sm80.cuda.o flash_fwd_hdim96_bf16_paged_softcap_sm90.cuda.o flash_fwd_hdim96_bf16_paged_split_sm80.cuda.o flash_fwd_hdim96_bf16_paged_split_sm90.cuda.o flash_fwd_hdim96_bf16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim96_bf16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim96_bf16_sm80.cuda.o flash_fwd_hdim96_bf16_sm90.cuda.o flash_fwd_hdim96_bf16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim96_bf16_softcap_sm80.cuda.o flash_fwd_hdim96_bf16_softcap_sm90.cuda.o flash_fwd_hdim96_bf16_split_sm80.cuda.o flash_fwd_hdim96_bf16_split_sm90.cuda.o flash_fwd_hdim96_bf16_split_softcap_sm80.cuda.o flash_fwd_hdim96_bf16_split_softcap_sm90.cuda.o flash_fwd_hdim96_e4m3_packgqa_sm90.cuda.o flash_fwd_hdim96_e4m3_paged_sm90.cuda.o flash_fwd_hdim96_e4m3_paged_softcap_sm90.cuda.o flash_fwd_hdim96_e4m3_paged_split_sm90.cuda.o flash_fwd_hdim96_e4m3_paged_split_softcap_sm90.cuda.o flash_fwd_hdim96_e4m3_sm90.cuda.o flash_fwd_hdim96_e4m3_softcap_packgqa_sm90.cuda.o flash_fwd_hdim96_e4m3_softcap_sm90.cuda.o flash_fwd_hdim96_e4m3_split_sm90.cuda.o flash_fwd_hdim96_e4m3_split_softcap_sm90.cuda.o flash_fwd_hdim96_fp16_packgqa_sm90.cuda.o flash_fwd_hdim96_fp16_paged_sm80.cuda.o flash_fwd_hdim96_fp16_paged_sm90.cuda.o flash_fwd_hdim96_fp16_paged_softcap_sm80.cuda.o flash_fwd_hdim96_fp16_paged_softcap_sm90.cuda.o flash_fwd_hdim96_fp16_paged_split_sm80.cuda.o flash_fwd_hdim96_fp16_paged_split_sm90.cuda.o flash_fwd_hdim96_fp16_paged_split_softcap_sm80.cuda.o flash_fwd_hdim96_fp16_paged_split_softcap_sm90.cuda.o flash_fwd_hdim96_fp16_sm80.cuda.o flash_fwd_hdim96_fp16_sm90.cuda.o flash_fwd_hdim96_fp16_softcap_packgqa_sm90.cuda.o flash_fwd_hdim96_fp16_softcap_sm80.cuda.o flash_fwd_hdim96_fp16_softcap_sm90.cuda.o flash_fwd_hdim96_fp16_split_sm80.cuda.o flash_fwd_hdim96_fp16_split_sm90.cuda.o flash_fwd_hdim96_fp16_split_softcap_sm80.cuda.o flash_fwd_hdim96_fp16_split_softcap_sm90.cuda.o
+
+default fa3_kernels.so

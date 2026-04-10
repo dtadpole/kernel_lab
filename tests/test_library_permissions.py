@@ -261,3 +261,69 @@ class TestLibraryDispatch:
         assert aud.name == "auditor"
         assert "Write" not in tax.builtin_tools
         assert "Write" not in aud.builtin_tools
+
+    def test_reflection_scanning_finds_unprocessed(self, config):
+        """_next_unprocessed_reflection finds reflections not in marker file."""
+        from agents.library import Library, PROCESSED_REFLECTIONS, KB_ROOT
+        import tempfile
+
+        lib = Library(config)
+
+        # Check if any real reflections exist
+        runs_dir = KB_ROOT / "runs"
+        if not runs_dir.exists():
+            pytest.skip("No kernel_lab_kb/runs/ directory")
+
+        all_refs = sorted(runs_dir.glob("*/reflections/*.md"))
+        if not all_refs:
+            pytest.skip("No reflections found")
+
+        # Clear processed marker
+        if PROCESSED_REFLECTIONS.exists():
+            original = PROCESSED_REFLECTIONS.read_text()
+        else:
+            original = ""
+
+        try:
+            PROCESSED_REFLECTIONS.write_text("")
+            result = lib._next_unprocessed_reflection()
+            assert result is not None
+            assert result.suffix == ".md"
+        finally:
+            PROCESSED_REFLECTIONS.write_text(original)
+
+    def test_reflection_scanning_skips_processed(self, config):
+        """_next_unprocessed_reflection skips reflections in marker file."""
+        from agents.library import Library, PROCESSED_REFLECTIONS, KB_ROOT
+
+        lib = Library(config)
+
+        runs_dir = KB_ROOT / "runs"
+        if not runs_dir.exists():
+            pytest.skip("No kernel_lab_kb/runs/ directory")
+
+        all_refs = sorted(runs_dir.glob("*/reflections/*.md"))
+        if not all_refs:
+            pytest.skip("No reflections found")
+
+        if PROCESSED_REFLECTIONS.exists():
+            original = PROCESSED_REFLECTIONS.read_text()
+        else:
+            original = ""
+
+        try:
+            # Mark ALL reflections as processed
+            PROCESSED_REFLECTIONS.write_text(
+                "\n".join(str(r) for r in all_refs) + "\n"
+            )
+            result = lib._next_unprocessed_reflection()
+            assert result is None  # all processed
+        finally:
+            PROCESSED_REFLECTIONS.write_text(original)
+
+    def test_analyst_config_exists(self, config):
+        """Information Analyst config is loadable with correct tools."""
+        a = config.get_agent("information_analyst")
+        assert a.name == "information_analyst"
+        assert "Write" in a.builtin_tools
+        assert "Read" in a.builtin_tools

@@ -34,11 +34,13 @@ from agents.runner import AgentRunner
 
 # ── Constants ──
 
-WIKI_ROOT = Path.home() / "kernel_lab_kb" / "wiki"
+KB_ROOT = Path.home() / "kernel_lab_kb"
+WIKI_ROOT = KB_ROOT / "wiki"
 PROPOSALS_DIR = WIKI_ROOT / "_proposals"
 PENDING_DIR = PROPOSALS_DIR / "pending"
 INJECT_DIR = PROPOSALS_DIR / "inject"
 DONE_DIR = PROPOSALS_DIR / "done"
+PROCESSED_REFLECTIONS = PROPOSALS_DIR / "_processed_reflections.txt"
 
 POLL_INTERVAL = 10  # seconds between queue scans
 
@@ -113,6 +115,12 @@ class Library(DefaultHandler):
                     await self._process_proposal(proposal, source="queue")
                     continue  # re-check inject before next queue item
 
+                # Priority 3: Unprocessed reflections → spawn Analyst → produce proposal
+                reflection = self._next_unprocessed_reflection()
+                if reflection:
+                    await self._run_analyst(reflection)
+                    continue  # re-check inject + queue before next reflection
+
                 # Nothing to do — wait
                 self.state.phase = "idle"
                 await asyncio.sleep(POLL_INTERVAL)
@@ -130,6 +138,31 @@ class Library(DefaultHandler):
         """Return the oldest queued proposal from pending/, or None."""
         return self._oldest_yaml(PENDING_DIR)
 
+    def _next_unprocessed_reflection(self) -> Path | None:
+        """Find the oldest reflection that hasn't been processed yet.
+
+        Scans ~/kernel_lab_kb/runs/*/reflections/*.md and checks against
+        _processed_reflections.txt marker file.
+        """
+        processed = set()
+        if PROCESSED_REFLECTIONS.exists():
+            processed = set(PROCESSED_REFLECTIONS.read_text().strip().splitlines())
+
+        runs_dir = KB_ROOT / "runs"
+        if not runs_dir.exists():
+            return None
+
+        reflections = sorted(runs_dir.glob("*/reflections/*.md"))
+        for ref_path in reflections:
+            if str(ref_path) not in processed:
+                return ref_path
+        return None
+
+    def _mark_reflection_processed(self, reflection_path: Path) -> None:
+        """Add reflection path to the processed marker file."""
+        with open(PROCESSED_REFLECTIONS, "a") as f:
+            f.write(str(reflection_path) + "\n")
+
     @staticmethod
     def _oldest_yaml(directory: Path) -> Path | None:
         """Find the oldest .yaml file in a directory (by filename timestamp).
@@ -142,6 +175,87 @@ class Library(DefaultHandler):
             if f.is_file() and f.suffix in (".yaml", ".yml")
         )
         return yamls[0] if yamls else None
+
+    # ── Analyst: reflection → proposal ──
+
+    async def _run_analyst(self, reflection_path: Path) -> None:
+        """Spawn Information Analyst to process one reflection into a proposal.
+
+        Analyst reads the reflection, extracts knowledge units, checks existing
+        wiki, and writes a YAML proposal to _proposals/pending/.
+        """
+        self.state.phase = "analyzing"
+        print(f"[Library] Analyzing reflection: {reflection_path.name}")
+
+        try:
+            content = reflection_path.read_text(encoding="utf-8")
+            analyst_config = self.config.get_agent("information_analyst")
+
+            runner = AgentRunner(
+                agent_config=analyst_config,
+                storage_config=self.config.storage,
+                handler=DefaultHandler(),
+                monitor_config=MonitorConfig(
+                    hard_limit=300,          # 5 min max
+                    total_timeout=240,
+                    idle_timeout=120,
+                    check_interval=30,
+                ),
+                wave=self.state.proposals_processed,
+                task_slug="analyst",
+            )
+
+            now_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prompt = (
+                f"Process this reflection and write a YAML proposal.\n\n"
+                f"## Reflection\n\n"
+                f"**Source:** `{reflection_path}`\n\n"
+                f"```\n{content}\n```\n\n"
+                f"## Task\n\n"
+                f"1. Read existing wiki: `~/kernel_lab_kb/wiki/` (use Glob + Read)\n"
+                f"2. Write a YAML proposal using the Write tool to:\n"
+                f"   `~/kernel_lab_kb/wiki/_proposals/pending/{now_ts}_<slug>.yaml`\n\n"
+                f"Your FIRST action must be checking the wiki. "
+                f"Your LAST action must be calling Write to save the YAML file. "
+                f"Do both in this turn — do not stop between analysis and writing.\n"
+            )
+
+            await runner.start(prompt)
+
+            # Analyst may need multiple sessions to finish
+            max_sessions = 5
+            proposals_before = set(PENDING_DIR.glob("*.yaml")) if PENDING_DIR.exists() else set()
+
+            for session in range(max_sessions):
+                result = await runner.run_until_result()
+                print(f"[Library]   Analyst session {session} done")
+
+                # Check if a new proposal appeared
+                proposals_after = set(PENDING_DIR.glob("*.yaml")) if PENDING_DIR.exists() else set()
+                new_proposals = proposals_after - proposals_before
+                if new_proposals:
+                    for p in new_proposals:
+                        print(f"[Library]   Proposal created: {p.name}")
+                    break
+
+                if session < max_sessions - 1:
+                    await runner.send_message(
+                        "IMPORTANT: You must write the proposal file NOW using the Write tool. "
+                        "Do not explain or analyze further — just write the file. "
+                        "Path: ~/kernel_lab_kb/wiki/_proposals/pending/<timestamp>_<slug>.yaml"
+                    )
+
+            await runner.stop()
+
+            # Mark reflection as processed
+            self._mark_reflection_processed(reflection_path)
+            print(f"[Library]   Reflection marked as processed")
+
+        except Exception as e:
+            self.state.errors += 1
+            print(f"[Library]   Analyst ERROR: {type(e).__name__}: {e}")
+            # Still mark as processed to avoid infinite retry
+            self._mark_reflection_processed(reflection_path)
 
     # ── Proposal processing ──
 

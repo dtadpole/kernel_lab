@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -863,6 +864,15 @@ class AgentRunner:
 
         return source
 
+    def _write_monitor_log(self, entry: dict) -> None:
+        """Append one JSON line to monitor.jsonl in the wave directory."""
+        try:
+            monitor_path = self._storage._wave_dir / "monitor.jsonl"
+            with open(monitor_path, "a") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except Exception:
+            pass
+
     async def _run_strategy_check(self, log: SessionLog) -> None:
         """Strategy check — runs as create_task, never blocks main loop.
 
@@ -874,6 +884,23 @@ class AgentRunner:
                 return
 
             elapsed = log.elapsed().total_seconds()
+            idle = log.last_event_age().total_seconds()
+            age = (datetime.now() - self._last_stream_event_time).total_seconds()
+
+            # Log this check
+            monitor_entry = {
+                "ts": datetime.now().isoformat(),
+                "elapsed_s": round(elapsed, 1),
+                "idle_s": round(idle, 1),
+                "stream_age_s": round(age, 1),
+                "source": self._solver_source,
+                "events": len(log._events) if hasattr(log, '_events') else 0,
+                "tool_calls": sum(1 for e in (log._events if hasattr(log, '_events') else []) if getattr(e, 'tool_name', None)),
+                "pid": self._pid,
+                "pid_alive": self._pid is not None and os.path.exists(f"/proc/{self._pid}"),
+                "alerts": [],
+                "actions": [],
+            }
 
             # Hard limit — non-negotiable
             if elapsed > self.monitor_config.hard_limit:
@@ -882,11 +909,12 @@ class AgentRunner:
                     details=f"Session hit hard limit: {elapsed:.0f}s",
                 )
                 log.append(alert)
+                monitor_entry["alerts"].append("hard_limit")
                 action = await self.handler.on_monitor_alert(alert)
+                monitor_entry["actions"].append(f"hard_limit→{action}")
                 if action == "terminate":
-                    # Can't directly break the main loop from a task.
-                    # Set a flag that the main loop checks.
                     self._strategy_terminate = True
+                self._write_monitor_log(monitor_entry)
                 return
 
             # Total timeout
@@ -896,23 +924,27 @@ class AgentRunner:
                     details=f"Session running for {elapsed:.0f}s",
                 )
                 log.append(alert)
+                monitor_entry["alerts"].append("total_timeout")
                 action = await self.handler.on_monitor_alert(alert)
+                monitor_entry["actions"].append(f"total_timeout→{action}")
                 if action == "terminate":
                     self._strategy_terminate = True
                 elif action and action.startswith("inject:"):
                     if self._client:
                         await self._client.query(action[len("inject:"):])
+                self._write_monitor_log(monitor_entry)
                 return
 
             # Idle timeout
-            idle = log.last_event_age().total_seconds()
             if idle > self.monitor_config.idle_timeout:
                 alert = MonitorAlert(
                     alert_type="idle_timeout",
                     details=f"No activity for {idle:.0f}s",
                 )
                 log.append(alert)
+                monitor_entry["alerts"].append("idle_timeout")
                 action = await self.handler.on_monitor_alert(alert)
+                monitor_entry["actions"].append(f"idle_timeout→{action}")
                 if action == "terminate":
                     self._strategy_terminate = True
                 elif action == "interrupt" and self._client:
@@ -922,6 +954,7 @@ class AgentRunner:
                         pass
                 elif action and action.startswith("inject:") and self._client:
                     await self._client.query(action[len("inject:"):])
+                self._write_monitor_log(monitor_entry)
                 return
 
             # Loop detection
@@ -932,9 +965,12 @@ class AgentRunner:
                     details=f"Tool '{seq[0]}' called {len(seq)} times consecutively",
                 )
                 log.append(alert)
+                monitor_entry["alerts"].append(f"loop_detected:{seq[0]}")
                 action = await self.handler.on_monitor_alert(alert)
+                monitor_entry["actions"].append(f"loop→{action}")
                 if action and action.startswith("inject:") and self._client:
                     await self._client.query(action[len("inject:"):])
+                self._write_monitor_log(monitor_entry)
                 return
 
             # Progress check
@@ -948,7 +984,11 @@ class AgentRunner:
                         details=f"Periodic progress check at {elapsed:.0f}s",
                     )
                     log.append(alert)
+                    monitor_entry["alerts"].append("progress_check")
                     await self.handler.on_monitor_alert(alert)
+
+            # No alerts triggered — healthy
+            self._write_monitor_log(monitor_entry)
 
         except Exception as e:
             print(f"[Runner] Strategy check error: {e}")

@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 import os
+import signal
 import subprocess
 
 from agents.config import SystemConfig
@@ -176,17 +177,22 @@ class Workshop(DefaultHandler):
         task: str,
         kernel: str = "matmul",
         gpu: int = 4,
+        run_tag: str | None = None,
     ) -> None:
         """Run forever: Task → Wave → Session.
 
         Task: one optimization job, runs until external kill.
         Wave: one subprocess (one PID). Fresh AgentRunner per Wave.
         Session: one dialogue round within a Wave (query → ResultMessage).
+
+        Args:
+            run_tag: If provided (from Launcher), use it. Otherwise generate one.
         """
         import time as _time
 
         now = datetime.now()
-        run_tag = f"workshop_run_{now.strftime('%Y%m%d_%H%M%S')}"
+        if not run_tag:
+            run_tag = f"workshop_run_{now.strftime('%Y%m%d_%H%M%S')}"
         task_slug = _slugify(task)
 
         self.config.storage.run_tag = run_tag
@@ -788,3 +794,49 @@ class Workshop(DefaultHandler):
         if self._solver_runner and self._solver_runner._storage:
             return str(self._solver_runner._storage.transcript_path)
         return "(no transcript available)"
+
+
+# ── CLI entry point ──
+
+def _load_task(kernel: str) -> str:
+    task_file = Path("conf/agent/tasks") / f"{kernel}.md"
+    if task_file.exists():
+        return task_file.read_text().strip()
+    raise FileNotFoundError(f"No task file for kernel '{kernel}' at {task_file}")
+
+
+def main():
+    import argparse
+
+    os.setpgrp()
+
+    def _kill_group(signum, frame):
+        try:
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _kill_group)
+    signal.signal(signal.SIGINT, _kill_group)
+
+    parser = argparse.ArgumentParser(description="Run Workshop")
+    parser.add_argument("--kernel", default="matmul", choices=["matmul", "fa4", "vecadd"])
+    parser.add_argument("--gpu", type=int, default=4)
+    parser.add_argument("--task", default=None)
+    parser.add_argument("--config", default="conf/agent/agents.yaml")
+    parser.add_argument("--run-tag", default=None)
+    args = parser.parse_args()
+
+    from agents.config import SystemConfig
+    config = SystemConfig.from_yaml(args.config)
+    workshop = Workshop(config=config)
+    task = args.task or _load_task(args.kernel)
+
+    asyncio.run(workshop.run_continuous(
+        task=task, kernel=args.kernel, gpu=args.gpu, run_tag=args.run_tag,
+    ))
+
+
+if __name__ == "__main__":
+    main()

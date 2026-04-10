@@ -30,6 +30,21 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+
+def _force_kill(pid: int) -> None:
+    """Ensure a process is dead. Try kill, then sudo kill -9."""
+    try:
+        os.kill(pid, 9)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        subprocess.run(
+            ["sudo", "kill", "-9", str(pid)],
+            timeout=5, capture_output=True, check=False,
+        )
+    except Exception:
+        pass
+
 logger = logging.getLogger(__name__)
 
 CUDA_TOOLKIT_ROOT = Path("/usr/local/cuda")
@@ -228,19 +243,26 @@ def _run_command(
     logger.info("CMD %s", " ".join(command))
     started = time.perf_counter()
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             command,
             cwd=str(resolved_workspace),
             env=_merge_env(env),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
         )
+        pid = proc.pid
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _force_kill(pid)
+            proc.wait()
+            raise TimeoutError(f"{kind} timed out after {timeout_seconds}s")
+        finally:
+            _force_kill(pid)
+        completed = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
     except FileNotFoundError as exc:
         raise ValueError(str(exc)) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"{kind} timed out after {timeout_seconds}s") from exc
 
     extra_files = list(return_files or [])
     duration = time.perf_counter() - started

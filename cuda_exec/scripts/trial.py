@@ -37,6 +37,21 @@ import torch
 
 from _cli_common import add_metadata_args, ensure_repo_root_on_path
 
+
+def _force_kill(pid: int) -> None:
+    """Ensure a process is dead. Try kill, then sudo kill -9."""
+    try:
+        os.kill(pid, 9)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        subprocess.run(
+            ["sudo", "kill", "-9", str(pid)],
+            timeout=5, capture_output=True, check=False,
+        )
+    except Exception:
+        pass
+
 ensure_repo_root_on_path()
 
 from cuda_exec.models import Metadata  # noqa: E402
@@ -82,14 +97,26 @@ def _run_cu_impl(
     output_dir.mkdir(parents=True, exist_ok=True)
     run_env = {**os.environ, **env, "CUDA_EXEC_OUTPUT_DIR": str(output_dir)}
 
-    completed = subprocess.run(
+    proc = subprocess.Popen(
         [str(target_path)],
         cwd=workspace_path,
         env=run_env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout_seconds,
-        check=False,
+    )
+    pid = proc.pid
+    try:
+        stdout_raw, stderr_raw = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _force_kill(pid)
+        proc.wait()
+        raise
+    finally:
+        _force_kill(pid)
+
+    completed = subprocess.CompletedProcess(
+        [str(target_path)], proc.returncode, stdout_raw, stderr_raw,
     )
     stdout = completed.stdout.strip()
     if not stdout:

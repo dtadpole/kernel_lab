@@ -416,10 +416,14 @@ def format_results_table(bench_result: dict) -> str:
         if status == "ok":
             sm = clock_lock.get("locked_sm_mhz", "?")
             mem = clock_lock.get("locked_mem_mhz", "?")
-            lines.append(f"GPU clocks locked: SM {sm} MHz, Mem {mem} MHz")
+            pw = clock_lock.get("power_limit_w")
+            pw_str = f", Power {pw}W" if pw else ""
+            lines.append(f"GPU clocks locked: SM {sm} MHz, Mem {mem} MHz{pw_str}")
         elif status == "warning":
             sm = clock_lock.get("locked_sm_mhz", "?")
-            lines.append(f"GPU clocks locked: SM {sm} MHz — WARNING: throttling detected")
+            pw = clock_lock.get("power_limit_w")
+            pw_str = f", Power {pw}W" if pw else ""
+            lines.append(f"GPU clocks locked: SM {sm} MHz{pw_str} — WARNING: throttling detected")
             for w in clock_lock.get("warnings", []):
                 lines.append(f"  - {w}")
         elif status == "error":

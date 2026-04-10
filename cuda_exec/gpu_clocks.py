@@ -33,7 +33,7 @@ def query_gpu_clocks(gpu_id: Optional[str] = None) -> Dict[str, Any]:
             [
                 "nvidia-smi",
                 "--query-gpu=clocks.max.graphics,clocks.max.memory,"
-                "clocks.current.sm,clocks.current.memory",
+                "clocks.current.sm,clocks.current.memory,power.limit",
                 "--format=csv,noheader,nounits",
                 "-i", gpu_id,
             ],
@@ -42,13 +42,14 @@ def query_gpu_clocks(gpu_id: Optional[str] = None) -> Dict[str, Any]:
         if result.returncode != 0:
             return {"error": f"nvidia-smi failed: {result.stderr.strip()}"}
         parts = [p.strip() for p in result.stdout.strip().split(",")]
-        if len(parts) < 4:
+        if len(parts) < 5:
             return {"error": f"unexpected nvidia-smi output: {result.stdout.strip()}"}
         return {
             "max_sm_mhz": int(parts[0]),
             "max_mem_mhz": int(parts[1]),
             "current_sm_mhz": int(parts[2]),
             "current_mem_mhz": int(parts[3]),
+            "power_limit_w": int(float(parts[4])),
         }
     except FileNotFoundError:
         return {"error": "nvidia-smi not found"}
@@ -136,7 +137,8 @@ def gpu_clock_context(
         if lock_result["status"] != "ok":
             logger.warning("GPU clock lock failed: %s — continuing without lock", lock_result["error"])
             info = {"status": "error", "error": lock_result["error"],
-                    "max_sm_mhz": max_sm, "max_mem_mhz": max_mem}
+                    "max_sm_mhz": max_sm, "max_mem_mhz": max_mem,
+                    "power_limit_w": clocks.get("power_limit_w")}
             yield info
             return
 
@@ -149,7 +151,9 @@ def gpu_clock_context(
             actual = verify["current_sm_mhz"]
             logger.info("Post-lock SM clock: %d MHz (max: %d MHz)", actual, max_sm)
 
-        info = {"status": "ok", "locked_sm_mhz": max_sm, "locked_mem_mhz": max_mem}
+        power_w = clocks.get("power_limit_w")
+        info = {"status": "ok", "locked_sm_mhz": max_sm, "locked_mem_mhz": max_mem,
+                "power_limit_w": power_w}
         logger.info("GPU %s clocks locked: SM %d MHz", gpu_id, max_sm)
         yield info
 

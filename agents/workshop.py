@@ -287,28 +287,27 @@ class Workshop(DefaultHandler):
                         })
                         break
 
-                    # ── Steward review ──
-                    # Use result.stop_reason (set synchronously in _process_message)
-                    # instead of _pending_stop_event (set via create_task, may race).
-                    self.state.phase = "deciding"
-                    if result.stop_reason:
-                        print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={result.stop_reason})")
-                        verdict = await self.steward.review_session_end(
-                            transcript_path=self._get_transcript_path(),
-                            result_text=result.result_text,
-                            stop_reason=result.stop_reason,
-                            elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
-                            total_tool_calls=self.state.turns_completed,
-                            error_count=self.state.error_count,
-                        )
-                    else:
-                        verdict = None
+                    # ── Steward review (only when Solver explicitly ended its turn) ──
+                    if not result.stop_reason:
+                        # No end_turn — iterator ended without ResultMessage
+                        # (e.g., asyncio.wait_for cancelled __anext__).
+                        # Do nothing — just loop back and keep waiting.
+                        continue
 
-                    if verdict is None or not verdict.action:
-                        verdict = StewardResponse(
-                            action="CONTINUE", detail="Steward could not produce a verdict",
-                            reasoning="No verdict available", intervention_level=2,
-                        )
+                    self.state.phase = "deciding"
+                    print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={result.stop_reason})")
+                    verdict = await self.steward.review_session_end(
+                        transcript_path=self._get_transcript_path(),
+                        result_text=result.result_text,
+                        stop_reason=result.stop_reason,
+                        elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
+                        total_tool_calls=self.state.turns_completed,
+                        error_count=self.state.error_count,
+                    )
+
+                    if not verdict or not verdict.action:
+                        # Steward gave no verdict — do nothing, keep waiting.
+                        continue
 
                     self.state.verdict_history.append({
                         "wave": wave, "session": session,
@@ -322,11 +321,11 @@ class Workshop(DefaultHandler):
                     if verdict.action == "ABORT":
                         break  # End Wave
 
-                    # ── CONTINUE → new Session in same Wave ──
-                    session += 1
-                    self._pending_stop_event = None
-                    continue_prompt = self._build_continue_prompt(verdict)
-                    await self._solver_runner.send_message(continue_prompt)
+                    if verdict.action == "CONTINUE":
+                        # Steward explicitly said CONTINUE with guidance — send it.
+                        session += 1
+                        continue_prompt = self._build_continue_prompt(verdict)
+                        await self._solver_runner.send_message(continue_prompt)
 
                 consecutive_errors = 0
 

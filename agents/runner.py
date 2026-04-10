@@ -622,6 +622,56 @@ class AgentRunner:
 
             tools_list.append(submit_bench_reflection)
 
+        # ── Library system tools ──
+
+        if "consult_taxonomist" in custom:
+            @tool(
+                "consult_taxonomist",
+                "Ask the Taxonomist for advice on structure, classification, "
+                "page boundaries, naming, and merge/split decisions. "
+                "Use when you're unsure where a piece of knowledge belongs.",
+                {"question": str, "proposal_context": str},
+            )
+            async def consult_taxonomist(args):
+                question = args.get("question", "")
+                ctx = args.get("proposal_context", "")
+
+                event = AskEvent(
+                    question=f"CONSULT_TAXONOMIST: {question}",
+                    context=ctx,
+                )
+                if runner_ref.log:
+                    runner_ref.log.append(event)
+
+                answer = await runner_ref.handler.on_ask(event)
+                return {"content": [{"type": "text", "text": answer}]}
+
+            tools_list.append(consult_taxonomist)
+
+        if "consult_auditor" in custom:
+            @tool(
+                "consult_auditor",
+                "Ask the Auditor to validate evidence, check for conflicts "
+                "with existing wiki content, and detect over-generalization. "
+                "Use when evidence is weak or the claim is high-impact.",
+                {"question": str, "proposal_context": str},
+            )
+            async def consult_auditor(args):
+                question = args.get("question", "")
+                ctx = args.get("proposal_context", "")
+
+                event = AskEvent(
+                    question=f"CONSULT_AUDITOR: {question}",
+                    context=ctx,
+                )
+                if runner_ref.log:
+                    runner_ref.log.append(event)
+
+                answer = await runner_ref.handler.on_ask(event)
+                return {"content": [{"type": "text", "text": answer}]}
+
+            tools_list.append(consult_auditor)
+
         if not tools_list:
             return {}
 

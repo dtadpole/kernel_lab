@@ -215,3 +215,93 @@ agents:
         allow: false
     system_prompt_file: prompts/benchmarker.md
 
+  # ── Library System Agents ──
+
+  librarian:
+    description: "Knowledge base arbiter — reads proposals, consults experts, writes canonical wiki"
+    model: claude-sonnet-4-6
+    permission_mode: acceptEdits
+    max_turns: 200
+    max_budget_usd: 10.0
+    tools:
+      builtin:
+        - Read
+        - Edit
+        - Write
+        - Glob
+        - Grep
+      custom:
+        - consult_taxonomist
+        - consult_auditor
+    tool_rules:
+      - tool: Write
+        allow: true
+        constraint: "Only write to canonical wiki (~/kernel_lab_kb/wiki/)"
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
+      - tool: Edit
+        allow: true
+        constraint: "Only edit canonical wiki pages"
+        blocked_paths:
+          - ~/kernel_lab/
+          - ~/kernel_lab_kb/runs/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/
+      - tool: Read
+        allow: true
+    system_prompt_file: prompts/librarian.md
+
+  information_analyst:
+    description: "Extract knowledge from reflections, produce proposals"
+    model: claude-sonnet-4-6
+    permission_mode: acceptEdits
+    max_turns: 100
+    max_budget_usd: 5.0
+    tools:
+      builtin:
+        - Read
+        - Write
+        - Glob
+        - Grep
+    tool_rules:
+      - tool: Write
+        allow: true
+        constraint: "Only write proposals to _proposals/"
+        blocked_paths:
+          - ~/kernel_lab_kb/wiki/concepts/
+          - ~/kernel_lab_kb/wiki/patterns/
+          - ~/kernel_lab_kb/wiki/problems/
+          - ~/kernel_lab_kb/wiki/decisions/
+          - ~/kernel_lab_kb/wiki/references/
+        allowed_paths:
+          - ~/kernel_lab_kb/wiki/_proposals/
+      - tool: Read
+        allow: true
+    system_prompt_file: prompts/analyst.md
+
+  taxonomist:
+    description: "Structure and classification advisor (read-only)"
+    model: claude-sonnet-4-6
+    max_turns: 20
+    max_budget_usd: 2.0
+    tools:
+      builtin:
+        - Read
+        - Glob
+        - Grep
+    system_prompt_file: prompts/taxonomist.md
+
+  auditor:
+    description: "Evidence validation and conflict detection (read-only)"
+    model: claude-sonnet-4-6
+    max_turns: 20
+    max_budget_usd: 2.0
+    tools:
+      builtin:
+        - Read
+        - Glob
+        - Grep
+    system_prompt_file: prompts/auditor.md

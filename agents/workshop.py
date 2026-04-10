@@ -288,14 +288,15 @@ class Workshop(DefaultHandler):
                         break
 
                     # ── Steward review ──
+                    # Use result.stop_reason (set synchronously in _process_message)
+                    # instead of _pending_stop_event (set via create_task, may race).
                     self.state.phase = "deciding"
-                    stop_event = self._pending_stop_event
-                    if stop_event:
-                        print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={stop_event.reason})")
+                    if result.stop_reason:
+                        print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={result.stop_reason})")
                         verdict = await self.steward.review_session_end(
                             transcript_path=self._get_transcript_path(),
-                            result_text=stop_event.result_text or result.result_text,
-                            stop_reason=stop_event.reason,
+                            result_text=result.result_text,
+                            stop_reason=result.stop_reason,
                             elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
                             total_tool_calls=self.state.turns_completed,
                             error_count=self.state.error_count,

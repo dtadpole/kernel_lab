@@ -36,8 +36,9 @@ from agents.runner import AgentRunner
 
 WIKI_ROOT = Path.home() / "kernel_lab_kb" / "wiki"
 PROPOSALS_DIR = WIKI_ROOT / "_proposals"
-INJECT_DIR = PROPOSALS_DIR / "_inject"
-DONE_DIR = PROPOSALS_DIR / "_done"
+PENDING_DIR = PROPOSALS_DIR / "pending"
+INJECT_DIR = PROPOSALS_DIR / "inject"
+DONE_DIR = PROPOSALS_DIR / "done"
 
 POLL_INTERVAL = 10  # seconds between queue scans
 
@@ -83,7 +84,7 @@ class Library(DefaultHandler):
         self.state.started_at = now
 
         # Ensure directories exist
-        PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+        PENDING_DIR.mkdir(parents=True, exist_ok=True)
         INJECT_DIR.mkdir(parents=True, exist_ok=True)
         DONE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -126,8 +127,8 @@ class Library(DefaultHandler):
         return self._oldest_yaml(INJECT_DIR)
 
     def _next_proposal(self) -> Path | None:
-        """Return the oldest queued proposal, or None."""
-        return self._oldest_yaml(PROPOSALS_DIR)
+        """Return the oldest queued proposal from pending/, or None."""
+        return self._oldest_yaml(PENDING_DIR)
 
     @staticmethod
     def _oldest_yaml(directory: Path) -> Path | None:
@@ -316,8 +317,8 @@ After writing, report what you did: created/updated which pages, and why.
             "expert_consults": self.state.expert_consults,
             "errors": self.state.errors,
             "started_at": self.state.started_at.isoformat() if self.state.started_at else None,
-            "queue_size": len(list(PROPOSALS_DIR.glob("*.yaml"))),
-            "inject_size": len(list(INJECT_DIR.glob("*.yaml"))),
+            "queue_size": len(list(PENDING_DIR.glob("*.yaml"))) if PENDING_DIR.exists() else 0,
+            "inject_size": len(list(INJECT_DIR.glob("*.yaml"))) if INJECT_DIR.exists() else 0,
         }
 
 

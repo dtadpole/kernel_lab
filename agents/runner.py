@@ -45,7 +45,7 @@ from agents.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from agents.monitor import AgentMonitor
+from agents.events import MonitorAlert
 from agents.steward import Steward
 from agents.session_log import SessionLog
 from agents.storage import SessionStorage
@@ -92,7 +92,6 @@ class AgentRunner:
 
         self._client: ClaudeSDKClient | None = None
         self._session_id: str | None = None
-        self._monitor: AgentMonitor | None = None
         self._is_running = False
 
         # Will be initialized per run
@@ -131,15 +130,8 @@ class AgentRunner:
         if not self._session_id:
             raise RuntimeError("No session to resume. Call run() first.")
 
-        # Reset log so elapsed() starts from zero for this attempt.
-        # Without this, monitor's hard_limit accumulates across all
-        # attempts and triggers immediately after the first hard_limit.
+        # Reset log so elapsed() starts from zero for this wave.
         self.log = SessionLog()
-
-        # Ensure previous monitor is fully stopped before creating new client
-        if self._monitor:
-            await self._monitor.stop()
-            self._monitor = None
 
         options = self._build_options()
         options.resume = self._session_id
@@ -242,6 +234,11 @@ class AgentRunner:
             tool_name = input_data.get("tool_name", "")
             tool_input = input_data.get("tool_input", {})
 
+            # Track phase: entering tool execution
+            self._solver_source = f"tool:{tool_name}"
+            if self._storage:
+                self._storage.write_heartbeat(datetime.now(), source=self._solver_source)
+
             event = ToolCallEvent(
                 tool_name=tool_name,
                 tool_input=tool_input,
@@ -251,27 +248,17 @@ class AgentRunner:
                 log.append(event)
             await handler.on_tool_call(event)
 
-            # Check for pending inject from monitor
             result = self._check_tool_rules(tool_name, tool_input)
-            if self._monitor and self._monitor._pending_inject:
-                guidance = self._monitor.consume_pending_inject()
-                if guidance:
-                    inject_ctx = f"[Supervisor guidance]: {guidance}"
-                    if result and "hookSpecificOutput" in result:
-                        existing = result["hookSpecificOutput"].get("additionalContext", "")
-                        result["hookSpecificOutput"]["additionalContext"] = f"{existing}\n{inject_ctx}"
-                    else:
-                        result = {
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "additionalContext": inject_ctx,
-                            }
-                        }
             return result
 
         async def on_post_tool_use(input_data, tool_use_id, context):
             tool_name = input_data.get("tool_name", "")
             tool_response = input_data.get("tool_response", "")
+
+            # Track phase: tool execution complete, back to LLM
+            self._solver_source = "tool_end"
+            if self._storage:
+                self._storage.write_heartbeat(datetime.now(), source=self._solver_source)
 
             summary = str(tool_response)
             if len(summary) > 500:
@@ -608,11 +595,25 @@ class AgentRunner:
         return {}
 
     async def _execute(self, prompt: str, options: ClaudeAgentOptions) -> RunResult:
-        """Core execution loop: start client, stream messages, run monitor."""
+        """Core execution loop: start client, stream messages, check liveness.
+
+        Single loop does everything:
+        - Every 10s: poll for SDK messages + liveness check
+        - Every 60s: strategy check (hard_limit, stuck detection, etc.)
+        - No separate Monitor task, no cross-task flags, no threads.
+        """
+        import time as _time
+
         self._is_running = True
-        self._last_stream_event_time: datetime | None = None
+        self._solver_source = "llm"
+        self._last_stream_event_time = datetime.now()
+        self._strategy_terminate = False
         result = RunResult(log=self.log or SessionLog())
         total_usage: dict = {}
+
+        _POLL_INTERVAL = 10
+        _STRATEGY_INTERVAL = self.monitor_config.check_interval if self.monitor_config else 60.0
+        _last_strategy_check = _time.monotonic()
 
         try:
             try:
@@ -625,179 +626,154 @@ class AgentRunner:
                 self._client = client
                 await client.query(prompt)
 
-                # Start monitor (with runner reference for interrupt/inject)
-                monitor = AgentMonitor(result.log, self.handler, runner=self, config=self.monitor_config)
-                self._monitor = monitor
-                await monitor.start()
-
-                try:
-                    # Use manual iterator with timeout so we can check monitor
-                    # flags even when the SDK is blocked (e.g., waiting for a
-                    # long subprocess like formal bench). Without this, the
-                    # hard_limit terminate flag is never checked and the session
-                    # runs forever.
-                    _POLL_INTERVAL = 10  # seconds between flag checks
-                    response_iter = client.receive_response().__aiter__()
-                    while True:
-                        try:
-                            message = await asyncio.wait_for(
-                                response_iter.__anext__(), timeout=_POLL_INTERVAL
-                            )
-                        except asyncio.TimeoutError:
-                            # No event from SDK — check terminate/interrupt flags
-                            if self._monitor and self._monitor._pending_terminate:
-                                self._monitor._pending_terminate = False
-                                result.stop_reason = "terminate"
-                                result.result_text = "Terminated by monitor (hard_limit)"
-                                stop_event = StopEvent(reason="terminate", result_text="hard_limit")
-                                result.log.append(stop_event)
-                                await self.handler.on_stop(stop_event)
-                                break
-                            if self._monitor and self._monitor._pending_interrupt:
-                                self._monitor._pending_interrupt = False
-                                await self._client.interrupt()
-                            # No heartbeat update here — idle poll means no
-                            # activity from Solver. Heartbeat should only
-                            # reflect real Solver output.
-                            continue
-                        except StopAsyncIteration:
-                            break
-
-                        # Determine heartbeat trigger from message type
-                        heartbeat_trigger = "unknown"
-
-                        # Init message — capture session_id
-                        if isinstance(message, SystemMessage):
-                            heartbeat_trigger = "system_init"
-                            if message.subtype == "init":
-                                sid = message.data.get("session_id", "")
-                                self._session_id = sid
-                                result.session_id = sid
-                                start_event = StartEvent(session_id=sid)
-                                result.log.append(start_event)
-
-                        # Assistant message — complete, fully assembled
-                        elif isinstance(message, AssistantMessage):
-                            # Determine trigger from content blocks
-                            has_thinking = False
-                            has_text = False
-                            has_tool = False
-                            for block in message.content:
-                                if isinstance(block, TextBlock):
-                                    has_text = True
-                                    event = TextOutputEvent(text=block.text)
-                                    result.log.append(event)
-                                    await self.handler.on_text(event)
-                                elif isinstance(block, ThinkingBlock):
-                                    has_thinking = True
-                            if has_tool:
-                                heartbeat_trigger = "tool_use"
-                            elif has_text:
-                                heartbeat_trigger = "text"
-                            elif has_thinking:
-                                heartbeat_trigger = "thinking"
-                            else:
-                                heartbeat_trigger = "assistant"
-                            # Accumulate usage
-                            if message.usage:
-                                for k, v in message.usage.items():
-                                    if isinstance(v, (int, float)):
-                                        total_usage[k] = total_usage.get(k, 0) + v
-
-                        # Result message — session complete
-                        elif isinstance(message, ResultMessage):
-                            heartbeat_trigger = "result"
-                            result.result_text = message.result or ""
-                            result.stop_reason = getattr(message, "stop_reason", "end_turn")
-                            stop_event = StopEvent(
-                                reason=result.stop_reason,
-                                result_text=result.result_text[:5000],
-                            )
-                            result.log.append(stop_event)
-                            await self.handler.on_stop(stop_event)
-
-                        # Rate limit — log warning and wait
-                        elif isinstance(message, RateLimitEvent):
-                            heartbeat_trigger = "rate_limit"
-                            info = message.rate_limit_info
-                            status = getattr(info, "status", None)
-                            resets_at = getattr(info, "resets_at", None)
-                            utilization = getattr(info, "utilization", None)
-                            event = TextOutputEvent(
-                                text=f"[rate_limit] status={status} utilization={utilization} resets_at={resets_at}"
-                            )
-                            result.log.append(event)
-                            if status and hasattr(status, "value") and "rejected" in str(status.value):
-                                # Rate limited — wait for reset
-                                if resets_at:
-                                    import time
-                                    wait = max(0, resets_at - time.time())
-                                    if wait > 0 and wait < 300:
-                                        await asyncio.sleep(wait + 1)
-
-                        # Subagent task events
-                        elif isinstance(message, TaskStartedMessage):
-                            heartbeat_trigger = "subagent_start"
-                            event = SubagentEvent(
-                                agent_id=getattr(message, "task_id", ""),
-                                agent_type="subagent",
-                                action="start",
-                            )
-                            result.log.append(event)
-
-                        elif isinstance(message, TaskProgressMessage):
-                            heartbeat_trigger = "subagent_progress"
-                            tool_name = getattr(message, "last_tool_name", "")
-                            if tool_name:
-                                event = TextOutputEvent(
-                                    text=f"[subagent_progress] tool={tool_name}"
-                                )
-                                result.log.append(event)
-
-                        elif isinstance(message, TaskNotificationMessage):
-                            heartbeat_trigger = "subagent_done"
-                            event = SubagentEvent(
-                                agent_id=getattr(message, "task_id", ""),
-                                agent_type="subagent",
-                                action="stop",
-                            )
-                            result.log.append(event)
-
-                        # StreamEvent — streaming keepalive from LLM
-                        elif isinstance(message, StreamEvent):
-                            heartbeat_trigger = "stream"
-
-                        # Update heartbeat on ANY message with specific trigger
-                        self._last_stream_event_time = datetime.now()
-                        if self._storage:
-                            self._storage.write_heartbeat(self._last_stream_event_time, source=heartbeat_trigger)
-
-                        # Check monitor flags after processing each message
-                        if self._monitor and self._monitor._pending_terminate:
-                            self._monitor._pending_terminate = False
+                response_iter = client.receive_response().__aiter__()
+                while True:
+                    try:
+                        message = await asyncio.wait_for(
+                            response_iter.__anext__(), timeout=_POLL_INTERVAL
+                        )
+                    except asyncio.TimeoutError:
+                        # ── Strategy terminate flag (set by background task) ──
+                        if self._strategy_terminate:
                             result.stop_reason = "terminate"
-                            result.result_text = "Terminated by monitor (hard_limit)"
-                            stop_event = StopEvent(reason="terminate", result_text="hard_limit")
+                            result.result_text = "Terminated by strategy check"
+                            stop_event = StopEvent(reason="terminate", result_text="strategy")
                             result.log.append(stop_event)
                             await self.handler.on_stop(stop_event)
                             break
-                        if self._monitor and self._monitor._pending_interrupt:
-                            self._monitor._pending_interrupt = False
-                            await self._client.interrupt()
 
-                finally:
-                    await monitor.stop()
-                    self._monitor = None
+                        # ── Liveness check (every 10s) ──
+                        age = (datetime.now() - self._last_stream_event_time).total_seconds()
+                        if self._solver_source.startswith("tool:") or self._solver_source == "rate_limit":
+                            limit = self.monitor_config.tool_timeout if self.monitor_config else 1200.0
+                        else:
+                            limit = self.monitor_config.heartbeat_timeout if self.monitor_config else 300.0
+                        if age > limit:
+                            reason = f"liveness_timeout ({self._solver_source}, {age:.0f}s > {limit:.0f}s)"
+                            print(f"[Runner] {reason}")
+                            result.stop_reason = "liveness_timeout"
+                            result.result_text = reason
+                            stop_event = StopEvent(reason="liveness_timeout", result_text=reason)
+                            result.log.append(stop_event)
+                            await self.handler.on_stop(stop_event)
+                            break
+
+                        # ── Strategy check (every 60s, non-blocking) ──
+                        now_mono = _time.monotonic()
+                        if now_mono - _last_strategy_check >= _STRATEGY_INTERVAL:
+                            _last_strategy_check = now_mono
+                            asyncio.create_task(
+                                self._run_strategy_check(result.log)
+                            )
+
+                        continue
+                    except StopAsyncIteration:
+                        break
+
+                    # ── Process message ──
+                    source = "unknown"
+
+                    if isinstance(message, SystemMessage):
+                        source = "system_init"
+                        if message.subtype == "init":
+                            sid = message.data.get("session_id", "")
+                            self._session_id = sid
+                            result.session_id = sid
+                            start_event = StartEvent(session_id=sid)
+                            result.log.append(start_event)
+
+                    elif isinstance(message, AssistantMessage):
+                        has_thinking = False
+                        has_text = False
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                has_text = True
+                                event = TextOutputEvent(text=block.text)
+                                result.log.append(event)
+                                await self.handler.on_text(event)
+                            elif isinstance(block, ThinkingBlock):
+                                has_thinking = True
+                        if has_text:
+                            source = "text"
+                        elif has_thinking:
+                            source = "thinking"
+                        else:
+                            source = "assistant"
+                        if message.usage:
+                            for k, v in message.usage.items():
+                                if isinstance(v, (int, float)):
+                                    total_usage[k] = total_usage.get(k, 0) + v
+
+                    elif isinstance(message, ResultMessage):
+                        source = "result"
+                        result.result_text = message.result or ""
+                        result.stop_reason = getattr(message, "stop_reason", "end_turn")
+                        stop_event = StopEvent(
+                            reason=result.stop_reason,
+                            result_text=result.result_text[:5000],
+                        )
+                        result.log.append(stop_event)
+                        await self.handler.on_stop(stop_event)
+
+                    elif isinstance(message, RateLimitEvent):
+                        source = "rate_limit"
+                        info = message.rate_limit_info
+                        status = getattr(info, "status", None)
+                        resets_at = getattr(info, "resets_at", None)
+                        utilization = getattr(info, "utilization", None)
+                        event = TextOutputEvent(
+                            text=f"[rate_limit] status={status} utilization={utilization} resets_at={resets_at}"
+                        )
+                        result.log.append(event)
+                        # Set source to rate_limit so liveness uses tool_timeout.
+                        # No sleep — CLI handles retry internally.
+                        if status and hasattr(status, "value") and "rejected" in str(status.value):
+                            self._solver_source = "rate_limit"
+
+                    elif isinstance(message, TaskStartedMessage):
+                        source = "subagent_start"
+                        event = SubagentEvent(
+                            agent_id=getattr(message, "task_id", ""),
+                            agent_type="subagent",
+                            action="start",
+                        )
+                        result.log.append(event)
+
+                    elif isinstance(message, TaskProgressMessage):
+                        source = "subagent_progress"
+                        tool_name = getattr(message, "last_tool_name", "")
+                        if tool_name:
+                            event = TextOutputEvent(
+                                text=f"[subagent_progress] tool={tool_name}"
+                            )
+                            result.log.append(event)
+
+                    elif isinstance(message, TaskNotificationMessage):
+                        source = "subagent_done"
+                        event = SubagentEvent(
+                            agent_id=getattr(message, "task_id", ""),
+                            agent_type="subagent",
+                            action="stop",
+                        )
+                        result.log.append(event)
+
+                    elif isinstance(message, StreamEvent):
+                        source = "stream"
+
+                    # Update state + heartbeat
+                    self._last_stream_event_time = datetime.now()
+                    self._solver_source = source
+                    if self._storage:
+                        self._storage.write_heartbeat(self._last_stream_event_time, source=source)
 
             finally:
                 # Close client — catch CancelledError from transport cleanup
                 try:
                     await client_ctx.__aexit__(None, None, None)
                 except (asyncio.CancelledError, Exception):
-                    pass  # Client cleanup failed — already handled
+                    pass
 
         except BaseException as exc:
-            # Log subprocess exit info
             exit_info = f"{type(exc).__name__}: {exc}"
             print(f"[Runner] {self.agent_config.name} subprocess error: {exit_info}")
             if self._storage:
@@ -818,7 +794,6 @@ class AgentRunner:
 
         result.usage = total_usage
 
-        # Write session meta
         if self._storage:
             self._storage.write_meta({
                 "session_id": result.session_id,
@@ -833,3 +808,93 @@ class AgentRunner:
             })
 
         return result
+
+    async def _run_strategy_check(self, log: SessionLog) -> None:
+        """Strategy check — runs as create_task, never blocks main loop.
+
+        Checks hard_limit, stuck detection, loop detection, progress.
+        Calls Steward if needed. Results delivered via client.query().
+        """
+        try:
+            if not self.monitor_config:
+                return
+
+            elapsed = log.elapsed().total_seconds()
+
+            # Hard limit — non-negotiable
+            if elapsed > self.monitor_config.hard_limit:
+                alert = MonitorAlert(
+                    alert_type="hard_limit",
+                    details=f"Session hit hard limit: {elapsed:.0f}s",
+                )
+                log.append(alert)
+                action = await self.handler.on_monitor_alert(alert)
+                if action == "terminate":
+                    # Can't directly break the main loop from a task.
+                    # Set a flag that the main loop checks.
+                    self._strategy_terminate = True
+                return
+
+            # Total timeout
+            if elapsed > self.monitor_config.total_timeout:
+                alert = MonitorAlert(
+                    alert_type="total_timeout",
+                    details=f"Session running for {elapsed:.0f}s",
+                )
+                log.append(alert)
+                action = await self.handler.on_monitor_alert(alert)
+                if action == "terminate":
+                    self._strategy_terminate = True
+                elif action and action.startswith("inject:"):
+                    if self._client:
+                        await self._client.query(action[len("inject:"):])
+                return
+
+            # Idle timeout
+            idle = log.last_event_age().total_seconds()
+            if idle > self.monitor_config.idle_timeout:
+                alert = MonitorAlert(
+                    alert_type="idle_timeout",
+                    details=f"No activity for {idle:.0f}s",
+                )
+                log.append(alert)
+                action = await self.handler.on_monitor_alert(alert)
+                if action == "terminate":
+                    self._strategy_terminate = True
+                elif action == "interrupt" and self._client:
+                    try:
+                        await asyncio.wait_for(self._client.interrupt(), timeout=5)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                elif action and action.startswith("inject:") and self._client:
+                    await self._client.query(action[len("inject:"):])
+                return
+
+            # Loop detection
+            seq = log.recent_tool_sequence(self.monitor_config.loop_threshold)
+            if len(seq) >= self.monitor_config.loop_threshold and len(set(seq)) == 1:
+                alert = MonitorAlert(
+                    alert_type="loop_detected",
+                    details=f"Tool '{seq[0]}' called {len(seq)} times consecutively",
+                )
+                log.append(alert)
+                action = await self.handler.on_monitor_alert(alert)
+                if action and action.startswith("inject:") and self._client:
+                    await self._client.query(action[len("inject:"):])
+                return
+
+            # Progress check
+            if self.monitor_config.progress_check_interval > 0:
+                if not hasattr(self, "_last_progress_elapsed"):
+                    self._last_progress_elapsed = 0.0
+                if elapsed - self._last_progress_elapsed >= self.monitor_config.progress_check_interval:
+                    self._last_progress_elapsed = elapsed
+                    alert = MonitorAlert(
+                        alert_type="progress_check",
+                        details=f"Periodic progress check at {elapsed:.0f}s",
+                    )
+                    log.append(alert)
+                    await self.handler.on_monitor_alert(alert)
+
+        except Exception as e:
+            print(f"[Runner] Strategy check error: {e}")

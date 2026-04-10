@@ -27,9 +27,11 @@ class MonitorConfig:
     idle_timeout: float = 900.0        # 15 min no tool calls
     total_timeout: float = 14400.0     # 4 hours default
     hard_limit: float = 21600.0        # 6 hours absolute max, no extension
-    check_interval: float = 60.0       # check every 1 min
+    check_interval: float = 60.0       # strategy check every 1 min (inside main poll loop)
     loop_threshold: int = 5            # same tool N times in a row
     progress_check_interval: float = 900.0  # 15 min periodic progress check
+    heartbeat_timeout: float = 300.0   # 5 min no SDK message in LLM phase = dead
+    tool_timeout: float = 1200.0       # 20 min tool/rate_limit phase = hung
 
     @classmethod
     def for_solver(cls) -> MonitorConfig:

@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import os
 import subprocess
-import threading
 
 from agents.config import SystemConfig
 from agents.events import (
@@ -50,58 +50,63 @@ def _load_prompt(name: str) -> str:
     raise FileNotFoundError(f"Prompt template not found: {path}")
 
 
-def _run_subprocess(
+async def _run_subprocess_async(
     cmd: list[str],
     cwd: str,
     log_path: Path,
     timeout: int = 1800,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess with real-time stdout/stderr logging to a file.
+    """Run a subprocess asynchronously with real-time stdout/stderr logging.
 
-    Both stdout and stderr are streamed line-by-line to log_path as they
-    arrive, and also captured for the caller. stdout lines are prefixed
-    with [stdout], stderr with [stderr].
+    Uses asyncio.create_subprocess_exec — no threads. stdout/stderr are
+    streamed line-by-line to log_path, prefixed with [stdout]/[stderr].
 
     Returns CompletedProcess with captured stdout and stderr (unprefixed).
     """
-    with open(log_path, "w") as log_file:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=cwd,
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    async def _stream(stream: asyncio.StreamReader, prefix: str, collector: list[str]):
+        async for raw_line in stream:
+            line = raw_line.decode("utf-8", errors="replace")
+            collector.append(line)
+
+    log_file = open(log_path, "w")
+
+    async def _stream_to_log(stream: asyncio.StreamReader, prefix: str, collector: list[str]):
+        async for raw_line in stream:
+            line = raw_line.decode("utf-8", errors="replace")
+            log_file.write(f"[{prefix}] {line}")
+            log_file.flush()
+            collector.append(line)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _stream_to_log(proc.stdout, "stdout", stdout_lines),
+                _stream_to_log(proc.stderr, "stderr", stderr_lines),
+            ),
+            timeout=timeout,
         )
+        await proc.wait()
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        log_file.close()
+        raise subprocess.TimeoutExpired(cmd, timeout)
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
+    log_file.close()
 
-        def _stream(pipe, prefix, collector):
-            for line in pipe:
-                log_file.write(f"[{prefix}] {line}")
-                log_file.flush()
-                collector.append(line)
-
-        t_out = threading.Thread(target=_stream, args=(proc.stdout, "stdout", stdout_lines), daemon=True)
-        t_err = threading.Thread(target=_stream, args=(proc.stderr, "stderr", stderr_lines), daemon=True)
-        t_out.start()
-        t_err.start()
-
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            t_out.join(timeout=5)
-            t_err.join(timeout=5)
-            raise subprocess.TimeoutExpired(cmd, timeout)
-
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
-
-        return subprocess.CompletedProcess(
-            cmd, proc.returncode, "".join(stdout_lines), "".join(stderr_lines)
-        )
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode, "".join(stdout_lines), "".join(stderr_lines)
+    )
 
 
 def _slugify(text: str) -> str:
@@ -577,15 +582,12 @@ class Supervisor(DefaultHandler):
 
         print(f"\n[Supervisor] Running formal bench: {' '.join(cmd)}")
 
-        # Run in thread pool with real-time stderr logging
+        # Run async subprocess — no threads
         bench_log_dir = Path.home() / ".cuda_exec" / run_tag
         bench_log_dir.mkdir(parents=True, exist_ok=True)
         bench_log_path = bench_log_dir / "formal_bench.log"
 
-        loop = asyncio.get_event_loop()
-        proc_result = await loop.run_in_executor(
-            None, lambda: _run_subprocess(cmd, cwd, bench_log_path, timeout=1800)
-        )
+        proc_result = await _run_subprocess_async(cmd, cwd, bench_log_path, timeout=1800)
 
         # stdout = JSON result, stderr = Markdown table + source paths
         table_output = proc_result.stderr.strip()

@@ -21,13 +21,10 @@ Supervisor (read-only, online orchestration)
 │   ├── stuck — analyze why Solver is idle (30 min timeout)
 │   └── answer_question — respond to Solver's questions
 │
-├── Monitor             Async watchdog (code, no LLM cost)
-│   ├── Heartbeat check every 60s
-│   ├── Progress check every 10 min (log only, no Steward)
-│   ├── Idle timeout 30 min → Steward stuck analysis
-│   ├── Total timeout 2h → auto-continue (no Steward)
-│   ├── Hard limit 6h → terminate (no Steward)
-│   └── Loop detection (100x same tool)
+├── Liveness + Strategy  Unified in Runner main loop (no separate task)
+│   ├── Liveness (every 10s): heartbeat_timeout 5min (LLM), tool_timeout 20min (tool/rate_limit)
+│   ├── Strategy (every 60s): hard_limit, idle_timeout, loop_detection, progress_check
+│   └── All subprocess creation via asyncio (zero threads)
 │
 └── Harness             Executable Skills
     ├── ik:exec — compile, trial, profile
@@ -163,8 +160,9 @@ Python process (Supervisor)        asyncio event loop
 │   │  └── MCP tools       │       ask_supervisor, request_formal_bench
 │   └──────────────────────┘
 │
-├── AgentMonitor (asyncio task)    Parallel watchdog
-│   └── _check_health() every 60s
+├── Liveness + Strategy            Inline in main poll loop
+│   ├── Every 10s: heartbeat age check (LLM 5min / tool 20min)
+│   └── Every 60s: hard_limit, idle, loop, progress (create_task, non-blocking)
 │
 └── Process group (os.setpgrp)     Kill supervisor → kill all children
 ```

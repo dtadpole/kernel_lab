@@ -1,4 +1,1 @@
-{
-  "_comment": "ref-cudnn segfaults with cuDNN 9.19 + CUDA 13.2 when run as a subprocess in the formal bench, producing no output and causing all impls to fail correctness. ref-pytorch (Flash Attention via SDPA) is the correct ground truth for FA4 on this host.",
-  "golden_ref": "ref-pytorch"
-}
+{}

@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from agents.config import SystemConfig
-from agents.supervisor import Supervisor
+from agents.workshop import Workshop
 
 
 TASKS_DIR = Path("conf/agent/tasks")
@@ -62,7 +62,7 @@ def main():
     args = parser.parse_args()
 
     config = SystemConfig.from_yaml(args.config)
-    supervisor = Supervisor(
+    workshop = Workshop(
         config=config,
         response_prompts_dir=args.prompts_dir,
     )
@@ -74,7 +74,7 @@ def main():
     print(f"[Main] Task: {task[:100]}...")
     print(f"[Main] Config: {args.config}")
 
-    asyncio.run(supervisor.run_continuous(task=task, kernel=args.kernel, gpu=args.gpu))
+    asyncio.run(workshop.run_continuous(task=task, kernel=args.kernel, gpu=args.gpu))
 
 
 if __name__ == "__main__":

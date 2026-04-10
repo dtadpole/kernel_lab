@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["agents", "cuda_exec", "doc_retrieval"]
+packages = ["agents", "cuda_exec", "doc_retrieval", "fa3"]
 
 [project]
 name = "kernel-lab"
@@ -41,7 +41,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cutlass = ["nvidia-cutlass-dsl"]
+cutlass = ["nvidia-cutlass-dsl>=4.4.2"]
+fa4 = [
+    "flash-attn-4>=4.0.0b8",
+    "nvidia-cutlass-dsl>=4.4.2",
+    "apache-tvm-ffi>=0.1.10,<0.2",
+]
 dev = ["pytest>=8.0", "pyyaml>=6.0"]
 
 [tool.pytest.ini_options]

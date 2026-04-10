@@ -352,21 +352,57 @@ Wiki pages track time dimension via frontmatter:
 **Rule**: Knowledge can become stale. Periodic review (future extension) should
 check `updated` dates and flag pages that haven't been confirmed in N months.
 
-## 12. Integration with Existing System
+## 12. Process Architecture
+
+Two independent Python processes, sharing `kernel_lab_kb/` via filesystem:
 
 ```
-Supervisor
-├── Solver (generates reflections)
-│   └── submit_bench_reflection → saved to runs/<run_tag>/reflections/
-│
-├── Librarian System (processes reflections)
-│   ├── Information Analyst → reads reflections → produces proposals
-│   ├── Taxonomist → advises on structure
-│   ├── Auditor → validates evidence
-│   └── Librarian → writes to kernel_lab_kb/wiki/
-│
-└── Future: Solver reads wiki for context before optimization
+Workshop (agents/workshop.py)           Library (agents/library.py)
+python -m agents.workshop               python -m agents.library
+│                                        │
+├── Solver (LLM agent)                  ├── Librarian (LLM agent)
+│   ├── Read/Write/Bash                 │   ├── Read/Write wiki
+│   ├── ik:exec, ik:docs               │   └── MCP tools:
+│   └── MCP tools:                      │       ├── consult_taxonomist
+│       ├── request_bench               │       ├── consult_auditor
+│       ├── ask_supervisor              │       └── clarify_analyst
+│       └── submit_reflection ──┐       │
+│                               │       ├── Information Analyst (LLM) ×N
+├── Steward (LLM agent)        │       │   └── reads reflections, writes proposals
+│   └── reviews Solver          │       │
+│                               │       ├── Taxonomist (LLM, read-only)
+└── Benchmarker (subprocess)    │       │   └── advises on structure
+                                │       │
+                                │       └── Auditor (LLM, read-only)
+                                │           └── validates evidence
+                                │
+                   ┌────────────┘
+                   ▼
+kernel_lab_kb/
+├── runs/<run_tag>/reflections/    ← Workshop writes, Library reads
+├── wiki/_proposals/               ← Analyst writes, Librarian reads
+└── wiki/{concepts,patterns,...}/  ← Librarian writes (canonical)
 ```
+
+**Workshop** (`agents/workshop.py`): Manages the Solver optimization loop.
+Renamed from `supervisor.py` to avoid collision with Claude Agent SDK's
+"supervisor" concept (which refers to the Python client process itself).
+
+**Library** (`agents/library.py`): Manages the knowledge base pipeline.
+Librarian is a long-running LLM agent that consumes proposals from a queue.
+Expert agents (Taxonomist, Auditor) are spawned on-demand via MCP tool
+dispatch, same pattern as Workshop spawning Benchmarker.
+
+**Permission isolation** (via `agents.yaml` tool_rules):
+
+| Agent | Can write | Read-only |
+|-------|-----------|-----------|
+| Solver | `runs/<run_tag>/gen/`, `reflections/` | `data/ref/`, `data/configs/` |
+| Steward | — | transcript |
+| Librarian | `wiki/` (canonical) | `wiki/_proposals/`, `wiki/**` |
+| Information Analyst | `wiki/_proposals/` | `runs/*/reflections/`, `wiki/**` |
+| Taxonomist | — | `wiki/**` |
+| Auditor | — | `wiki/**` |
 
 **Triggers for Information Analyst:**
 - After each Wave completes (automatic batch)
@@ -396,5 +432,5 @@ lessons for the target kernel.
 - **Knowledge retrieval skill**: Solver queries wiki during optimization (`/kb:search`)
 - **Periodic health checks**: Orphan pages, stale content, broken links, coverage gaps
 - **Knowledge graph visualization**: Interactive view of page relationships
-- **Cross-run learning**: Aggregate patterns across multiple Supervisor runs
+- **Cross-run learning**: Aggregate patterns across multiple Workshop runs
 - **Human review interface**: Web UI for reviewing proposals and wiki state

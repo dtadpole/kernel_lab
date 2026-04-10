@@ -1,4 +1,4 @@
-"""Tests for Phase 2: Supervisor + ResponseRouter."""
+"""Tests for Workshop + ResponseRouter."""
 
 import tempfile
 from datetime import datetime, timedelta
@@ -20,7 +20,7 @@ from agents.response_router import ResponseRouter, ResponseVerdict
 from agents.session_log import SessionLog
 from agents.runner import RunResult
 from agents.steward import Steward, StewardResponse, _ACTION_LEVELS
-from agents.supervisor import Supervisor, SupervisorState, _slugify
+from agents.workshop import Workshop, WorkshopState, _slugify
 
 
 # ── ResponseVerdict parsing ──
@@ -106,10 +106,10 @@ def test_router_unknown_scenario():
 # ── Supervisor state tracking ──
 
 @pytest.mark.quick
-def test_supervisor_state_on_tool_call():
+def test_workshop_state_on_tool_call():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test")
+    sup = Workshop(config)
+    sup.state = WorkshopState(phase="solving", task="test")
 
     event = ToolCallEvent(tool_name="Edit", tool_input={"file": "a.cu"}, tool_use_id="t1")
     anyio.run(sup.on_tool_call, event)
@@ -119,10 +119,10 @@ def test_supervisor_state_on_tool_call():
 
 
 @pytest.mark.quick
-def test_supervisor_state_on_error():
+def test_workshop_state_on_error():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test")
+    sup = Workshop(config)
+    sup.state = WorkshopState(phase="solving", task="test")
 
     event = ToolResultEvent(tool_name="Bash", tool_use_id="t1", result_summary="error", is_error=True)
     anyio.run(sup.on_tool_result, event)
@@ -131,11 +131,11 @@ def test_supervisor_state_on_error():
 
 
 @pytest.mark.quick
-def test_supervisor_monitor_hard_limit():
+def test_workshop_monitor_hard_limit():
     """on_monitor_alert with hard_limit should always return terminate."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test")
+    sup = Workshop(config)
+    sup.state = WorkshopState(phase="solving", task="test")
 
     alert = MonitorAlert(alert_type="hard_limit", details="6 hours exceeded")
 
@@ -191,7 +191,7 @@ def test_steward_response_kill():
 @pytest.mark.quick
 def test_parse_bench_improved_true():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     result = RunResult(result_text="improved: true, new gem created v002_20260405")
     assert sup._parse_bench_improved(result) is True
 
@@ -199,7 +199,7 @@ def test_parse_bench_improved_true():
 @pytest.mark.quick
 def test_parse_bench_improved_false():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     result = RunResult(result_text="No configs beat the previous best. improved: false")
     assert sup._parse_bench_improved(result) is False
 
@@ -207,7 +207,7 @@ def test_parse_bench_improved_false():
 @pytest.mark.quick
 def test_parse_bench_improved_gem_keyword():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     result = RunResult(result_text="A new gem was created at v003_20260405_120000")
     assert sup._parse_bench_improved(result) is True
 
@@ -216,7 +216,7 @@ def test_parse_bench_improved_gem_keyword():
 def test_parse_bench_improved_structured_data():
     """_parse_bench_improved uses bench_data from JSON stdout."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     result = RunResult(result_text="some table output")
     result.usage = {"bench_data": {"improved": True, "gems": {"gen-cuda": {"version": 3}}}}
     assert sup._parse_bench_improved(result) is True
@@ -226,7 +226,7 @@ def test_parse_bench_improved_structured_data():
 def test_parse_bench_improved_structured_false():
     """_parse_bench_improved returns False when bench_data says not improved."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     result = RunResult(result_text="some table output")
     result.usage = {"bench_data": {"improved": False, "gems": {}}}
     assert sup._parse_bench_improved(result) is False
@@ -236,7 +236,7 @@ def test_parse_bench_improved_structured_false():
 def test_correctness_failure_from_json():
     """Detect correctness failure from structured JSON data."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     bench_data = {
         "summary": {
             "impls": {
@@ -257,7 +257,7 @@ def test_correctness_failure_from_json():
 def test_correctness_pass_from_json():
     """No correctness failure when all gen configs pass."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     bench_data = {
         "summary": {
             "impls": {
@@ -277,7 +277,7 @@ def test_correctness_pass_from_json():
 def test_correctness_fallback_to_stderr():
     """Fallback to ✗ in stderr when JSON has no data."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
+    sup = Workshop(config)
     assert sup._check_correctness_failure({}, "some table ✗ failure") is True
     assert sup._check_correctness_failure({}, "some table ✓ all good") is False
 
@@ -286,8 +286,8 @@ def test_correctness_fallback_to_stderr():
 def test_submit_bench_reflection():
     """_handle_bench_reflection saves reflection.md to impls dir."""
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(
+    sup = Workshop(config)
+    sup.state = WorkshopState(
         phase="solving", task="test", kernel="fa4",
         run_tag="test_run_reflection",
     )
@@ -373,8 +373,8 @@ def test_submit_bench_reflection_missing_reflection():
 @pytest.mark.quick
 def test_supervisor_consecutive_stuck():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test", consecutive_stuck=2)
+    sup = Workshop(config)
+    sup.state = WorkshopState(phase="solving", task="test", consecutive_stuck=2)
 
     # 3rd consecutive stuck should trigger forced guidance
     alert = MonitorAlert(alert_type="idle_timeout", details="15 min idle")
@@ -386,8 +386,8 @@ def test_supervisor_consecutive_stuck():
 @pytest.mark.quick
 def test_supervisor_hard_limit_no_steward():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(phase="solving", task="test")
+    sup = Workshop(config)
+    sup.state = WorkshopState(phase="solving", task="test")
 
     alert = MonitorAlert(alert_type="hard_limit", details="6h exceeded")
     action = anyio.run(sup.on_monitor_alert, alert)
@@ -450,8 +450,8 @@ def test_slugify():
 @pytest.mark.quick
 def test_supervisor_get_status():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
-    sup = Supervisor(config)
-    sup.state = SupervisorState(
+    sup = Workshop(config)
+    sup.state = WorkshopState(
         phase="solving",
         task="Optimize matmul",
         wave=1,

@@ -1,4 +1,8 @@
-# Kernel Lab — System Design
+# Workshop — Kernel Optimization System Design
+
+> Note: The Python process managing this system is `agents/workshop.py`
+> (renamed from `supervisor.py` to avoid collision with Claude Agent SDK's
+> "supervisor" concept).
 
 ## Architecture Overview
 

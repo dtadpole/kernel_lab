@@ -1,8 +1,8 @@
-"""Layer 2: Supervisor — orchestrates Solver + Benchmarker + Steward.
+"""Layer 2: Workshop — orchestrates Solver + Benchmarker + Steward.
 
 Decision loop:
   1. Solver optimizes kernel code
-  2. Solver calls request_formal_bench → Supervisor dispatches Benchmarker
+  2. Solver calls request_formal_bench → Workshop dispatches Benchmarker
   3. Benchmarker runs ik:bench → returns results
   4. If improved → record, stop Solver, start new wave
   5. If not improved → Solver retries
@@ -34,7 +34,7 @@ from agents.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from agents.api_server import SupervisorAPIServer
+from agents.api_server import WorkshopAPIServer
 from agents.runner import AgentRunner, RunResult
 from agents.session_log import SessionLog
 from agents.steward import Steward, StewardResponse
@@ -116,7 +116,7 @@ def _slugify(text: str) -> str:
 
 
 @dataclass
-class SupervisorState:
+class WorkshopState:
     phase: str = "idle"
     task: str = ""
     task_slug: str = ""
@@ -146,7 +146,7 @@ class TaskResult:
     solver_result: RunResult | None = None
 
 
-class Supervisor(DefaultHandler):
+class Workshop(DefaultHandler):
     """Orchestrates Solver + Benchmarker + Steward."""
 
     def __init__(
@@ -155,7 +155,7 @@ class Supervisor(DefaultHandler):
         response_prompts_dir: str | Path = "conf/agent/response_prompts",
     ):
         self.config = config
-        self.state = SupervisorState()
+        self.state = WorkshopState()
 
         steward_config = config.steward
         self.steward = Steward(
@@ -167,7 +167,7 @@ class Supervisor(DefaultHandler):
         self._solver_runner: AgentRunner | None = None
         self._current_log: SessionLog | None = None
         self._pending_stop_event: StopEvent | None = None
-        self._api_server: SupervisorAPIServer | None = None
+        self._api_server: WorkshopAPIServer | None = None
 
     # ── Main loop ──
 
@@ -186,12 +186,12 @@ class Supervisor(DefaultHandler):
         import time as _time
 
         now = datetime.now()
-        run_tag = f"supervisor_run_{now.strftime('%Y%m%d_%H%M%S')}"
+        run_tag = f"workshop_run_{now.strftime('%Y%m%d_%H%M%S')}"
         task_slug = _slugify(task)
 
         self.config.storage.run_tag = run_tag
 
-        self.state = SupervisorState(
+        self.state = WorkshopState(
             phase="starting",
             task=task,
             task_slug=task_slug,
@@ -208,19 +208,19 @@ class Supervisor(DefaultHandler):
         scratch_dir.mkdir(parents=True, exist_ok=True)
 
         # Start API server
-        self._api_server = SupervisorAPIServer(self)
+        self._api_server = WorkshopAPIServer(self)
         try:
             api_port = await self._api_server.start()
         except Exception as e:
-            print(f"[Supervisor] API server failed to start: {e}")
+            print(f"[Workshop] API server failed to start: {e}")
             self._api_server = None
 
         print(f"\n{'='*60}")
-        print(f"[Supervisor] Task: {kernel} on GPU {gpu}")
-        print(f"[Supervisor] Run tag: {run_tag}")
+        print(f"[Workshop] Task: {kernel} on GPU {gpu}")
+        print(f"[Workshop] Run tag: {run_tag}")
         if self._api_server:
-            print(f"[Supervisor] API: http://127.0.0.1:{api_port}")
-        print(f"[Supervisor] Kill with Ctrl+C to stop")
+            print(f"[Workshop] API: http://127.0.0.1:{api_port}")
+        print(f"[Workshop] Kill with Ctrl+C to stop")
         print(f"{'='*60}\n")
 
         wave = 0
@@ -235,7 +235,7 @@ class Supervisor(DefaultHandler):
             recent_wave_starts.append(now_ts)
             recent_wave_starts = [t for t in recent_wave_starts if now_ts - t < 60]
             if len(recent_wave_starts) > 10:
-                print(f"[Supervisor] CRASH LOOP: {len(recent_wave_starts)} waves in 60s — cooling down 60s")
+                print(f"[Workshop] CRASH LOOP: {len(recent_wave_starts)} waves in 60s — cooling down 60s")
                 await asyncio.sleep(60)
                 recent_wave_starts.clear()
                 consecutive_errors = 0
@@ -262,7 +262,7 @@ class Supervisor(DefaultHandler):
                 initial_prompt += self._build_wave_history_prompt(wave_history)
 
             print(f"\n{'='*60}")
-            print(f"[Supervisor] Wave {wave} starting")
+            print(f"[Workshop] Wave {wave} starting")
             print(f"{'='*60}\n")
 
             try:
@@ -276,7 +276,7 @@ class Supervisor(DefaultHandler):
 
                     # ── Gem + reflection → SUCCESS → end Wave ──
                     if self._gem_produced and self._reflection_received:
-                        print(f"[Supervisor] Wave {wave} — gem produced + reflection received → SUCCESS")
+                        print(f"[Workshop] Wave {wave} — gem produced + reflection received → SUCCESS")
                         await self._solver_runner.send_message(
                             "SUCCESS. Thank you for your contribution. This wave is complete."
                         )
@@ -291,7 +291,7 @@ class Supervisor(DefaultHandler):
                     self.state.phase = "deciding"
                     stop_event = self._pending_stop_event
                     if stop_event:
-                        print(f"[Supervisor] Wave {wave} session {session} ended (stop_reason={stop_event.reason})")
+                        print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={stop_event.reason})")
                         verdict = await self.steward.review_session_end(
                             transcript_path=self._get_transcript_path(),
                             result_text=stop_event.result_text or result.result_text,
@@ -316,7 +316,7 @@ class Supervisor(DefaultHandler):
                         "reasoning": verdict.reasoning[:200],
                     })
 
-                    print(f"[Supervisor] Wave {wave} session {session} verdict: {verdict.action}")
+                    print(f"[Workshop] Wave {wave} session {session} verdict: {verdict.action}")
 
                     if verdict.action == "ABORT":
                         break  # End Wave
@@ -330,17 +330,17 @@ class Supervisor(DefaultHandler):
                 consecutive_errors = 0
 
             except KeyboardInterrupt:
-                print(f"\n[Supervisor] Interrupted by user at wave {wave}")
+                print(f"\n[Workshop] Interrupted by user at wave {wave}")
                 await self._solver_runner.stop()
                 await self._stop_api_server()
                 break
 
             except Exception as e:
                 consecutive_errors += 1
-                print(f"[Supervisor] Wave {wave} error ({consecutive_errors}/{max_consecutive_errors}): "
+                print(f"[Workshop] Wave {wave} error ({consecutive_errors}/{max_consecutive_errors}): "
                       f"{type(e).__name__}: {e}")
                 if consecutive_errors >= max_consecutive_errors:
-                    print(f"[Supervisor] {max_consecutive_errors} consecutive errors — cooling down 60s")
+                    print(f"[Workshop] {max_consecutive_errors} consecutive errors — cooling down 60s")
                     await asyncio.sleep(60)
                     consecutive_errors = 0
 
@@ -349,7 +349,7 @@ class Supervisor(DefaultHandler):
                 try:
                     await self._solver_runner.stop()
                 except Exception as e:
-                    print(f"[Supervisor] Wave {wave} cleanup error: {e}")
+                    print(f"[Workshop] Wave {wave} cleanup error: {e}")
 
             # ── Record wave result ──
             elapsed = (datetime.now() - wave_start).total_seconds()
@@ -363,7 +363,7 @@ class Supervisor(DefaultHandler):
             wave_history.append(wave_record)
             self._save_wave_log(kernel, wave_history)
 
-            print(f"[Supervisor] Wave {wave} ended ({wave_record['elapsed']}, "
+            print(f"[Workshop] Wave {wave} ended ({wave_record['elapsed']}, "
                   f"verdict={wave_record['verdict']}, improved={wave_record['improved']})")
 
             wave += 1
@@ -402,14 +402,14 @@ class Supervisor(DefaultHandler):
     # ── Prompt builders ──
 
     def _build_initial_prompt(self, task: str, run_tag: str, kernel: str, gpu: int = 4) -> str:
-        template = _load_prompt("supervisor_initial")
+        template = _load_prompt("workshop_initial")
         result = template.format(run_tag=run_tag, kernel=kernel, task=task, gpu=gpu)
         return result.replace("<run_tag>", run_tag)
 
     def _build_continue_prompt(self, verdict: StewardResponse) -> str:
         """Build the resume prompt for CONTINUE — injected into the same session."""
         guidance = verdict.detail or verdict.reasoning[:500]
-        template = _load_prompt("supervisor_continue")
+        template = _load_prompt("workshop_continue")
         return template.format(guidance=guidance)
 
     # ── Benchmarker dispatch ──
@@ -424,9 +424,9 @@ class Supervisor(DefaultHandler):
         """Run formal benchmark directly via .venv/bin/python subprocess.
 
         No Benchmarker agent — just run formal.py and parse JSON output.
-        GPU and run_tag are always overridden by Supervisor (not from Solver).
+        GPU and run_tag are always overridden by Workshop (not from Solver).
         """
-        gpu = self.state.gpu       # Supervisor controls GPU
+        gpu = self.state.gpu       # Workshop controls GPU
         run_tag = self.state.run_tag
         cwd = self.config.defaults.get("cwd", str(Path.cwd()))
         venv_python = str(Path(cwd) / ".venv" / "bin" / "python")
@@ -444,7 +444,7 @@ class Supervisor(DefaultHandler):
         if timeout > 0:
             cmd.append(f"bench.timeout={timeout}")
 
-        print(f"\n[Supervisor] Running formal bench: {' '.join(cmd)}")
+        print(f"\n[Workshop] Running formal bench: {' '.join(cmd)}")
 
         # Run async subprocess — no threads
         bench_log_dir = Path.home() / ".cuda_exec" / run_tag
@@ -457,9 +457,9 @@ class Supervisor(DefaultHandler):
         table_output = proc_result.stderr.strip()
         json_output = proc_result.stdout.strip()
 
-        print(f"[Supervisor] Bench exit code: {proc_result.returncode}")
+        print(f"[Workshop] Bench exit code: {proc_result.returncode}")
         if table_output:
-            print(f"[Supervisor] Bench table:\n{table_output[:500]}")
+            print(f"[Workshop] Bench table:\n{table_output[:500]}")
 
         # Parse JSON for structured data (gems, improved, etc.)
         bench_data = {}
@@ -579,7 +579,7 @@ class Supervisor(DefaultHandler):
         )
 
         files = result.get("files_written", [])
-        print(f"[Supervisor] Reflection saved: {files}")
+        print(f"[Workshop] Reflection saved: {files}")
 
         self._reflection_received = True
 
@@ -603,7 +603,7 @@ class Supervisor(DefaultHandler):
             kernel = kernel_m.group(1)
 
         try:
-            # Supervisor controls GPU, impls (always "all"), and run_tag
+            # Workshop controls GPU, impls (always "all"), and run_tag
             bench_result = await self._run_benchmarker(kernel)
             improved = self._parse_bench_improved(bench_result)
 
@@ -661,9 +661,9 @@ class Supervisor(DefaultHandler):
             }
 
             if improved:
-                template = _load_prompt("supervisor_bench_improved")
+                template = _load_prompt("workshop_bench_improved")
             else:
-                template = _load_prompt("supervisor_bench_no_improvement")
+                template = _load_prompt("workshop_bench_no_improvement")
 
             # Escape braces in bench_result_text to prevent format() errors
             # (formal.py output may contain { } in log lines)
@@ -717,17 +717,17 @@ class Supervisor(DefaultHandler):
 
         if event.alert_type == "total_timeout":
             # Code decision: auto-continue until hard_limit
-            print(f"[Supervisor] Time limit at {elapsed} — auto-continuing")
+            print(f"[Workshop] Time limit at {elapsed} — auto-continuing")
             return "continue"
         elif event.alert_type == "progress_check":
             # Code decision: just log, no Steward needed
-            print(f"[Supervisor] Progress check at {elapsed} — heartbeat OK")
+            print(f"[Workshop] Progress check at {elapsed} — heartbeat OK")
             return "continue"
         elif event.alert_type in ("idle_timeout", "loop_detected"):
             self.state.consecutive_stuck += 1
 
             if self.state.consecutive_stuck >= 3:
-                print(f"[Supervisor] 3 consecutive stuck alerts — forcing interrupt")
+                print(f"[Workshop] 3 consecutive stuck alerts — forcing interrupt")
                 response = await self.steward.handle_stuck(
                     transcript_path=tp,
                     alert_type=event.alert_type,

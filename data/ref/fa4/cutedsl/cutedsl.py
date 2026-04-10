@@ -59,30 +59,7 @@ def detect_sm90_device() -> str:
 #  FA4 CuTe DSL availability probe
 # ---------------------------------------------------------------------------
 
-_FA4_AVAILABLE = False
-_FA_BACKEND = "none"
-_flash_attn_func = None
-
-# Allow forcing SDPA backend via env var: CUDA_EXEC_FA4_BACKEND=sdpa
-_FORCE_BACKEND = os.environ.get("CUDA_EXEC_FA4_BACKEND", "").lower()
-
-if _FORCE_BACKEND != "sdpa":
-    try:
-        from flash_attn.cute import flash_attn_func as _fa4_func
-
-        # Smoke test: compile + run a tiny attention to verify the CuTe DSL
-        # path works end-to-end on this GPU.
-        _probe_q = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
-        _probe_k = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
-        _probe_v = torch.randn(1, 32, 1, 64, dtype=torch.bfloat16, device="cuda")
-        with torch.no_grad():
-            _fa4_func(_probe_q, _probe_k, _probe_v, causal=False)
-        _flash_attn_func = _fa4_func
-        _FA4_AVAILABLE = True
-        _FA_BACKEND = "fa4_cute_dsl"
-        del _probe_q, _probe_k, _probe_v
-    except Exception:
-        pass
+from flash_attn.cute import flash_attn_func as _flash_attn_func
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +105,8 @@ def _config_from_env() -> dict[str, Any]:
 class Model(nn.Module):
     """Flash Attention 4 CuTe DSL forward reference for H100 (SM90).
 
-    Dispatches to FA4 CuTe DSL (flash_attn.cute) if available, otherwise
-    falls back to PyTorch scaled_dot_product_attention (cuDNN backend).
+    Calls FA4 CuTe DSL directly. No fallback — fails hard if FA4 is not
+    available so we don't silently measure the wrong kernel.
 
     Input tensors: Q, K, V each (batch, seqlen, num_heads, head_dim) BF16.
     Output tensor: O same shape and dtype.
@@ -150,18 +127,8 @@ class Model(nn.Module):
         if not Q.is_cuda:
             raise ValueError("FA4 reference requires CUDA tensors")
 
-        if _FA4_AVAILABLE:
-            # FA4 CuTe DSL: (batch, seqlen, num_heads, head_dim)
-            result = _flash_attn_func(Q, K, V, causal=causal)
-            # FA4 returns (output, softmax_lse) tuple; extract output
-            return result[0] if isinstance(result, tuple) else result
-        else:
-            # PyTorch SDPA fallback: expects (batch, num_heads, seqlen, head_dim)
-            q = Q.transpose(1, 2)
-            k = K.transpose(1, 2)
-            v = V.transpose(1, 2)
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
-            return out.transpose(1, 2)
+        result = _flash_attn_func(Q, K, V, causal=causal)
+        return result[0] if isinstance(result, tuple) else result
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,11 @@
-"""Supervisor HTTP API server — status, transcript, and human inject.
+"""Workshop HTTP API server — status, transcript, and human inject.
 
-Runs as an async background task inside the Supervisor process.
+Runs as an async background task inside the Workshop process.
 Binds to 127.0.0.1 on an OS-assigned port. Writes connection info
 to <kb_run_dir>/supervisor_api.json for client discovery.
 
 Endpoints:
-    GET  /status      — Supervisor state + Solver metrics
+    GET  /status      — Workshop state + Solver metrics
     GET  /transcript  — Solver transcript (supports ?tail=N)
     POST /inject      — Soft-inject human guidance into Solver
 """
@@ -26,7 +26,7 @@ from pydantic import BaseModel
 import uvicorn
 
 if TYPE_CHECKING:
-    from agents.supervisor import Supervisor
+    from agents.workshop import Workshop
 
 
 class InjectRequest(BaseModel):
@@ -40,11 +40,11 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-class SupervisorAPIServer:
-    """FastAPI server for Supervisor introspection and control."""
+class WorkshopAPIServer:
+    """FastAPI server for Workshop introspection and control."""
 
-    def __init__(self, supervisor: Supervisor):
-        self.supervisor = supervisor
+    def __init__(self, workshop: Workshop):
+        self.workshop = supervisor
         self._port: int = 0
         self._api_json_path: Path | None = None
         self._serve_task: asyncio.Task | None = None
@@ -52,7 +52,7 @@ class SupervisorAPIServer:
         self.app = self._create_app()
 
     def _create_app(self) -> FastAPI:
-        app = FastAPI(title="Supervisor API", docs_url=None, redoc_url=None)
+        app = FastAPI(title="Workshop API", docs_url=None, redoc_url=None)
 
         @app.get("/status")
         async def status():
@@ -89,7 +89,7 @@ class SupervisorAPIServer:
             await asyncio.sleep(0.1)
 
         self._write_api_json()
-        print(f"[Supervisor API] Listening on http://127.0.0.1:{self._port}")
+        print(f"[Workshop API] Listening on http://127.0.0.1:{self._port}")
         return self._port
 
     async def stop(self) -> None:
@@ -113,9 +113,9 @@ class SupervisorAPIServer:
 
     def _build_status(self) -> dict:
         """Build the full status dict."""
-        status = self.supervisor.get_status()
+        status = self.workshop.get_status()
 
-        transcript_path = self.supervisor._get_transcript_path()
+        transcript_path = self.workshop._get_transcript_path()
         has_transcript = transcript_path != "(no transcript available)"
         session_dir = Path(transcript_path).parent if has_transcript else None
 
@@ -153,8 +153,8 @@ class SupervisorAPIServer:
             except json.JSONDecodeError:
                 heartbeat = {"ts": text, "source": "unknown"}
 
-        kb_root = Path(self.supervisor.config.storage.kb_root).expanduser()
-        run_tag = self.supervisor.state.run_tag
+        kb_root = Path(self.workshop.config.storage.kb_root).expanduser()
+        run_tag = self.workshop.state.run_tag
         gems_dir = kb_root / "runs" / run_tag / "gems"
         gem_count = sum(1 for d in gems_dir.rglob("v*") if d.is_dir()) if gems_dir.exists() else 0
 
@@ -177,7 +177,7 @@ class SupervisorAPIServer:
 
     def _build_transcript(self, tail: int | None) -> PlainTextResponse:
         """Build transcript response."""
-        transcript_path = self.supervisor._get_transcript_path()
+        transcript_path = self.workshop._get_transcript_path()
         if transcript_path == "(no transcript available)":
             return JSONResponse({"error": "no transcript available"}, status_code=404)
 
@@ -198,7 +198,7 @@ class SupervisorAPIServer:
         if not message:
             return JSONResponse({"error": "empty message"}, status_code=400)
 
-        runner = self.supervisor._solver_runner
+        runner = self.workshop._solver_runner
         if not runner:
             return JSONResponse({"error": "no Solver running"}, status_code=409)
 
@@ -208,10 +208,10 @@ class SupervisorAPIServer:
 
         # Send as a user message via the SDK — Solver sees it immediately,
         # no need to wait for the next tool call.
-        guidance = f"[Human guidance from Supervisor API]: {message}"
+        guidance = f"[Human guidance from Workshop API]: {message}"
         asyncio.create_task(self._send_inject(client, guidance))
 
-        print(f"[Supervisor API] Human inject sent: {message[:100]}")
+        print(f"[Workshop API] Human inject sent: {message[:100]}")
 
         return {
             "ok": True,
@@ -225,28 +225,28 @@ class SupervisorAPIServer:
         try:
             await client.query(guidance)
         except Exception as e:
-            print(f"[Supervisor API] Inject send failed: {e}")
+            print(f"[Workshop API] Inject send failed: {e}")
 
     # ── API JSON file ──
 
     def _write_api_json(self) -> None:
         """Write supervisor_api.json to the run's KB directory."""
-        run_tag = self.supervisor.state.run_tag
+        run_tag = self.workshop.state.run_tag
         if not run_tag:
             return
 
-        kb_root = Path(self.supervisor.config.storage.kb_root).expanduser()
+        kb_root = Path(self.workshop.config.storage.kb_root).expanduser()
         api_json_path = kb_root / "runs" / run_tag / "supervisor_api.json"
         api_json_path.parent.mkdir(parents=True, exist_ok=True)
 
         data = {
             "port": self._port,
             "pid": os.getpid(),
-            "kernel": self.supervisor.state.kernel,
-            "gpu": self.supervisor.state.gpu,
+            "kernel": self.workshop.state.kernel,
+            "gpu": self.workshop.state.gpu,
             "started_at": (
-                self.supervisor.state.started_at.isoformat()
-                if self.supervisor.state.started_at
+                self.workshop.state.started_at.isoformat()
+                if self.workshop.state.started_at
                 else None
             ),
             "run_tag": run_tag,
@@ -254,10 +254,10 @@ class SupervisorAPIServer:
 
         api_json_path.write_text(json.dumps(data, indent=2) + "\n")
         self._api_json_path = api_json_path
-        print(f"[Supervisor API] Wrote {api_json_path}")
+        print(f"[Workshop API] Wrote {api_json_path}")
 
     def _remove_api_json(self) -> None:
         """Remove supervisor_api.json on shutdown."""
         if self._api_json_path and self._api_json_path.exists():
             self._api_json_path.unlink()
-            print(f"[Supervisor API] Removed {self._api_json_path}")
+            print(f"[Workshop API] Removed {self._api_json_path}")

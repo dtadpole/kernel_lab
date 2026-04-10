@@ -55,41 +55,38 @@ Supervisor (read-only, online orchestration)
 | Steward | claude-sonnet-4-6 | $5 | 5-20 | Review sessions, answer questions |
 | Rigger | claude-sonnet-4-6 | $10 | 500 | Modify harness infrastructure |
 
-## Session Lifecycle
+## Wave / Session Lifecycle
+
+**Three layers:**
+
+| Layer | Definition | Lifetime |
+|-------|-----------|----------|
+| **Task** | One optimization job | Forever (until external kill) |
+| **Wave** | One subprocess = one PID | start() → stop() |
+| **Session** | One dialogue round | client.query() → ResultMessage |
 
 ```
-Supervisor.run_task(task)
+Task (run_continuous — runs forever)
 │
-├── Create AgentRunner (one session, persists across CONTINUE)
+├── Wave 0 (PID 111) — fresh AgentRunner
+│   ├── Session 0: initial prompt → end_turn → Steward: CONTINUE
+│   ├── Session 1: continue prompt → end_turn → Steward: SUCCESS → kill
+│   └── Wave ends
 │
-├── Iteration 0: AgentRunner.run(initial_prompt)
-│     │  All events via hooks → Supervisor.on_*()
-│     │  Monitor runs in parallel (asyncio task)
-│     └── Solver end_turn → on_stop() → _pending_stop_event
+├── Wave 1 (PID 222) — fresh AgentRunner
+│   ├── Session 0: initial prompt → end_turn → Steward: CONTINUE
+│   └── Session 1: continue prompt → exception → kill
+│   └── Wave ends
 │
-└── while loop:
-    │
-    ├── Steward.review_session_end()
-    │   │
-    │   ├── SUCCESS → task complete, break
-    │   │
-    │   ├── CONTINUE:<guidance>
-    │   │     → AgentRunner.resume(guidance)  ← same session continues
-    │   │     → Solver keeps full context, receives guidance
-    │   │     → Solver end_turn → back to "deciding"
-    │   │
-    │   ├── ABORT → task failed, break
-    │   │
-    │   └── other → treat as CONTINUE
-    │
-    └── return TaskResult
+└── ...forever
 ```
 
-### Continuous Mode
-
-`run_continuous()` runs `run_task()` in a loop, each with a fresh Solver session.
-Session history is accumulated — each new session gets a summary of what
-previous sessions tried.
+**Rules:**
+- Each Wave = new AgentRunner, new subprocess, complete system + user prompt
+- Within a Wave: `client.query(continue_prompt)` to same subprocess (new Session)
+- Wave ends on: SUCCESS, ABORT, exception, or liveness timeout
+- After Wave ends → always start next Wave
+- Gem produced + reflection received → SUCCESS → sleep 10s → kill → next Wave
 
 ## Security — Path Blacklist/Whitelist
 

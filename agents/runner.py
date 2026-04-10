@@ -1,7 +1,17 @@
-"""Layer 1: Agent Runner — ClaudeSDKClient wrapper with hooks, monitoring, and logging.
+"""Layer 1: Agent Runner — subprocess lifecycle for one Wave.
 
-Bridges the Claude Agent SDK to the event system. Provides run/resume/interrupt
-operations and integrates SessionLog, Monitor, Steward, and custom MCP tools.
+Mental model:
+  - One AgentRunner = one Wave = one subprocess (one PID)
+  - A Wave may contain multiple Sessions (Steward CONTINUE)
+  - API: start() → run_until_result() → send_message() → stop()
+
+Lifecycle:
+  runner = AgentRunner(config, wave=0)
+  await runner.start(prompt)          # Start subprocess, write process_start.json
+  result = await runner.run_until_result()  # Poll until ResultMessage (one Session)
+  await runner.send_message(prompt)   # Send CONTINUE to same subprocess (new Session)
+  result = await runner.run_until_result()  # Next Session
+  await runner.stop()                 # Kill subprocess, write process_end.json
 """
 
 from __future__ import annotations
@@ -48,7 +58,7 @@ from agents.events import (
 from agents.events import MonitorAlert
 from agents.steward import Steward
 from agents.session_log import SessionLog
-from agents.storage import SessionStorage
+from agents.storage import WaveStorage
 
 
 @dataclass
@@ -62,15 +72,7 @@ class RunResult:
 
 
 class AgentRunner:
-    """Layer 1: Thin wrapper over ClaudeSDKClient with event-driven hooks.
-
-    Responsibilities:
-      - Launch/resume/interrupt agent sessions
-      - Bridge SDK hooks → AgentEvent → EventHandler
-      - Manage SessionLog + SessionStorage
-      - Run AgentMonitor as parallel task
-      - Provide ask_supervisor MCP tool for Solver → Supervisor communication
-    """
+    """One Wave = one subprocess. start() → run_until_result() → send_message() → stop()."""
 
     def __init__(
         self,
@@ -81,6 +83,8 @@ class AgentRunner:
         steward: Steward | None = None,
         cwd: str | None = None,
         agents: dict[str, AgentDefinition] | None = None,
+        wave: int = 0,
+        task_slug: str = "default",
     ):
         self.agent_config = agent_config
         self.storage_config = storage_config or StorageConfig()
@@ -89,75 +93,256 @@ class AgentRunner:
         self.steward = steward
         self.cwd = cwd or str(Path.cwd())
         self.agents = agents
+        self.wave = wave
 
         self._client: ClaudeSDKClient | None = None
+        self._client_ctx = None
         self._session_id: str | None = None
+        self._pid: int | None = None
         self._is_running = False
+        self._solver_source = "llm"
+        self._last_stream_event_time = datetime.now()
+        self._strategy_terminate = False
 
-        # Will be initialized per run
-        self.log: SessionLog | None = None
-        self._storage: SessionStorage | None = None
-
-    async def run(self, prompt: str, task_slug: str = "default") -> RunResult:
-        """Execute a full agent session."""
-        # 1. Set up storage and log
-        self._storage = SessionStorage(
-            self.storage_config, self.agent_config.name, task_slug
+        # Storage — one WaveStorage per Runner
+        self._storage = WaveStorage(
+            self.storage_config, agent_config.name, task_slug, wave
         )
         self.log = SessionLog(self._storage)
 
-        # Init transcript with full prompt and system prompt
-        self._storage.init_transcript(self.agent_config.name, prompt)
-        self._storage.append_transcript(f"### System Prompt\n```\n{self.agent_config.system_prompt}\n```\n")
-        self._storage.append_transcript(f"### User Prompt\n```\n{prompt}\n```\n")
+    # ── Lifecycle API ──
 
-        # Log prompt as first event
+    async def start(self, prompt: str) -> None:
+        """Start a new subprocess. Write process_start.json. Send initial prompt."""
+        self._is_running = True
+
+        # Init transcript
+        self._storage.init_transcript(self.agent_config.name, prompt)
+        self._storage.append_transcript(
+            f"### System Prompt\n```\n{self.agent_config.system_prompt[:2000]}\n```\n"
+        )
+        self._storage.append_transcript(f"### User Prompt\n```\n{prompt[:2000]}\n```\n")
         self._storage.append_event({
             "ts": datetime.now().isoformat(),
             "type": "PromptEvent",
+            "wave": self.wave,
             "system_prompt_length": len(self.agent_config.system_prompt),
             "user_prompt": prompt[:1000],
         })
 
-        # 2. Build options
+        # Build options + start subprocess
         options = self._build_options()
+        self._client_ctx = ClaudeSDKClient(options=options)
+        self._client = await self._client_ctx.__aenter__()
 
-        # 3. Run
-        return await self._execute(prompt, options)
+        # Get PID
+        try:
+            self._pid = self._client._transport._process.pid
+        except Exception:
+            self._pid = None
 
-    async def resume(self, prompt: str) -> RunResult:
-        """Resume an existing session with a new prompt."""
-        if not self._session_id:
-            raise RuntimeError("No session to resume. Call run() first.")
+        # Write process_start.json
+        try:
+            self._storage.write_process_start(
+                pid=self._pid or 0,
+                agent=self.agent_config.name,
+                model=self.agent_config.model,
+            )
+        except Exception as e:
+            print(f"[Runner] Failed to write process_start.json: {e}")
 
-        # Reset log so elapsed() starts from zero for this wave.
-        self.log = SessionLog()
+        # Log stdin
+        try:
+            self._storage.log_stdin(prompt[:5000])
+        except Exception:
+            pass
 
-        options = self._build_options()
-        options.resume = self._session_id
-        return await self._execute(prompt, options)
+        # Send initial prompt
+        await self._client.query(prompt)
 
-    async def interrupt(self) -> None:
-        """Interrupt the currently running agent (graceful)."""
-        if self._client:
-            await self._client.interrupt()
+        print(f"[Runner] {self.agent_config.name} wave {self.wave} started (PID {self._pid})")
 
-    async def terminate(self) -> None:
-        """Terminate the agent process (hard kill). Used for hard_limit."""
-        if self._client:
-            await self._client.disconnect()
+    async def run_until_result(self) -> RunResult:
+        """Poll messages until ResultMessage (one Session). Does NOT close subprocess.
+
+        Contains liveness detection (10s poll) and strategy checks (60s).
+        Raises on liveness timeout or pipe errors.
+        """
+        import time as _time
+
+        if not self._client:
+            raise RuntimeError("Not started. Call start() first.")
+
+        result = RunResult(log=self.log or SessionLog())
+        total_usage: dict = {}
+
+        _POLL_INTERVAL = 10
+        _STRATEGY_INTERVAL = self.monitor_config.check_interval if self.monitor_config else 60.0
+        _last_strategy_check = _time.monotonic()
+        self._strategy_terminate = False
+
+        response_iter = self._client.receive_response().__aiter__()
+        while True:
+            try:
+                message = await asyncio.wait_for(
+                    response_iter.__anext__(), timeout=_POLL_INTERVAL
+                )
+            except asyncio.TimeoutError:
+                # ── Strategy terminate flag ──
+                if self._strategy_terminate:
+                    result.stop_reason = "terminate"
+                    result.result_text = "Terminated by strategy check"
+                    stop_event = StopEvent(reason="terminate", result_text="strategy")
+                    result.log.append(stop_event)
+                    await self.handler.on_stop(stop_event)
+                    break
+
+                # ── Liveness check (every 10s) ──
+                age = (datetime.now() - self._last_stream_event_time).total_seconds()
+                if self._solver_source.startswith("tool:") or self._solver_source == "rate_limit":
+                    limit = self.monitor_config.tool_timeout if self.monitor_config else 1200.0
+                else:
+                    limit = self.monitor_config.heartbeat_timeout if self.monitor_config else 300.0
+                if age > limit:
+                    reason = f"liveness_timeout ({self._solver_source}, {age:.0f}s > {limit:.0f}s)"
+                    print(f"[Runner] {reason}")
+                    result.stop_reason = "liveness_timeout"
+                    result.result_text = reason
+                    stop_event = StopEvent(reason="liveness_timeout", result_text=reason)
+                    result.log.append(stop_event)
+                    await self.handler.on_stop(stop_event)
+                    raise RuntimeError(reason)
+
+                # ── Strategy check (every 60s, non-blocking) ──
+                now_mono = _time.monotonic()
+                if now_mono - _last_strategy_check >= _STRATEGY_INTERVAL:
+                    _last_strategy_check = now_mono
+                    asyncio.create_task(self._run_strategy_check(result.log))
+
+                continue
+            except StopAsyncIteration:
+                break
+
+            # ── Process message ──
+            source = self._process_message(message, result, total_usage)
+
+            # Update state + heartbeat
+            self._last_stream_event_time = datetime.now()
+            self._solver_source = source
+            if self._storage:
+                try:
+                    self._storage.write_heartbeat(self._last_stream_event_time, source=source)
+                except Exception:
+                    pass
+
+            # Log raw stdout
+            try:
+                raw = json.dumps(message, default=str) if isinstance(message, dict) else str(message)
+                self._storage.log_stdout(raw[:10000])
+            except Exception:
+                pass
+
+        result.usage = total_usage
+        return result
+
+    async def send_message(self, prompt: str) -> None:
+        """Send a new message to the same subprocess (new Session). Does NOT close pipes."""
+        if not self._client:
+            raise RuntimeError("Not started. Call start() first.")
+
+        # Log to stdin.log
+        try:
+            self._storage.log_stdin(prompt[:5000])
+        except Exception:
+            pass
+
+        # Log as event
+        self._storage.append_event({
+            "ts": datetime.now().isoformat(),
+            "type": "ContinuePrompt",
+            "prompt": prompt[:1000],
+        })
+        self._storage.append_transcript(f"\n### Continue Prompt\n```\n{prompt[:2000]}\n```\n")
+
+        await self._client.query(prompt)
+
+    async def stop(self) -> None:
+        """Kill subprocess. Write process_end.json. Close all logs.
+
+        Every step in independent try/except — must clean up even if parts fail.
+        """
+        print(f"[Runner] {self.agent_config.name} wave {self.wave} stopping (PID {self._pid})")
+
+        # 1. Disconnect client
+        exit_code = -1
+        try:
+            if self._client_ctx:
+                await self._client_ctx.__aexit__(None, None, None)
+        except (asyncio.CancelledError, Exception) as e:
+            print(f"[Runner] disconnect: {e}")
+
+        # 2. Get exit code
+        try:
+            if self._client and self._client._transport and self._client._transport._process:
+                exit_code = self._client._transport._process.returncode or -1
+        except Exception as e:
+            print(f"[Runner] exit code: {e}")
+
+        # 3. Write process_end.json
+        try:
+            self._storage.write_process_end(self._pid or 0, exit_code)
+        except Exception as e:
+            print(f"[Runner] process_end.json: {e}")
+
+        # 4. Write meta.json
+        try:
+            self._storage.write_meta({
+                "agent": self.agent_config.name,
+                "wave": self.wave,
+                "model": self.agent_config.model,
+                "pid": self._pid,
+                "exit_code": exit_code,
+            })
+        except Exception as e:
+            print(f"[Runner] meta.json: {e}")
+
+        # 5. Close log files
+        try:
+            self._storage.close_logs()
+        except Exception as e:
+            print(f"[Runner] close logs: {e}")
+
+        # 6. Reset state
+        self._client = None
+        self._client_ctx = None
         self._is_running = False
+
+        print(f"[Runner] {self.agent_config.name} wave {self.wave} stopped (exit_code={exit_code})")
+
+    # ── Legacy API (backward compat for Steward) ──
+
+    async def run(self, prompt: str, task_slug: str = "default") -> RunResult:
+        """Run a complete wave: start → run_until_result → stop."""
+        # Re-create storage with correct task_slug if needed
+        if task_slug != "default":
+            self._storage = WaveStorage(
+                self.storage_config, self.agent_config.name, task_slug, self.wave
+            )
+            self.log = SessionLog(self._storage)
+
+        await self.start(prompt)
+        try:
+            result = await self.run_until_result()
+        except Exception:
+            result = RunResult(log=self.log or SessionLog())
+            result.stop_reason = "error"
+        finally:
+            await self.stop()
+        return result
 
     @property
     def is_running(self) -> bool:
         return self._is_running
-
-    @property
-    def last_stream_age_seconds(self) -> float:
-        """Seconds since the last stream event (heartbeat). 0 if no events yet."""
-        if not hasattr(self, "_last_stream_event_time") or self._last_stream_event_time is None:
-            return 0.0
-        return (datetime.now() - self._last_stream_event_time).total_seconds()
 
     def _build_options(self) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions from AgentConfig + hooks + MCP tools."""
@@ -205,25 +390,17 @@ class AgentRunner:
 
         return opts
 
-    def _init_stderr_log(self) -> None:
-        """Open the stderr log file under ~/.cuda_exec/<run_tag>/."""
-        run_tag = self.storage_config.resolved_run_tag
-        log_dir = Path.home() / ".cuda_exec" / run_tag
-        log_dir.mkdir(parents=True, exist_ok=True)
-        self._stderr_log_path = log_dir / f"stderr_{self.agent_config.name}.log"
-        self._stderr_file = open(self._stderr_log_path, "a")
-
     def _on_stderr(self, line: str) -> None:
-        """Callback for Solver CLI stderr — write to log file and update heartbeat."""
-        if not hasattr(self, "_stderr_file") or self._stderr_file is None:
-            self._init_stderr_log()
-        ts = datetime.now().isoformat(timespec="seconds")
-        self._stderr_file.write(f"[{ts}] {line}\n")
-        self._stderr_file.flush()
-        # stderr activity = alive, update heartbeat
+        """Callback for CLI stderr — log to wave folder + update heartbeat."""
+        try:
+            self._storage.log_stderr(line)
+        except Exception:
+            pass
         self._last_stream_event_time = datetime.now()
-        if self._storage:
-            self._storage.write_heartbeat(self._last_stream_event_time, source="solver_stderr")
+        try:
+            self._storage.write_heartbeat(self._last_stream_event_time, source="stderr")
+        except Exception:
+            pass
 
     def _build_hooks(self) -> dict:
         """Bridge SDK hook callbacks to our EventHandler."""
@@ -594,220 +771,93 @@ class AgentRunner:
                     }
         return {}
 
-    async def _execute(self, prompt: str, options: ClaudeAgentOptions) -> RunResult:
-        """Core execution loop: start client, stream messages, check liveness.
+    def _process_message(self, message, result: RunResult, total_usage: dict) -> str:
+        """Process a single SDK message. Returns source string for heartbeat."""
+        source = "unknown"
 
-        Single loop does everything:
-        - Every 10s: poll for SDK messages + liveness check
-        - Every 60s: strategy check (hard_limit, stuck detection, etc.)
-        - No separate Monitor task, no cross-task flags, no threads.
-        """
-        import time as _time
+        if isinstance(message, SystemMessage):
+            source = "system_init"
+            if message.subtype == "init":
+                sid = message.data.get("session_id", "")
+                self._session_id = sid
+                result.session_id = sid
+                start_event = StartEvent(session_id=sid)
+                result.log.append(start_event)
 
-        self._is_running = True
-        self._solver_source = "llm"
-        self._last_stream_event_time = datetime.now()
-        self._strategy_terminate = False
-        result = RunResult(log=self.log or SessionLog())
-        total_usage: dict = {}
+        elif isinstance(message, AssistantMessage):
+            has_thinking = False
+            has_text = False
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    has_text = True
+                    event = TextOutputEvent(text=block.text)
+                    result.log.append(event)
+                    # on_text is sync in Supervisor (just pass), safe to call
+                    asyncio.get_event_loop().create_task(self.handler.on_text(event))
+                elif isinstance(block, ThinkingBlock):
+                    has_thinking = True
+            if has_text:
+                source = "text"
+            elif has_thinking:
+                source = "thinking"
+            else:
+                source = "assistant"
+            if message.usage:
+                for k, v in message.usage.items():
+                    if isinstance(v, (int, float)):
+                        total_usage[k] = total_usage.get(k, 0) + v
 
-        _POLL_INTERVAL = 10
-        _STRATEGY_INTERVAL = self.monitor_config.check_interval if self.monitor_config else 60.0
-        _last_strategy_check = _time.monotonic()
+        elif isinstance(message, ResultMessage):
+            source = "result"
+            result.result_text = message.result or ""
+            result.stop_reason = getattr(message, "stop_reason", "end_turn")
+            stop_event = StopEvent(
+                reason=result.stop_reason,
+                result_text=result.result_text[:5000],
+            )
+            result.log.append(stop_event)
+            asyncio.get_event_loop().create_task(self.handler.on_stop(stop_event))
 
-        try:
-            try:
-                client_ctx = ClaudeSDKClient(options=options)
-                client = await client_ctx.__aenter__()
-            except Exception as e:
-                raise RuntimeError(f"Failed to start Claude CLI: {e}") from e
+        elif isinstance(message, RateLimitEvent):
+            source = "rate_limit"
+            info = message.rate_limit_info
+            status = getattr(info, "status", None)
+            resets_at = getattr(info, "resets_at", None)
+            utilization = getattr(info, "utilization", None)
+            event = TextOutputEvent(
+                text=f"[rate_limit] status={status} utilization={utilization} resets_at={resets_at}"
+            )
+            result.log.append(event)
+            if status and hasattr(status, "value") and "rejected" in str(status.value):
+                self._solver_source = "rate_limit"
 
-            try:
-                self._client = client
-                await client.query(prompt)
+        elif isinstance(message, TaskStartedMessage):
+            source = "subagent_start"
+            event = SubagentEvent(
+                agent_id=getattr(message, "task_id", ""),
+                agent_type="subagent", action="start",
+            )
+            result.log.append(event)
 
-                response_iter = client.receive_response().__aiter__()
-                while True:
-                    try:
-                        message = await asyncio.wait_for(
-                            response_iter.__anext__(), timeout=_POLL_INTERVAL
-                        )
-                    except asyncio.TimeoutError:
-                        # ── Strategy terminate flag (set by background task) ──
-                        if self._strategy_terminate:
-                            result.stop_reason = "terminate"
-                            result.result_text = "Terminated by strategy check"
-                            stop_event = StopEvent(reason="terminate", result_text="strategy")
-                            result.log.append(stop_event)
-                            await self.handler.on_stop(stop_event)
-                            break
+        elif isinstance(message, TaskProgressMessage):
+            source = "subagent_progress"
+            tool_name = getattr(message, "last_tool_name", "")
+            if tool_name:
+                event = TextOutputEvent(text=f"[subagent_progress] tool={tool_name}")
+                result.log.append(event)
 
-                        # ── Liveness check (every 10s) ──
-                        age = (datetime.now() - self._last_stream_event_time).total_seconds()
-                        if self._solver_source.startswith("tool:") or self._solver_source == "rate_limit":
-                            limit = self.monitor_config.tool_timeout if self.monitor_config else 1200.0
-                        else:
-                            limit = self.monitor_config.heartbeat_timeout if self.monitor_config else 300.0
-                        if age > limit:
-                            reason = f"liveness_timeout ({self._solver_source}, {age:.0f}s > {limit:.0f}s)"
-                            print(f"[Runner] {reason}")
-                            result.stop_reason = "liveness_timeout"
-                            result.result_text = reason
-                            stop_event = StopEvent(reason="liveness_timeout", result_text=reason)
-                            result.log.append(stop_event)
-                            await self.handler.on_stop(stop_event)
-                            break
+        elif isinstance(message, TaskNotificationMessage):
+            source = "subagent_done"
+            event = SubagentEvent(
+                agent_id=getattr(message, "task_id", ""),
+                agent_type="subagent", action="stop",
+            )
+            result.log.append(event)
 
-                        # ── Strategy check (every 60s, non-blocking) ──
-                        now_mono = _time.monotonic()
-                        if now_mono - _last_strategy_check >= _STRATEGY_INTERVAL:
-                            _last_strategy_check = now_mono
-                            asyncio.create_task(
-                                self._run_strategy_check(result.log)
-                            )
+        elif isinstance(message, StreamEvent):
+            source = "stream"
 
-                        continue
-                    except StopAsyncIteration:
-                        break
-
-                    # ── Process message ──
-                    source = "unknown"
-
-                    if isinstance(message, SystemMessage):
-                        source = "system_init"
-                        if message.subtype == "init":
-                            sid = message.data.get("session_id", "")
-                            self._session_id = sid
-                            result.session_id = sid
-                            start_event = StartEvent(session_id=sid)
-                            result.log.append(start_event)
-
-                    elif isinstance(message, AssistantMessage):
-                        has_thinking = False
-                        has_text = False
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                has_text = True
-                                event = TextOutputEvent(text=block.text)
-                                result.log.append(event)
-                                await self.handler.on_text(event)
-                            elif isinstance(block, ThinkingBlock):
-                                has_thinking = True
-                        if has_text:
-                            source = "text"
-                        elif has_thinking:
-                            source = "thinking"
-                        else:
-                            source = "assistant"
-                        if message.usage:
-                            for k, v in message.usage.items():
-                                if isinstance(v, (int, float)):
-                                    total_usage[k] = total_usage.get(k, 0) + v
-
-                    elif isinstance(message, ResultMessage):
-                        source = "result"
-                        result.result_text = message.result or ""
-                        result.stop_reason = getattr(message, "stop_reason", "end_turn")
-                        stop_event = StopEvent(
-                            reason=result.stop_reason,
-                            result_text=result.result_text[:5000],
-                        )
-                        result.log.append(stop_event)
-                        await self.handler.on_stop(stop_event)
-
-                    elif isinstance(message, RateLimitEvent):
-                        source = "rate_limit"
-                        info = message.rate_limit_info
-                        status = getattr(info, "status", None)
-                        resets_at = getattr(info, "resets_at", None)
-                        utilization = getattr(info, "utilization", None)
-                        event = TextOutputEvent(
-                            text=f"[rate_limit] status={status} utilization={utilization} resets_at={resets_at}"
-                        )
-                        result.log.append(event)
-                        # Set source to rate_limit so liveness uses tool_timeout.
-                        # No sleep — CLI handles retry internally.
-                        if status and hasattr(status, "value") and "rejected" in str(status.value):
-                            self._solver_source = "rate_limit"
-
-                    elif isinstance(message, TaskStartedMessage):
-                        source = "subagent_start"
-                        event = SubagentEvent(
-                            agent_id=getattr(message, "task_id", ""),
-                            agent_type="subagent",
-                            action="start",
-                        )
-                        result.log.append(event)
-
-                    elif isinstance(message, TaskProgressMessage):
-                        source = "subagent_progress"
-                        tool_name = getattr(message, "last_tool_name", "")
-                        if tool_name:
-                            event = TextOutputEvent(
-                                text=f"[subagent_progress] tool={tool_name}"
-                            )
-                            result.log.append(event)
-
-                    elif isinstance(message, TaskNotificationMessage):
-                        source = "subagent_done"
-                        event = SubagentEvent(
-                            agent_id=getattr(message, "task_id", ""),
-                            agent_type="subagent",
-                            action="stop",
-                        )
-                        result.log.append(event)
-
-                    elif isinstance(message, StreamEvent):
-                        source = "stream"
-
-                    # Update state + heartbeat
-                    self._last_stream_event_time = datetime.now()
-                    self._solver_source = source
-                    if self._storage:
-                        self._storage.write_heartbeat(self._last_stream_event_time, source=source)
-
-            finally:
-                # Close client — catch CancelledError from transport cleanup
-                try:
-                    await client_ctx.__aexit__(None, None, None)
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-        except BaseException as exc:
-            exit_info = f"{type(exc).__name__}: {exc}"
-            print(f"[Runner] {self.agent_config.name} subprocess error: {exit_info}")
-            if self._storage:
-                self._storage.append_event({
-                    "ts": datetime.now().isoformat(),
-                    "type": "SubprocessError",
-                    "agent": self.agent_config.name,
-                    "error": exit_info[:500],
-                })
-            raise
-
-        finally:
-            self._client = None
-            self._is_running = False
-            if hasattr(self, "_stderr_file") and self._stderr_file:
-                self._stderr_file.close()
-                self._stderr_file = None
-
-        result.usage = total_usage
-
-        if self._storage:
-            self._storage.write_meta({
-                "session_id": result.session_id,
-                "agent": self.agent_config.name,
-                "task": prompt[:1000],
-                "system_prompt": self.agent_config.system_prompt[:1000],
-                "model": self.agent_config.model,
-                "permission_mode": self.agent_config.permission_mode,
-                "tools": self.agent_config.all_tools,
-                "stop_reason": result.stop_reason,
-                "usage": total_usage,
-            })
-
-        return result
+        return source
 
     async def _run_strategy_check(self, log: SessionLog) -> None:
         """Strategy check — runs as create_task, never blocks main loop.

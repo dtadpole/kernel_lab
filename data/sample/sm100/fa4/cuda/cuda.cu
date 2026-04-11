@@ -145,7 +145,7 @@ void tmem_coords_128(int warp, int lane, int reg_idx, int& row, int& col) {
 __global__ void __launch_bounds__(THREADS, 1)
 fa_tcgen05(
     __nv_bfloat16* __restrict__ O_global,
-    int B, int S, int H, int len_q, int len_kv,
+    int B, int S, int H, int len_q, int len_kv, bool is_causal,
     const __grid_constant__ CUtensorMap tma_Q,
     const __grid_constant__ CUtensorMap tma_K,
     const __grid_constant__ CUtensorMap tma_V,
@@ -168,7 +168,9 @@ fa_tcgen05(
     const int head_id = bs_id % H;
     const int coord_head = head_id * DIM;
     const int batch_seq = batch_id * S;
-    const int max_kv_iter = cdiv(len_kv, BLOCK_KV);
+    const int max_kv_iter = is_causal
+        ? min(cdiv(len_kv, BLOCK_KV), cdiv((q_block_id + 1) * BLOCK_Q, BLOCK_KV))
+        : cdiv(len_kv, BLOCK_KV);
     const float softmax_scale = rsqrtf((float)DIM);
     const float softmax_scale_log2 = softmax_scale * 1.4426950408889634f;
 
@@ -271,16 +273,23 @@ fa_tcgen05(
         _ld64(s_regs_hi, S_tmem + 64);
         _wl();
 
-        /* Softmax: find row max, compute exp, sum */
-        /* Each thread has 128 values (two loads of 64) for its assigned row */
+        /* Causal masking + softmax scaling */
+        /* TMEM layout (32x32b): col = reg_idx, row = lane ^ warp_offset.
+         * This thread's query position: q_block_id * BLOCK_Q + row. */
+        int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
+        int q_pos = q_block_id * BLOCK_Q + my_row;
+
         float local_max = -FLT_MAX;
         for (int i = 0; i < 64; i++) {
             float v = __int_as_float(s_regs_lo[i]) * softmax_scale;
+            /* Causal mask: col i = kv position kv_id*BLOCK_KV + i */
+            if (is_causal && (kv_id * BLOCK_KV + i) > q_pos) v = -FLT_MAX;
             s_regs_lo[i] = __float_as_int(v);
             local_max = fmaxf(local_max, v);
         }
         for (int i = 0; i < 64; i++) {
             float v = __int_as_float(s_regs_hi[i]) * softmax_scale;
+            if (is_causal && (kv_id * BLOCK_KV + 64 + i) > q_pos) v = -FLT_MAX;
             s_regs_hi[i] = __float_as_int(v);
             local_max = fmaxf(local_max, v);
         }
@@ -542,6 +551,18 @@ extern "C" int kernel_run(
     if(!D)D=128;if(!H)H=16;
     if(!S&&!B&&n>0){B=1;S=n/(H*D);}
     if(!B||!S)return -1;
+
+    /* Parse causal flag */
+    bool causal = false;
+    {
+        const char*cv=getenv("CUDA_EXEC_PARAM_CAUSAL");
+        if(cv && (strcmp(cv,"true")==0||strcmp(cv,"1")==0||strcmp(cv,"True")==0)) causal=true;
+        if(!causal && cj) {
+            const char*p=strstr(cj,"causal");
+            if(p){p+=6;while(*p&&(*p=='"'||*p==':'||*p==' '))p++;
+                if(strncmp(p,"true",4)==0) causal=true;}
+        }
+    }
     if(D!=128)return -2;
 
     __nv_bfloat16*Q=inputs[0],*K=inputs[1],*V=inputs[2];
@@ -575,8 +596,9 @@ extern "C" int kernel_run(
 
     int num_blocks=B*H*cdiv(S,BLOCK_Q);
     cudaFuncSetAttribute(fa_tcgen05,cudaFuncAttributeMaxDynamicSharedMemorySize,SMEM_TOTAL);
+    int max_kv = causal ? 0 : cdiv(S, BLOCK_KV);  /* 0 = per-block causal limit */
     fa_tcgen05<<<num_blocks,THREADS,SMEM_TOTAL,stream>>>(
-        O,B,S,H,S,S,tQ,tK,tV,tO);
+        O,B,S,H,S,S,causal,tQ,tK,tV,tO);
     /* Ensure kernel completes before harness calls kernel_run again */
     cudaStreamSynchronize(stream);
     return 0;

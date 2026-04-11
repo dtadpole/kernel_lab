@@ -19,18 +19,20 @@ psutil>=7.0,<8.0
 pyyaml>=6.0,<7.0
 
 # --- CUDA / GPU ---
-nvidia-cutlass-dsl>=4.4
+nvidia-cutlass-dsl>=4.4.2
 cuda-python>=13.0
 numpy>=2.0,<3.0
 
 # --- FA4 CuTe DSL (pure Python JIT) ---
-flash-attn-4>=4.0.0b5
+# b8+ fixes Softmax DynamicExpression bug with cutlass-dsl 4.4.2.
+# Also requires ampere_helpers symlink — see fa3/build.py or memory note.
+flash-attn-4>=4.0.0b8
 
 # --- CuTe DSL transitive deps (explicit pins) ---
 # These are pulled by flash-attn-4 and nvidia-cutlass-dsl.
 # Pin them to avoid version conflicts.
 quack-kernels>=0.3.3
-apache-tvm-ffi>=0.1.5,<0.2
+apache-tvm-ffi>=0.1.10,<0.2
 torch-c-dlpack-ext>=0.1.5
 einops>=0.8
 

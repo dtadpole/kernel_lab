@@ -912,8 +912,14 @@ print(json.dumps({{"ok": True, "configs": results}}))
                                        cu_impl["slug"], exc)
 
             # --- Default: compile with kernel's default #define values ---
+            # Include this .cu impl + other .cu impls for correctness.
+            # Include .py impls so they're staged in the workspace for trial.py
+            # to discover. (trial.py needs them in inputs/{slug}/ directories.)
             compile_impls = {}
             compile_impls[cu_impl["slug"]] = dict(cu_impl["files"])
+            for other_cu in cu_impls:
+                if other_cu["slug"] != cu_impl["slug"]:
+                    compile_impls[other_cu["slug"]] = dict(other_cu["files"])
             for py_impl in py_impls:
                 compile_impls[py_impl["slug"]] = dict(py_impl["files"])
 

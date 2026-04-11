@@ -16,13 +16,17 @@
  * The harness provides: main(), env-based config, BF16 input generation,
  * CUDA event timing, warmup, and structured JSON output on stdout.
  *
- * Measurement methodology (sustained / pipelined):
- *   L2 flush and kernel launches are enqueued back-to-back with NO
- *   cudaStreamSynchronize between iterations.  The GPU stays busy
- *   executing the L2 flush while the CPU prepares the next kernel_run
- *   (TMA encoding, cuBLAS dispatch, etc.).  This hides CPU submission
- *   overhead and measures pure GPU kernel throughput — matching what
- *   happens in real training/inference where kernels are pipelined.
+ * Measurement methodology (per-iteration sync):
+ *   Each trial: L2 flush → sync → [start event] → kernel → [end event] → sync.
+ *   Per-iteration sync prevents DRAM bandwidth contention between
+ *   consecutive kernels (previous kernel's epilogue writes vs current
+ *   kernel's TMA loads).  This matches PyTorch's benchmark_utils behavior.
+ *
+ *   Kernels that export kernel_setup() + kernel_launch() get cleaner
+ *   measurement: CPU-heavy work (TMA encoding, grid calc) is done once
+ *   in kernel_setup(), and only the lightweight kernel_launch() runs in
+ *   the timed loop.  Kernels without the split API fall back to
+ *   kernel_run() per iteration.
  */
 
 #include <cuda_bf16.h>
@@ -40,9 +44,19 @@
 /* ------------------------------------------------------------------ */
 /* Kernel contract — implemented by the kernel .cu file               */
 /* ------------------------------------------------------------------ */
+/* Required: legacy all-in-one entry point */
 extern "C" int kernel_run(__nv_bfloat16** inputs, int num_inputs,
                           __nv_bfloat16** outputs, int num_outputs,
                           int n, cudaStream_t stream);
+
+/* Optional: split setup/launch for pipelined measurement.
+ * kernel_setup does CPU work (TMA encoding, grid calc) once.
+ * kernel_launch only enqueues the GPU kernel (no CPU overhead).
+ * If both are defined, the harness uses them for the timed loop. */
+extern "C" int kernel_setup(__nv_bfloat16** inputs, int num_inputs,
+                            __nv_bfloat16** outputs, int num_outputs,
+                            int n, cudaStream_t stream) __attribute__((weak));
+extern "C" int kernel_launch(cudaStream_t stream) __attribute__((weak));
 
 /* ------------------------------------------------------------------ */
 /* Internal harness config (not exposed to kernel authors)            */
@@ -383,8 +397,13 @@ int main() {
         cudaMalloc(&l2_flush_buf, l2_size);
     }
 
-    /* ── Estimate single-run time ──────────────────────────────────── */
-    /* Run once, then 5 iterations with L2 flush to estimate kernel time. */
+    /* ── Detect setup/launch split ─────────────────────────────────── */
+    /* If the kernel exports kernel_setup + kernel_launch, we can separate
+     * CPU-heavy setup (TMA encoding, grid calc) from the GPU-only launch.
+     * This enables safe pipelined measurement (like Triton do_bench). */
+    const bool has_split = (kernel_setup != nullptr && kernel_launch != nullptr);
+
+    /* ── Initial run + setup ──────────────────────────────────────── */
     {
         int rc = kernel_run(d_inputs.data(), num_inputs,
                             d_outputs.data(), num_outputs,
@@ -396,6 +415,27 @@ int main() {
         }
     }
 
+    /* If split API available, call setup once (caches TMA descriptors etc.) */
+    if (has_split) {
+        int rc = kernel_setup(d_inputs.data(), num_inputs,
+                              d_outputs.data(), num_outputs,
+                              cfg.input_size, stream);
+        cudaStreamSynchronize(stream);
+        if (rc != 0) {
+            fprintf(stderr, "kernel_setup failed: rc=%d\n", rc);
+            return 4;
+        }
+    }
+
+    /* Helper lambda: invoke kernel with minimal overhead */
+    auto invoke_kernel = [&](cudaStream_t s) -> int {
+        if (has_split) return kernel_launch(s);
+        return kernel_run(d_inputs.data(), num_inputs,
+                          d_outputs.data(), num_outputs,
+                          cfg.input_size, s);
+    };
+
+    /* ── Estimate single-run time ─────────────────────────────────── */
     cudaEvent_t est_start, est_end;
     cudaEventCreate(&est_start);
     cudaEventCreate(&est_end);
@@ -403,9 +443,7 @@ int main() {
     for (int i = 0; i < 5; i++) {
         if (l2_flush_buf != nullptr)
             cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
-        kernel_run(d_inputs.data(), num_inputs,
-                   d_outputs.data(), num_outputs,
-                   cfg.input_size, stream);
+        invoke_kernel(stream);
     }
     cudaEventRecord(est_end, stream);
     cudaDeviceSynchronize();
@@ -417,29 +455,14 @@ int main() {
     cudaEventDestroy(est_start);
     cudaEventDestroy(est_end);
 
-    /* ── Time-based warmup (default 25 ms, no L2 flush, no per-iter sync)
-     * Matches triton do_bench: fire-and-forget to keep GPU pipeline full.
-     * Only check return code on first warmup call. */
+    /* ── Time-based warmup ────────────────────────────────────────── */
     const int n_warmup = (int)(cfg.warmup_ms / est_ms);
     const int actual_warmup = n_warmup > 1 ? n_warmup : 1;
-    {
-        int rc = kernel_run(d_inputs.data(), num_inputs,
-                            d_outputs.data(), num_outputs,
-                            cfg.input_size, stream);
-        if (rc != 0) {
-            cudaStreamSynchronize(stream);
-            fprintf(stderr, "kernel_run warmup failed: rc=%d\n", rc);
-            return 4;
-        }
-    }
-    for (int i = 1; i < actual_warmup; i++) {
-        kernel_run(d_inputs.data(), num_inputs,
-                   d_outputs.data(), num_outputs,
-                   cfg.input_size, stream);
+    for (int i = 0; i < actual_warmup; i++) {
+        invoke_kernel(stream);
     }
 
-    /* GPU state snapshot after warmup — sync to ensure warmup completed,
-     * then sample the post-warmup idle clock + temp. */
+    /* GPU state snapshot after warmup */
     cudaStreamSynchronize(stream);
     GpuSnapshot snap_warmup = gpu_snapshot();
 
@@ -453,12 +476,18 @@ int main() {
     }
     cudaStreamSynchronize(stream);
 
-    /* ── Time-based measurement (default 100 ms) ────────────────── */
+    /* Re-setup after input randomization (pointers unchanged, but data changed) */
+    if (has_split) {
+        kernel_setup(d_inputs.data(), num_inputs,
+                     d_outputs.data(), num_outputs,
+                     cfg.input_size, stream);
+        cudaStreamSynchronize(stream);
+    }
+
+    /* ── Time-based measurement (per-iteration sync) ──────────────── */
     const int n_trials = (int)(cfg.rep_ms / est_ms);
     const int N = n_trials > 1 ? n_trials : 1;
 
-    /* GPU state snapshot BEFORE measurement — take while GPU is still
-     * warm from the randomize kernels (no idle gap). */
     GpuSnapshot snap_before = gpu_snapshot();
 
     std::vector<cudaEvent_t> start_events(N), end_events(N);
@@ -471,32 +500,21 @@ int main() {
     GpuSnapshot snap_after = {};
 
     for (int i = 0; i < N; i++) {
+        /* L2 flush + sync: cold L2, no DRAM contention from previous kernel */
         if (l2_flush_buf != nullptr) {
             cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
         }
+        cudaStreamSynchronize(stream);
 
         cudaEventRecord(start_events[i], stream);
-        int rc = kernel_run(d_inputs.data(), num_inputs,
-                            d_outputs.data(), num_outputs,
-                            cfg.input_size, stream);
+        invoke_kernel(stream);
         cudaEventRecord(end_events[i], stream);
+        cudaStreamSynchronize(stream);
 
-        if (rc != 0) {
-            fprintf(stderr, "kernel_run trial %d failed: rc=%d\n", i, rc);
-            return 5;
-        }
-
-        /* Sample GPU clock mid-measurement. The CPU enqueues trials
-         * much faster than the GPU executes them. At the midpoint,
-         * sync to let the GPU catch up, then sample NVML.
-         * CUDA events are per-trial so sync doesn't affect latencies. */
         if (i == mid) {
-            cudaStreamSynchronize(stream);
             snap_after = gpu_snapshot();
         }
     }
-
-    cudaDeviceSynchronize();
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

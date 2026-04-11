@@ -399,7 +399,18 @@ static bool init_tma_encoder() {
     return (res == CUDA_SUCCESS && s_encodeTiled);
 }
 
-extern "C" int kernel_run(
+/* Cached launch state — populated by kernel_setup, reused by kernel_launch */
+static struct {
+    __nv_bfloat16* C;
+    int M, N, K;
+    CUtensorMap tma_A, tma_B;
+    int num_blocks, grid_m, grid_n, total_tiles;
+    bool ready;
+} s_state = {nullptr, 0, 0, 0, {}, {}, 0, 0, 0, 0, false};
+
+constexpr int SMEM_TOTAL = STAGES * STAGE_BYTES + 256 + 2 * EPI_BUF_BYTES;
+
+extern "C" int kernel_setup(
     __nv_bfloat16** inputs, int num_inputs,
     __nv_bfloat16** outputs, int num_outputs,
     int n, cudaStream_t stream)
@@ -408,51 +419,66 @@ extern "C" int kernel_run(
     if (dim * dim != n) return 1;
     if (!init_tma_encoder()) { fprintf(stderr, "TMA init failed\n"); return -1; }
 
-    const __nv_bfloat16* A = inputs[0];
-    const __nv_bfloat16* B = inputs[1];
-    __nv_bfloat16* C = outputs[0];
-    int M = dim, N = dim, K = dim;
+    s_state.C = outputs[0];
+    s_state.M = s_state.N = s_state.K = dim;
 
-    /* Encode TMA descriptors */
-    CUtensorMap tma_A, tma_B;
+    /* Encode TMA descriptors (CPU work — done once) */
     {
-        cuuint64_t dims[2] = {(cuuint64_t)K, (cuuint64_t)M};
-        cuuint64_t str[1]  = {(cuuint64_t)(K * 2)};
+        cuuint64_t dims[2] = {(cuuint64_t)dim, (cuuint64_t)dim};
+        cuuint64_t str[1]  = {(cuuint64_t)(dim * 2)};
         cuuint32_t box[2]  = {(cuuint32_t)TILE_K, (cuuint32_t)TILE_M};
         cuuint32_t el[2]   = {1, 1};
-        if (s_encodeTiled(&tma_A, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
-            (void*)A, dims, str, box, el,
+        if (s_encodeTiled(&s_state.tma_A, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)inputs[0], dims, str, box, el,
             CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
             CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS) return -2;
     }
     {
-        cuuint64_t dims[2] = {(cuuint64_t)N, (cuuint64_t)K};
-        cuuint64_t str[1]  = {(cuuint64_t)(N * 2)};
-        cuuint32_t box[2]  = {64, (cuuint32_t)TILE_K};  /* TMA loads 64-wide B tiles */
+        cuuint64_t dims[2] = {(cuuint64_t)dim, (cuuint64_t)dim};
+        cuuint64_t str[1]  = {(cuuint64_t)(dim * 2)};
+        cuuint32_t box[2]  = {64, (cuuint32_t)TILE_K};
         cuuint32_t el[2]   = {1, 1};
-        if (s_encodeTiled(&tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
-            (void*)B, dims, str, box, el,
+        if (s_encodeTiled(&s_state.tma_B, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2,
+            (void*)inputs[1], dims, str, box, el,
             CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
             CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS) return -3;
     }
 
-    /* Launch */
+    /* Compute grid (CPU work — done once) */
     int num_sms = 0;
     cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
     if (num_sms <= 0) num_sms = 132;
 
-    const int grid_m = (M + TILE_M - 1) / TILE_M;
-    const int grid_n = (N + TILE_N - 1) / TILE_N;
-    const int total_tiles = grid_m * grid_n;
-    const int num_blocks = (total_tiles < num_sms) ? total_tiles : num_sms;
-    constexpr int SMEM = STAGES * STAGE_BYTES + 256 + 2 * EPI_BUF_BYTES;
+    s_state.grid_m = (dim + TILE_M - 1) / TILE_M;
+    s_state.grid_n = (dim + TILE_N - 1) / TILE_N;
+    s_state.total_tiles = s_state.grid_m * s_state.grid_n;
+    s_state.num_blocks = (s_state.total_tiles < num_sms) ? s_state.total_tiles : num_sms;
 
     cudaFuncSetAttribute(matmul_wgmma,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
-    matmul_wgmma<<<num_blocks, THREADS, SMEM, stream>>>(
-        C, M, N, K, tma_A, tma_B, grid_m, grid_n, total_tiles);
+        cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
 
+    s_state.ready = true;
     return 0;
+}
+
+extern "C" int kernel_launch(cudaStream_t stream)
+{
+    if (!s_state.ready) return -1;
+    matmul_wgmma<<<s_state.num_blocks, THREADS, SMEM_TOTAL, stream>>>(
+        s_state.C, s_state.M, s_state.N, s_state.K,
+        s_state.tma_A, s_state.tma_B,
+        s_state.grid_m, s_state.grid_n, s_state.total_tiles);
+    return 0;
+}
+
+extern "C" int kernel_run(
+    __nv_bfloat16** inputs, int num_inputs,
+    __nv_bfloat16** outputs, int num_outputs,
+    int n, cudaStream_t stream)
+{
+    int rc = kernel_setup(inputs, num_inputs, outputs, num_outputs, n, stream);
+    if (rc != 0) return rc;
+    return kernel_launch(stream);
 }

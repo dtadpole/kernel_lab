@@ -38,9 +38,12 @@ cd /home/zhenc/kernel_lab
 .venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 # Profile YOUR kernel
 .venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
-# Profile REFERENCE (ref-cublas is the benchmark baseline — compile it first)
-.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=ref-cublas exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=ref-cublas exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
+# Profile REFERENCE — the benchmark baseline impl varies by kernel:
+#   matmul → ref-cublas, fa4 → ref-cudnn or ref-cutedsl, etc.
+# Check data/ref/<kernel>/ to see which reference impls exist.
+# Compile the reference first (it's not pre-built), then profile:
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
 ```
 
 ### ik:docs — NVIDIA CUDA documentation
@@ -120,18 +123,32 @@ which configs to profile:
    of your architectural choices are working. These insights often point to
    optimizations you can apply to the losing configs.
 
-Profile at least 2 configs chosen from these two categories. For EACH config,
-profile BOTH your kernel AND the reference side by side:
+Profile at least 2 configs chosen from these two categories.
+
+**SIDE-BY-SIDE RULE:** For EACH config you profile, you MUST profile BOTH
+implementations (gen-cuda AND the reference impl) at the SAME config and
+compare the NCU metrics side by side. This is what "data-driven" means —
+comparing your metrics against a concrete baseline. Profiling only one
+side is NOT data-driven, it's guessing. If you profile the reference at
+mat-512x512, you MUST also profile gen-cuda at mat-512x512. No exceptions.
+
+The reference impl depends on the kernel — check `data/ref/<kernel>/` to
+see which impls exist (e.g., ref-cublas for matmul, ref-cudnn for fa4).
 
 ```bash
-# Profile the reference (ref-cublas) — understand what "good" looks like
-# NOTE: ref-cublas must be COMPILED before profiling (it's not pre-built)
-.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=ref-cublas exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=ref-cublas exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
+# For EACH config, run BOTH of these — not just one:
 
-# Profile your kernel (gen-cuda) — understand where you stand
+# 1. Profile the reference (e.g., ref-cublas for matmul, ref-cudnn for fa4)
+# NOTE: reference must be COMPILED before profiling (it's not pre-built)
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
+
+# 2. Profile your kernel (gen-cuda) at the SAME config
 .venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
 ```
+
+After profiling, print the key metrics for BOTH side by side before
+proceeding. Do NOT move to Phase 2 until you have compared both profiles.
 
 If no gen code exists yet (first wave), profile the reference on 2+ configs
 with different characteristics to understand how the reference adapts its
@@ -311,7 +328,7 @@ then fill in one TODO at a time.
    # YOUR kernel — did your predicted metric improve?
    ... exec.impl=gen-cuda ... exec.side=generated
    # REFERENCE — compare side by side (same config, same GPU, same clocks)
-   ... exec.impl=ref-cublas ... exec.side=reference
+   ... exec.impl=<REF_IMPL> ... exec.side=reference
    ```
    Print both metrics side by side. If your predicted NCU metric did NOT
    improve, STOP and re-analyze before requesting bench.

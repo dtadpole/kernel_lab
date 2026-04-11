@@ -11,7 +11,7 @@ defaults:
 monitor:
   idle_timeout: 1800           # 30 min — triggers Steward stuck check
   total_timeout: 7200          # 2 hours — triggers Steward time_limit review
-  hard_limit: 21600            # 6 hours — unconditional kill
+  hard_limit: 43200            # 12 hours — unconditional kill
   check_interval: 60           # check every 1 min
   loop_threshold: 100          # same tool 100x in a row
   progress_check_interval: 600 # 10 min — periodic progress check

@@ -143,6 +143,10 @@ class AgentRunner:
         except Exception:
             self._pid = None
 
+        # Wrap transport.write() to log ALL stdin writes — catches query(),
+        # inject, monitor inject, and any future code path.
+        self._wrap_transport_logging()
+
         # Write process_start.json
         try:
             self._storage.write_process_start(
@@ -152,12 +156,6 @@ class AgentRunner:
             )
         except Exception as e:
             print(f"[Runner] Failed to write process_start.json: {e}")
-
-        # Log stdin
-        try:
-            self._storage.log_stdin(prompt[:5000])
-        except Exception:
-            pass
 
         # Send initial prompt
         await self._client.query(prompt)
@@ -252,13 +250,7 @@ class AgentRunner:
         if not self._client:
             raise RuntimeError("Not started. Call start() first.")
 
-        # Log to stdin.log
-        try:
-            self._storage.log_stdin(prompt[:5000])
-        except Exception:
-            pass
-
-        # Log as event
+        # Log as event (stdin is logged automatically by transport wrapper)
         self._storage.append_event({
             "ts": datetime.now().isoformat(),
             "type": "ContinuePrompt",
@@ -339,6 +331,29 @@ class AgentRunner:
             os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             pass
+
+    def _wrap_transport_logging(self) -> None:
+        """Intercept transport.write() to log all stdin to the wave's stdin.log.
+
+        This is the single chokepoint for ALL writes to the subprocess stdin —
+        client.query(), inject, monitor inject, and any future code path all
+        go through transport.write(). By wrapping here, we guarantee complete
+        stdin logging without requiring each call site to remember to log.
+        """
+        try:
+            transport = self._client._transport
+            original_write = transport.write
+
+            async def logged_write(data: str) -> None:
+                try:
+                    self._storage.log_stdin(data[:5000])
+                except Exception:
+                    pass
+                return await original_write(data)
+
+            transport.write = logged_write
+        except Exception as e:
+            print(f"[Runner] Failed to wrap transport logging: {e}")
 
     # ── Legacy API (backward compat for Steward) ──
 

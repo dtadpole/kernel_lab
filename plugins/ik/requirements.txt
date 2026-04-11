@@ -18,6 +18,10 @@ httpx>=0.28,<1.0
 psutil>=7.0,<8.0
 pyyaml>=6.0,<7.0
 
+# --- Agent SDK ---
+claude-agent-sdk>=0.1,<1.0
+mcp>=1.20,<2.0
+
 # --- CUDA / GPU ---
 nvidia-cutlass-dsl>=4.4.2
 cuda-python>=13.0

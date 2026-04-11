@@ -74,6 +74,7 @@ agents:
           - ~/kernel_lab/conf/
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
+          - ~/kernel_lab/data/roofline/
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/
@@ -102,6 +103,7 @@ agents:
           - conf/
           - data/ref/
           - data/configs/
+          - data/roofline/
           - DESIGN.md
           - AGENTS.md
           # 绝对路径
@@ -110,6 +112,7 @@ agents:
           - ~/kernel_lab/conf/
           - ~/kernel_lab/data/ref/
           - ~/kernel_lab/data/configs/
+          - ~/kernel_lab/data/roofline/
           - ~/kernel_lab/DESIGN.md
           - ~/kernel_lab/AGENTS.md
           - ~/kernel_lab_kb/runs/<run_tag>/

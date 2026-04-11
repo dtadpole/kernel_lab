@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,11 +275,17 @@ class AgentRunner:
         """
         print(f"[Runner] {self.agent_config.name} wave {self.wave} stopping (PID {self._pid})")
 
-        # 1. Disconnect client
+        # 1. Disconnect client (with timeout — SDK's process.wait() can hang)
         exit_code = -1
         try:
             if self._client_ctx:
-                await self._client_ctx.__aexit__(None, None, None)
+                await asyncio.wait_for(
+                    self._client_ctx.__aexit__(None, None, None),
+                    timeout=60,
+                )
+        except asyncio.TimeoutError:
+            print(f"[Runner] disconnect timed out after 60s, force-killing PID {self._pid}")
+            self._force_kill_pid(self._pid)
         except (asyncio.CancelledError, Exception) as e:
             print(f"[Runner] disconnect: {e}")
 
@@ -319,6 +326,19 @@ class AgentRunner:
         self._is_running = False
 
         print(f"[Runner] {self.agent_config.name} wave {self.wave} stopped (exit_code={exit_code})")
+
+    def _force_kill_pid(self, pid: int | None) -> None:
+        """Force-kill a subprocess by PID. Bypasses SDK when it hangs."""
+        if not pid:
+            return
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
 
     # ── Legacy API (backward compat for Steward) ──
 

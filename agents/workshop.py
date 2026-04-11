@@ -539,19 +539,20 @@ class Workshop(DefaultHandler):
         return False
 
     def _parse_bench_improved(self, bench_result: RunResult) -> bool:
-        """Check if the benchmark result shows improvement (new gem)."""
+        """Check if the benchmark result shows improvement (new gem) for gen-cuda.
+
+        Only gen-cuda gems count as improvement. Gems from other impl slugs
+        (e.g. sample-cuda) are ignored — they don't represent Solver's primary
+        optimization target and should not trigger wave SUCCESS.
+        """
         # Check structured data first
         bench_data = bench_result.usage.get("bench_data", {})
-        if bench_data.get("improved"):
-            return True
         gems = bench_data.get("gems", {})
-        if gems:
+        if "gen-cuda" in gems:
             return True
-        # Fallback to text parsing
+        # Fallback to text parsing (only for gen-cuda)
         text = bench_result.result_text.lower()
-        if "improved: true" in text or "improved=true" in text:
-            return True
-        if "new gem" in text:
+        if "gen-cuda" in text and ("improved" in text or "new gem" in text):
             return True
         return False
 

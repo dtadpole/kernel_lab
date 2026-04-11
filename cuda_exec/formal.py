@@ -846,30 +846,8 @@ print(json.dumps({{"ok": True, "configs": results}}))
     try:
 
         # ================================================================
-        # Phase A: Benchmark .py impls (unchanged — subprocess per impl)
-        # ================================================================
-        for impl in py_impls:
-            logger.info("[%s] measure_py start (%d configs)", impl["slug"], len(configs))
-            impl_start = time.time()
-            r = _run_py_impl(impl)
-            if r["ok"]:
-                for cs, cr in r["configs"].items():
-                    cr.pop("output_tensor", None)
-                results[impl["slug"]] = {
-                    "impl": impl["slug"],
-                    "compile_ok": None, "trial_ok": True,
-                    "compile_result": None,
-                    "trial_result": {"all_ok": True, "configs": r["configs"]},
-                }
-            else:
-                results[impl["slug"]] = {
-                    "impl": impl["slug"], "compile_ok": None, "trial_ok": False,
-                    "error": r.get("error", ""),
-                }
-            logger.info("[%s] measure_py done (%.1fs)", impl["slug"], time.time() - impl_start)
-
-        # ================================================================
         # Phase B: Compile ALL .cu impls, collect binary paths
+        # (.py impls don't need compilation — they run via trial.py directly)
         # ================================================================
         compiled_binaries: Dict[str, str] = {}     # slug → binary path
         compile_results: Dict[str, dict] = {}      # slug → compile result
@@ -975,13 +953,21 @@ print(json.dumps({{"ok": True, "configs": results}}))
                 }
 
         # ================================================================
-        # Phase C: Trial per-config — ONE trial.py call per config,
-        #          all impls run once via --binary-map
+        # Phase C: Trial ALL impls in ONE pass per config.
+        # .cu impls via --binary-map, .py impls via inputs/{slug}/ dirs.
+        # All impls measured under identical GPU conditions per config.
         # ================================================================
-        if compiled_binaries:
+        if compiled_binaries or py_impls:
             # Use the first successfully compiled impl's workspace for trial
-            first_slug = next(iter(compiled_binaries))
-            trial_meta = compile_metadata[first_slug]
+            if compiled_binaries:
+                first_slug = next(iter(compiled_binaries))
+                trial_meta = compile_metadata[first_slug]
+            else:
+                # No .cu impls compiled — create metadata for .py-only trial
+                trial_meta = Metadata(
+                    run_tag=run_tag, version="v1", direction_id=0,
+                    direction_slug=f"{kernel}-py", revision=int(time.time()) % 100000,
+                )
 
             # Build binary-map string: slug=/path/to/bin,...
             binary_map_str = ",".join(f"{s}={p}" for s, p in compiled_binaries.items())
@@ -1000,7 +986,7 @@ print(json.dumps({{"ok": True, "configs": results}}))
             trial_result = trial_resp.model_dump(mode="json")
             logger.info("Trial phase done (%.1fs)", time.time() - trial_start)
 
-            # Distribute trial results to each impl
+            # Distribute trial results to each .cu impl
             for cu_impl in cu_impls:
                 slug = cu_impl["slug"]
                 if slug not in compiled_binaries:
@@ -1027,6 +1013,17 @@ print(json.dumps({{"ok": True, "configs": results}}))
                         },
                     }
                 results[slug] = impl_result
+
+            # Distribute trial results to each .py impl
+            for py_impl in py_impls:
+                slug = py_impl["slug"]
+                results[slug] = {
+                    "impl": slug,
+                    "compile_ok": None,
+                    "trial_ok": trial_resp.all_ok,
+                    "compile_result": None,
+                    "trial_result": trial_result,
+                }
 
     finally:
         # --- Unlock GPU clocks ---

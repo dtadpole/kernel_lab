@@ -1,0 +1,31 @@
+# Per-config autotune for sample matmul kernel.
+#
+# Each config can have its own search space. Configs not listed
+# here use the kernel's default #define values (BM=64, BN=64, BK=16).
+
+configs:
+  mat-256x256:
+    autotune:
+      params:
+        BM: [16, 32, 64]
+        BN: [16, 32, 64]
+        BK: [8, 16]
+      constraints:
+        - "BM * BK * 2 + BK * BN * 2 <= 49152"   # shared memory limit (48 KB)
+  mat-512x512:
+    autotune:
+      params:
+        BM: [32, 64]
+        BN: [32, 64]
+        BK: [16, 32]
+      constraints:
+        - "BM * BK * 2 + BK * BN * 2 <= 49152"
+  mat-1024x1024:
+    autotune:
+      params:
+        BM: [32, 64, 128]
+        BN: [32, 64, 128]
+        BK: [16, 32]
+      constraints:
+        - "BM * BK * 2 + BK * BN * 2 <= 49152"
+  # mat-4096x4096, mat-8192x8192: no autotune — use defaults (BM=64, BN=64, BK=16)

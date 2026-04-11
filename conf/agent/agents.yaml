@@ -73,6 +73,7 @@ agents:
           - ~/kernel_lab/plugins/
           - ~/kernel_lab/conf/
           - ~/kernel_lab/data/ref/
+          - ~/kernel_lab/data/sample/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab/data/roofline/
           - ~/kernel_lab/DESIGN.md
@@ -102,6 +103,7 @@ agents:
           - plugins/
           - conf/
           - data/ref/
+          - data/sample/
           - data/configs/
           - data/roofline/
           - DESIGN.md
@@ -111,6 +113,7 @@ agents:
           - ~/kernel_lab/plugins/
           - ~/kernel_lab/conf/
           - ~/kernel_lab/data/ref/
+          - ~/kernel_lab/data/sample/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab/data/roofline/
           - ~/kernel_lab/DESIGN.md
@@ -132,11 +135,13 @@ agents:
           - plugins/
           - conf/
           - data/ref/
+          - data/sample/
           - data/configs/
           - ~/kernel_lab/cuda_exec/
           - ~/kernel_lab/plugins/
           - ~/kernel_lab/conf/
           - ~/kernel_lab/data/ref/
+          - ~/kernel_lab/data/sample/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
           - ~/.cuda_exec/<run_tag>/
@@ -155,11 +160,13 @@ agents:
           - plugins/
           - conf/
           - data/ref/
+          - data/sample/
           - data/configs/
           - ~/kernel_lab/cuda_exec/
           - ~/kernel_lab/plugins/
           - ~/kernel_lab/conf/
           - ~/kernel_lab/data/ref/
+          - ~/kernel_lab/data/sample/
           - ~/kernel_lab/data/configs/
           - ~/kernel_lab_kb/runs/<run_tag>/
           - ~/.cuda_exec/<run_tag>/
@@ -183,10 +190,10 @@ agents:
     tool_rules:
       - tool: Edit
         allow: true
-        constraint: "允许编辑 data/configs/, data/ref/, cuda_exec/, plugins/ik/"
+        constraint: "允许编辑 data/configs/, data/ref/, data/sample/, cuda_exec/, plugins/ik/"
       - tool: Write
         allow: true
-        constraint: "允许写入 data/configs/, data/ref/, cuda_exec/, plugins/ik/"
+        constraint: "允许写入 data/configs/, data/ref/, data/sample/, cuda_exec/, plugins/ik/"
       - tool: Bash
         allow: true
         constraint: |

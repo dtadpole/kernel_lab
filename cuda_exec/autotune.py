@@ -1,25 +1,34 @@
-"""Lightweight autotune for CUDA kernels via #define macro parameterization.
+"""Per-config autotune for CUDA kernels via #define macro parameterization.
+
+Each benchmark config can have its own autotune search space.  Configs with
+an ``autotune:`` section get their own best parameters and compiled binary;
+configs without one use the kernel's default #define values.
 
 Workflow:
   1. Solver writes kernel.cu with ``#ifndef BM / #define BM 128 / #endif``
-  2. Solver writes autotune.yaml next to it with search space + constraints
+  2. Solver writes autotune.yaml next to it with per-config search spaces
   3. formal.py detects autotune.yaml → calls ``run_autotune()``
-  4. This module compiles all valid parameter combos in parallel,
-     benchmarks each variant, and returns the best config.
+  4. This module compiles all valid combos (union across configs) in parallel,
+     benchmarks each on the relevant configs, and returns per-config winners.
 
 autotune.yaml format::
 
-    params:
-      BM: [64, 128, 256]
-      BN: [64, 128, 256]
-      BK: [32, 64]
-      STAGES: [2, 3, 4]
-    constraints:
-      - "(BM * BK + BK * BN) * STAGES * 2 <= 227328"
-    # Optional: benchmark configs to tune on (default: all)
-    bench_configs:
-      - mat-4096x4096
-      - mat-8192x8192
+    configs:
+      mat-256x256:
+        autotune:
+          params:
+            BM: [32, 64, 128]
+            BN: [32, 64, 128]
+            BK: [32, 64]
+            STAGES: [2, 3, 4]
+          constraints:
+            - "(BM * BK + BK * BN) * STAGES * 2 <= 227328"
+      mat-512x512:
+        autotune:
+          params:
+            BM: [64, 128]
+            BN: [64, 128]
+      # mat-8192x8192 not listed → no autotune, use default #define values
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -257,8 +267,13 @@ def compile_variants(
     arch: str,
     env_base: dict[str, str],
     max_workers: int = 16,
+    timeout_per_variant: int = 180,
 ) -> list[CompileResult]:
-    """Compile all variants in parallel."""
+    """Compile all variants in parallel.
+
+    Each worker compiles independently with its own env copy.
+    Worker crashes are caught and recorded as failed CompileResults.
+    """
     results = []
     tags = [combo_tag(c) for c in combos]
 
@@ -271,9 +286,17 @@ def compile_variants(
             )
             futures[future] = (combo, tag)
 
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
+        for future in as_completed(futures, timeout=timeout_per_variant * len(combos)):
+            combo, tag = futures[future]
+            try:
+                results.append(future.result(timeout=timeout_per_variant))
+            except Exception as exc:
+                logger.warning("compile worker crashed for %s: %s", tag, exc)
+                results.append(CompileResult(
+                    combo=combo, tag=tag,
+                    binary_path=str(output_dir / tag / f"{tag}.bin"),
+                    ok=False, error=f"worker crash: {exc}",
+                ))
 
     return results
 
@@ -331,7 +354,8 @@ def _quick_bench_variant(
             if stdout:
                 data = json.loads(stdout)
                 perf = data.get("performance", data.get("summary", {}))
-                median = perf.get("latency_ms", {}).get("median")
+                lat = perf.get("latency_ms", {})
+                median = lat.get("p50") or lat.get("median")
                 results[config_slug] = median
             else:
                 results[config_slug] = None
@@ -386,39 +410,164 @@ def bench_variants(
 # ---------------------------------------------------------------------------
 
 @dataclass
-class AutotuneResult:
-    """Result of an autotune run."""
+class PerConfigWinner:
+    """Best autotune result for a single config."""
+    config_slug: str
     best_combo: dict[str, int]
     best_tag: str
     best_median_ms: float
-    best_latencies: dict[str, float]  # per-config latencies for the winner
     best_registers: int
     best_smem_bytes: int
-    total_combos: int
-    valid_combos: int
-    compiled_ok: int
-    benchmarked_ok: int
-    all_results: list[dict]  # sorted by performance
-    duration_s: float
     defines_flags: str  # e.g. "-DBM=128 -DBN=256"
 
 
+@dataclass
+class AutotuneResult:
+    """Result of an autotune run with per-config winners."""
+    per_config_results: dict[str, PerConfigWinner]  # config_slug → winner
+    total_combos: int       # raw cartesian product size (sum across configs)
+    valid_combos: int       # after constraint filtering (union)
+    compiled_ok: int
+    benchmarked_ok: int
+    all_results: list[dict]  # sorted by geo-mean performance
+    duration_s: float
+    configs_without_autotune: list[str]  # configs that had no autotune section
+
+
 def load_autotune_yaml(yaml_path: Path) -> dict:
-    """Load and validate autotune.yaml."""
+    """Load and validate autotune.yaml.
+
+    Expected format::
+
+        configs:
+          mat-256x256:
+            autotune:
+              params:
+                BM: [32, 64, 128]
+              constraints:
+                - "..."
+          mat-8192x8192: {}   # no autotune for this config
+
+    Returns the parsed dict with validated params converted to int lists.
+    """
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"autotune.yaml must be a YAML mapping, got {type(data)}")
-    if "params" not in data:
-        raise ValueError("autotune.yaml missing 'params' section")
-    params = data["params"]
-    if not isinstance(params, dict) or not params:
-        raise ValueError("autotune.yaml 'params' must be a non-empty mapping")
-    for key, values in params.items():
-        if not isinstance(values, list) or not values:
-            raise ValueError(f"autotune.yaml params[{key!r}] must be a non-empty list")
-        params[key] = [int(v) for v in values]
-    data["constraints"] = [str(c) for c in data.get("constraints", [])]
+    if "configs" not in data:
+        raise ValueError("autotune.yaml missing 'configs' section")
+    configs_section = data["configs"]
+    if not isinstance(configs_section, dict) or not configs_section:
+        raise ValueError("autotune.yaml 'configs' must be a non-empty mapping")
+
+    for config_slug, config_spec in configs_section.items():
+        if config_spec is None:
+            configs_section[config_slug] = {}
+            continue
+        if not isinstance(config_spec, dict):
+            raise ValueError(f"configs[{config_slug!r}] must be a mapping")
+        if "autotune" not in config_spec:
+            continue
+        at = config_spec["autotune"]
+        if not isinstance(at, dict):
+            raise ValueError(f"configs[{config_slug!r}].autotune must be a mapping")
+        if "params" not in at:
+            raise ValueError(f"configs[{config_slug!r}].autotune missing 'params'")
+        params = at["params"]
+        if not isinstance(params, dict) or not params:
+            raise ValueError(f"configs[{config_slug!r}].autotune.params must be a non-empty mapping")
+        for key, values in params.items():
+            if not isinstance(values, list) or not values:
+                raise ValueError(
+                    f"configs[{config_slug!r}].autotune.params[{key!r}] must be a non-empty list"
+                )
+            params[key] = [int(v) for v in values]
+        at["constraints"] = [str(c) for c in at.get("constraints", [])]
+
     return data
+
+
+# ---------------------------------------------------------------------------
+# Per-config helpers
+# ---------------------------------------------------------------------------
+
+def _compute_per_config_valid_combos(
+    config_autotunes: dict[str, dict],
+) -> tuple[list[dict[str, int]], dict[str, set[str]]]:
+    """Compute the UNION of all per-config valid combos for shared compilation.
+
+    Args:
+        config_autotunes: {config_slug: {"params": {...}, "constraints": [...]}}
+
+    Returns:
+        union_combos: deduplicated list of all combos that any config needs
+        config_combo_tags: {config_slug: set of combo tags valid for that config}
+    """
+    all_combos: dict[str, dict[str, int]] = {}  # tag -> combo (dedup)
+    config_combo_tags: dict[str, set[str]] = {}
+
+    for config_slug, at_spec in config_autotunes.items():
+        params = at_spec["params"]
+        constraints = at_spec.get("constraints", [])
+        combos = generate_combos(params, constraints)
+        tags = set()
+        for combo in combos:
+            tag = combo_tag(combo)
+            all_combos[tag] = combo
+            tags.add(tag)
+        config_combo_tags[config_slug] = tags
+
+    return list(all_combos.values()), config_combo_tags
+
+
+def _select_per_config_winners(
+    bench_results: list[BenchResult],
+    compile_results: list[CompileResult],
+    config_combo_tags: dict[str, set[str]],
+) -> dict[str, PerConfigWinner]:
+    """Select the best combo for each config from its valid search space.
+
+    For each config, filters bench_results to only combos in that config's
+    search space, then picks the one with the lowest latency for that config.
+    """
+    compile_by_tag = {cr.tag: cr for cr in compile_results}
+
+    winners = {}
+    for config_slug, valid_tags in config_combo_tags.items():
+        best_ms = float("inf")
+        best_br: BenchResult | None = None
+
+        for br in bench_results:
+            if not br.ok or br.tag not in valid_tags:
+                continue
+            config_lat = br.all_latencies.get(config_slug)
+            if config_lat is not None and config_lat < best_ms:
+                best_ms = config_lat
+                best_br = br
+
+        if best_br is None:
+            # Fallback: first valid & ok result
+            for br in bench_results:
+                if br.ok and br.tag in valid_tags:
+                    best_br = br
+                    lat = br.all_latencies.get(config_slug)
+                    best_ms = lat if lat is not None else br.median_ms
+                    break
+
+        if best_br is None:
+            continue
+
+        cr = compile_by_tag.get(best_br.tag)
+        winners[config_slug] = PerConfigWinner(
+            config_slug=config_slug,
+            best_combo=best_br.combo,
+            best_tag=best_br.tag,
+            best_median_ms=best_ms,
+            best_registers=cr.registers if cr else 0,
+            best_smem_bytes=cr.smem_bytes if cr else 0,
+            defines_flags=" ".join(f"-D{k}={v}" for k, v in best_br.combo.items()),
+        )
+
+    return winners
 
 
 def run_autotune(
@@ -431,40 +580,60 @@ def run_autotune(
     max_compile_workers: int = 16,
     bench_warmups: int = 2,
     bench_trials: int = 3,
-    bench_configs: list[str] | None = None,
 ) -> AutotuneResult:
-    """Run the full autotune pipeline.
+    """Run per-config autotune pipeline.
+
+    Only configs with an ``autotune:`` section in the YAML are tuned.
+    Configs without one are listed in ``configs_without_autotune``.
 
     Args:
         cu_path: Path to the CUDA source file with #ifndef'd parameters.
-        autotune_yaml: Path to autotune.yaml with search space.
+        autotune_yaml: Path to autotune.yaml with per-config search spaces.
         configs: All benchmark configs {slug: config_dict}.
         arch: GPU architecture (e.g. 'sm_90a').
         env_base: Base environment for compilation and benchmarking.
         max_compile_workers: Max parallel compilations.
         bench_warmups: Warmup iterations per variant.
         bench_trials: Timed iterations per variant.
-        bench_configs: Subset of config slugs to tune on (None = all).
 
     Returns:
-        AutotuneResult with the best configuration found.
+        AutotuneResult with per-config winners.
     """
     started = time.perf_counter()
 
-    # 1. Parse autotune.yaml
+    # 1. Parse autotune.yaml — extract configs with autotune sections
     spec = load_autotune_yaml(autotune_yaml)
-    params = spec["params"]
-    constraints = spec["constraints"]
+    configs_section = spec["configs"]
 
-    # Total combos before filtering
-    total_combos = 1
-    for values in params.values():
-        total_combos *= len(values)
+    config_autotunes: dict[str, dict] = {}  # config_slug → autotune spec
+    configs_without_autotune: list[str] = []
 
-    # 2. Generate valid combos
-    combos = generate_combos(params, constraints)
-    logger.info("Autotune: %d total combos → %d valid (after constraints)",
-                total_combos, len(combos))
+    for config_slug in configs:
+        config_spec = configs_section.get(config_slug, {})
+        if "autotune" in config_spec:
+            config_autotunes[config_slug] = config_spec["autotune"]
+        else:
+            configs_without_autotune.append(config_slug)
+
+    if not config_autotunes:
+        raise ValueError("No configs with autotune settings in autotune.yaml")
+
+    logger.info("Autotune: %d configs to tune, %d without autotune",
+                len(config_autotunes), len(configs_without_autotune))
+
+    # 2. Generate combos per config, compute union for shared compilation
+    combos, config_combo_tags = _compute_per_config_valid_combos(config_autotunes)
+
+    total_combos = 0
+    for at_spec in config_autotunes.values():
+        n = 1
+        for values in at_spec["params"].values():
+            n *= len(values)
+        total_combos += n
+
+    logger.info("Autotune: %d unique combos (total raw: %d)", len(combos), total_combos)
+    for slug, tags in config_combo_tags.items():
+        logger.info("  %s: %d valid combos", slug, len(tags))
 
     if not combos:
         raise ValueError("No valid parameter combinations after applying constraints")
@@ -482,9 +651,9 @@ def run_autotune(
     compile_duration = time.perf_counter() - compile_started
 
     ok_compiles = [r for r in compile_results if r.ok]
-    failed_compiles = [r for r in compile_results if not r.ok]
     logger.info("Autotune: compiled %d ok, %d failed (%.1fs)",
-                len(ok_compiles), len(failed_compiles), compile_duration)
+                len(ok_compiles), len(compile_results) - len(ok_compiles),
+                compile_duration)
 
     if not ok_compiles:
         raise RuntimeError(
@@ -492,16 +661,8 @@ def run_autotune(
             f"First error: {compile_results[0].error if compile_results else 'unknown'}"
         )
 
-    # 4. Filter benchmark configs
-    if bench_configs:
-        bench_cfg = {k: v for k, v in configs.items() if k in bench_configs}
-    else:
-        bench_cfg = configs
-
-    if not bench_cfg:
-        raise ValueError(f"No matching bench configs. Available: {list(configs.keys())}")
-
-    # 5. Sequential benchmark
+    # 4. Benchmark — only on configs that have autotune
+    bench_cfg = {s: configs[s] for s in config_autotunes}
     logger.info("Autotune: benchmarking %d variants on %d configs",
                 len(ok_compiles), len(bench_cfg))
 
@@ -513,19 +674,19 @@ def run_autotune(
     bench_duration = time.perf_counter() - bench_started
     logger.info("Autotune: benchmarked in %.1fs", bench_duration)
 
-    # 6. Rank by geometric mean latency
+    # 5. Rank by geometric mean (for reporting) and select per-config winners
     bench_results.sort(key=lambda r: r.median_ms)
     ok_bench = [r for r in bench_results if r.ok]
 
     if not ok_bench:
         raise RuntimeError("All variants failed benchmarking")
 
-    best = ok_bench[0]
-
-    # Find compile result for best combo to get register/smem info
-    best_compile = next(
-        (cr for cr in compile_results if cr.tag == best.tag), None
+    per_config_results = _select_per_config_winners(
+        bench_results, compile_results, config_combo_tags,
     )
+    distinct_tags = {pcw.best_tag for pcw in per_config_results.values()}
+    logger.info("Autotune: %d distinct winners for %d configs",
+                len(distinct_tags), len(per_config_results))
 
     # Build sorted results list for reporting
     all_results = []
@@ -541,9 +702,6 @@ def run_autotune(
             "ok": br.ok,
         })
 
-    # Build defines flags string
-    defines_flags = " ".join(f"-D{k}={v}" for k, v in best.combo.items())
-
     total_duration = time.perf_counter() - started
 
     # Clean up work dir
@@ -553,29 +711,17 @@ def run_autotune(
         pass
 
     result = AutotuneResult(
-        best_combo=best.combo,
-        best_tag=best.tag,
-        best_median_ms=best.median_ms,
-        best_latencies=best.all_latencies,
-        best_registers=best_compile.registers if best_compile else 0,
-        best_smem_bytes=best_compile.smem_bytes if best_compile else 0,
+        per_config_results=per_config_results,
         total_combos=total_combos,
         valid_combos=len(combos),
         compiled_ok=len(ok_compiles),
         benchmarked_ok=len(ok_bench),
         all_results=all_results,
         duration_s=total_duration,
-        defines_flags=defines_flags,
+        configs_without_autotune=configs_without_autotune,
     )
 
-    logger.info(
-        "Autotune: best=%s (%.4f ms geo-mean, regs=%d, smem=%dB) — "
-        "%d/%d combos, %.1fs total",
-        best.tag, best.median_ms,
-        result.best_registers, result.best_smem_bytes,
-        len(ok_bench), total_combos, total_duration,
-    )
-
+    logger.info("Autotune: %.1fs total", total_duration)
     return result
 
 
@@ -589,23 +735,23 @@ def format_autotune_report(result: AutotuneResult) -> str:
         f"({result.duration_s:.1f}s) ===",
     ]
 
-    # Show top 5 results
-    top_n = min(5, len(result.all_results))
-    for i, r in enumerate(result.all_results[:top_n]):
-        marker = "★" if i == 0 else " "
-        ms_str = f"{r['median_ms']:.4f}" if r['median_ms'] else "FAIL"
-        reg_str = f"regs={r['registers']}" if r['registers'] else ""
-        smem_str = f"smem={r['smem_bytes']}" if r['smem_bytes'] else ""
-        hw_info = f"({reg_str}, {smem_str})" if reg_str or smem_str else ""
-        combo_str = ", ".join(f"{k}={v}" for k, v in r["combo"].items())
-        lines.append(f"  {marker} #{i+1}: {combo_str} → {ms_str} ms {hw_info}")
-
-        # Show per-config latencies for the winner
-        if i == 0 and r.get("latencies"):
-            for cfg, lat in r["latencies"].items():
-                lat_str = f"{lat:.4f} ms" if lat else "FAIL"
-                lines.append(f"       {cfg}: {lat_str}")
-
+    # Per-config winners
     lines.append("")
-    lines.append(f"Winner: {result.defines_flags}")
+    for config_slug, pcw in result.per_config_results.items():
+        combo_str = ", ".join(f"{k}={v}" for k, v in pcw.best_combo.items())
+        lines.append(f"  {config_slug}: {combo_str} → {pcw.best_median_ms:.4f} ms")
+
+    # Grouping summary
+    groups: dict[str, list[str]] = defaultdict(list)
+    for config_slug, pcw in result.per_config_results.items():
+        groups[pcw.defines_flags].append(config_slug)
+    lines.append("")
+    lines.append(f"Distinct combos: {len(groups)}")
+    for defines, config_slugs in groups.items():
+        lines.append(f"  {defines} → {', '.join(config_slugs)}")
+
+    if result.configs_without_autotune:
+        lines.append("")
+        lines.append(f"No autotune: {', '.join(result.configs_without_autotune)}")
+
     return "\n".join(lines)

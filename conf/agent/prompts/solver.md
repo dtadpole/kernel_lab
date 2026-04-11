@@ -359,27 +359,41 @@ use autotune to find the optimal configuration automatically.
    #define BN 128
    #endif
    ```
-2. Write `autotune.yaml` in the same directory as your `.cu` file:
+2. Write `autotune.yaml` in the same directory as your `.cu` file.
+   Each config that needs tuning gets its own `autotune:` section with
+   `params` and optional `constraints`. Configs not listed use the
+   kernel's default `#define` values (no tuning):
    ```yaml
-   params:
-     BM: [64, 128, 256]
-     BN: [64, 128, 256]
-     BK: [32, 64]
-     STAGES: [2, 3, 4]
-   constraints:
-     - "(BM * BK + BK * BN) * STAGES * 2 <= 227328"
+   configs:
+     mat-256x256:
+       autotune:
+         params:
+           BM: [32, 64, 128]
+           BN: [32, 64, 128]
+           BK: [32, 64]
+           STAGES: [2, 3, 4]
+         constraints:
+           - "(BM * BK + BK * BN) * STAGES * 2 <= 227328"
+     mat-512x512:
+       autotune:
+         params:
+           BM: [64, 128]
+           BN: [64, 128]
+     # mat-4096x4096, mat-8192x8192: no autotune section → use defaults
    ```
 3. `request_formal_bench` will automatically detect `autotune.yaml`, compile
-   all valid parameter combinations in parallel, benchmark each, and use the
-   best config for the formal benchmark.
+   all valid parameter combinations in parallel, benchmark each on the
+   relevant configs, and compile the best binary per config.
 
 **Constraint syntax:** Simple arithmetic expressions with `<=`, `>=`, `<`, `>`.
 Variables are the parameter names. Use constraints to filter out invalid combos
 (e.g., SMEM overflow). No function calls allowed.
 
-**Keep combinations <= 25.** Each variant must be compiled and benchmarked —
-more combos means longer autotune time. Pick 2-3 key parameters with 2-4
-values each. Use constraints to prune invalid combos aggressively.
+**Keep combinations <= 25 per config.** Each variant must be compiled and
+benchmarked — more combos means longer autotune time. Pick 2-3 key parameters
+with 2-4 values each. Use constraints to prune invalid combos aggressively.
+Large matrices often need fewer tile options (obvious large tiles), while
+small matrices benefit from wider exploration.
 
 **When to use:** After your kernel is correct and you want to find the optimal
 tile/pipeline configuration. Do NOT use autotune for initial development — get

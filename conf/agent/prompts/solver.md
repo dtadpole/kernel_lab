@@ -102,6 +102,9 @@ Read and understand these before doing anything else:
   - `.peak/{arch}/{kernel}/cuda/cuda.cu` — the hand-tuned peak kernel
   - `data/ref/{kernel}/cutedsl/cutedsl.py` — the CuTe DSL reference
   - `data/ref/{kernel}/pytorch/pytorch.py` — the PyTorch reference
+- **Sample code** — `data/sample/{arch}/{kernel}/cuda/cuda.cu` — a simplified
+  working kernel with WGMMA + TMA + warp specialization. Use as a starting
+  point or reference for correct PTX patterns. Includes `autotune.yaml`.
 - **Roofline data** — `data/roofline/` for GPU peak specs
 - **Compile output** — registers, spills, SMEM, barriers
 

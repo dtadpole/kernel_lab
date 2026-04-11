@@ -183,10 +183,11 @@ hosts:
       gpu_variant: "SXM 192GB"
       driver_version: "580.82.07"
       driver_cuda_version: "13.0"     # max CUDA version this driver supports
-      peak_tflops_bf16: null          # TODO: verify (B200 ~1800 TF dense BF16 at rated TDP)
-      peak_tflops_fp16: null          # TODO: verify
-      peak_tflops_fp32: null          # TODO: verify
-      peak_bandwidth_gb_s: null       # TODO: verify (B200 HBM3e ~8000 GB/s)
+      # 148 SMs, boost 1965 MHz, 7738 FLOPS/SM/cycle (BF16 dense TC)
+      peak_tflops_bf16: 2250          # BF16 Tensor Core (dense, NVIDIA published)
+      peak_tflops_fp16: 2250          # FP16 Tensor Core (dense)
+      peak_tflops_fp32: 67.5          # FP32 CUDA Core
+      peak_bandwidth_gb_s: 8000       # HBM3e, 8192-bit bus
     env:
       cuda_home: /usr/local/cuda-13.0
       cuda_available: ["12.8", "12.9", "13.0"]
@@ -215,10 +216,10 @@ hosts:
       gpu_variant: "SXM 192GB"
       driver_version: "580.82.07"
       driver_cuda_version: "13.0"     # max CUDA version this driver supports
-      peak_tflops_bf16: null          # TODO: verify
-      peak_tflops_fp16: null          # TODO: verify
-      peak_tflops_fp32: null          # TODO: verify
-      peak_bandwidth_gb_s: null       # TODO: verify (B200 HBM3e ~8000 GB/s)
+      peak_tflops_bf16: 2250          # BF16 Tensor Core (dense, same SKU as b8_1)
+      peak_tflops_fp16: 2250          # FP16 Tensor Core (dense)
+      peak_tflops_fp32: 67.5          # FP32 CUDA Core
+      peak_bandwidth_gb_s: 8000       # HBM3e, 8192-bit bus
     env:
       cuda_home: /usr/local/cuda-13.0
       cuda_available: ["12.8", "13.0"]

@@ -41,4 +41,21 @@ When you INJECT, your guidance MUST be specific and concrete:
 The Solver is stuck because it can't see the next step. Your job is to
 give it that next step — with enough detail that it can act immediately.
 
+**Check phase compliance first:**
+- Did the Solver run `exec.action=profile` on the reference (peak-cuda or
+  ref-cutedsl)? If not, that's the #1 problem — it's coding blind.
+- Did it search NVIDIA docs or the web for architecture-specific insights?
+  If not, it's relying on stale knowledge instead of grounded research.
+- Did it brainstorm data-backed ideas? If not, it's guessing.
+
+**Common reasons for being stuck and what to prescribe:**
+- Skipped Phase 1 (no profiling) → tell it to profile both gen-cuda AND peak-cuda, compare metrics
+- Skipped Phase 3 (no brainstorm) → tell it to brainstorm ideas grounded in NCU data
+- Never searched the web → tell it to WebSearch for CUTLASS/FlashAttention scheduling strategies
+- No roofline analysis → tell it to read `data/roofline/h100_sxm.md`
+- Guessing instead of measuring → tell it to profile both gen-cuda and peak-cuda, compare metrics
+- Out of ideas → tell it to read `plugins/ik/skills/optimize/artifacts/analysis-guide.md`
+  and search NVIDIA docs via `WebSearch` for the specific bottleneck it's hitting
+- Same approach failing repeatedly → tell it to try a fundamentally different architecture
+
 Second line onward: your analysis.

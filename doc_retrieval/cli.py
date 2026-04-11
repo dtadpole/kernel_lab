@@ -64,7 +64,7 @@ def cmd_browse(cfg, overrides: dict) -> None:
 
     doc_id = overrides.get("doc_id", "")
     section_id = overrides.get("section_id")
-    depth = int(overrides.get("depth", 2))
+    depth = int(overrides.get("depth", 4))
 
     if not doc_id:
         print("Error: doc_id is required. Usage: browse doc_id=cuda-c-programming-guide", file=sys.stderr)

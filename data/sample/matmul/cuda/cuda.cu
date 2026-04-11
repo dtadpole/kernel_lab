@@ -46,6 +46,10 @@
 /* Number of N-quarters (64-wide WGMMA units) */
 #define NQ          (TILE_N / 64)
 
+/* Epilogue SMEM: 64×72 BF16 buffer per consumer (72 = 64+8 padding for bank conflicts) */
+#define EPI_STRIDE    72
+#define EPI_BUF_BYTES (64 * EPI_STRIDE * 2)   /* 9216 bytes per consumer */
+
 /* =========================================================================
  * PTX helpers
  * ========================================================================= */
@@ -151,42 +155,81 @@ void wgmma_m64n64k16(float (&d)[32], uint64_t da, uint64_t db, int scale_d) {
 }
 
 /* =========================================================================
- * Simple epilogue — direct stores from WGMMA registers
+ * Epilogue — SMEM-buffered vectorized coalesced stores (128-bit / uint4).
+ *
+ * 1. Each thread scatters its WGMMA registers into a 64×72 SMEM buffer
+ * 2. bar.sync within the warpgroup
+ * 3. Each thread reads a coalesced 128-bit (8 BF16) chunk from SMEM
+ * 4. Writes 128-bit to global memory (fully coalesced)
  * ========================================================================= */
 __device__ __forceinline__
-void store_acc_n64(__nv_bfloat16* C, float (&acc)[32],
-                   int ctaRow, int ctaCol, int M, int N, int local_tid) {
+void store_acc_n64_smem(__nv_bfloat16* C, float (&acc)[32],
+                        int ctaRow, int ctaCol, int M, int N,
+                        int local_tid, __nv_bfloat16* epi_buf, int bar_id,
+                        int last) {
     const int warp = local_tid / 32;
     const int lane = local_tid % 32;
 
+    /* Step 1: scatter registers → SMEM in WGMMA layout */
     #pragma unroll
     for (int p = 0; p < 8; p++) {
-        int col = ctaCol + (lane % 4) * 2 + p * 8;
-        int row0 = ctaRow + warp * 16 + lane / 4;
-        int row8 = row0 + 8;
-        if (row0 < M && col + 1 < N) {
-            C[row0 * N + col]     = __float2bfloat16(acc[4*p + 0]);
-            C[row0 * N + col + 1] = __float2bfloat16(acc[4*p + 1]);
+        const int col = (lane % 4) * 2 + p * 8;
+        const int row0 = warp * 16 + lane / 4;
+        const int row8 = row0 + 8;
+        *(__nv_bfloat162*)(epi_buf + row0 * EPI_STRIDE + col) = __halves2bfloat162(
+            __float2bfloat16(acc[4*p + 0]), __float2bfloat16(acc[4*p + 1]));
+        *(__nv_bfloat162*)(epi_buf + row8 * EPI_STRIDE + col) = __halves2bfloat162(
+            __float2bfloat16(acc[4*p + 2]), __float2bfloat16(acc[4*p + 3]));
+    }
+
+    /* Step 2: sync within warpgroup */
+    asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id));
+
+    /* Step 3-4: coalesced 128-bit reads from SMEM → 128-bit writes to global */
+    #pragma unroll
+    for (int iter = 0; iter < 4; iter++) {
+        const int row = iter * 16 + warp * 4 + lane / 8;
+        const int col = (lane % 8) * 8;
+        const int gRow = ctaRow + row;
+        const int gCol = ctaCol + col;
+        if (gRow < M && gCol + 7 < N) {
+            uint4 val = *(const uint4*)((const char*)epi_buf + (row * EPI_STRIDE + col) * 2);
+            *(uint4*)((char*)C + ((size_t)gRow * N + gCol) * 2) = val;
         }
-        if (row8 < M && col + 1 < N) {
-            C[row8 * N + col]     = __float2bfloat16(acc[4*p + 2]);
-            C[row8 * N + col + 1] = __float2bfloat16(acc[4*p + 3]);
-        }
+    }
+
+    if (!last) {
+        asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id));
     }
 }
 
 /* =========================================================================
  * Main kernel
  * ========================================================================= */
+/* GROUP_M tile swizzle: groups M-tiles so nearby blocks share B data in L2 */
+__device__ __forceinline__
+void get_tile_coords(int tile_id, int grid_m, int grid_n,
+                     int& ctaRow, int& ctaCol) {
+    const int GROUP_M  = 12;
+    const int group_id = tile_id / (GROUP_M * grid_n);
+    const int first_m  = group_id * GROUP_M;
+    const int group_sz = (first_m + GROUP_M <= grid_m) ? GROUP_M : (grid_m - first_m);
+    const int local_id = tile_id % (GROUP_M * grid_n);
+    ctaRow = (first_m + local_id % group_sz) * TILE_M;
+    ctaCol = (local_id / group_sz) * TILE_N;
+}
+
 __global__ void __launch_bounds__(THREADS, 1)
 matmul_wgmma(
     __nv_bfloat16* __restrict__ C, int M, int N, int K,
     const __grid_constant__ CUtensorMap tma_A,
-    const __grid_constant__ CUtensorMap tma_B)
+    const __grid_constant__ CUtensorMap tma_B,
+    int grid_m, int grid_n, int total_tiles)
 {
-    /* SMEM layout: [STAGES × (A_tile + B_tile)] [mbar_full] [mbar_empty] */
+    /* SMEM layout: [STAGES × (A+B)] [mbar_full] [mbar_empty] [epi_buf×2] */
     constexpr int MBAR_FULL_OFF  = STAGES * STAGE_BYTES;
     constexpr int MBAR_EMPTY_OFF = MBAR_FULL_OFF + 128;
+    constexpr int EPI_OFF        = MBAR_EMPTY_OFF + 128;
 
     extern __shared__ char smem[];
     uint64_t* mbar_full  = (uint64_t*)(smem + MBAR_FULL_OFF);
@@ -197,10 +240,6 @@ matmul_wgmma(
     const int numK  = (K + TILE_K - 1) / TILE_K;
     const int phases_per_tile = (numK + STAGES - 1) / STAGES;
     const int last_stage = (numK - 1) % STAGES;
-
-    const int grid_m = (M + TILE_M - 1) / TILE_M;
-    const int grid_n = (N + TILE_N - 1) / TILE_N;
-    const int total_tiles = grid_m * grid_n;
 
     /* Init barriers */
     if (tid == 0) {
@@ -222,10 +261,8 @@ matmul_wgmma(
             const int tile = (int)blockIdx.x + local_k * (int)gridDim.x;
             if (tile >= total_tiles) break;
 
-            const int tile_row = tile / grid_n;
-            const int tile_col = tile % grid_n;
-            const int ctaRow = tile_row * TILE_M;
-            const int ctaCol = tile_col * TILE_N;
+            int ctaRow, ctaCol;
+            get_tile_coords(tile, grid_m, grid_n, ctaRow, ctaCol);
 
             /* Wait for consumers to finish previous tile's last stage */
             if (local_k > 0) {
@@ -272,10 +309,8 @@ matmul_wgmma(
             const int tile = (int)blockIdx.x + local_k * (int)gridDim.x;
             if (tile >= total_tiles) break;
 
-            const int tile_row = tile / grid_n;
-            const int tile_col = tile % grid_n;
-            const int ctaRow = tile_row * TILE_M;
-            const int ctaCol = tile_col * TILE_N;
+            int ctaRow, ctaCol;
+            get_tile_coords(tile, grid_m, grid_n, ctaRow, ctaCol);
 
             const int phase_base = local_k * phases_per_tile;
 
@@ -323,11 +358,14 @@ matmul_wgmma(
             if (local_tid == 0)
                 mbarrier_arrive(&mbar_empty[(numK - 1) % STAGES]);
 
-            /* Epilogue */
+            /* Epilogue: SMEM-buffered vectorized stores */
             const int consumer_row = ctaRow + consumer_id * 64;
+            __nv_bfloat16* epi_buf = (__nv_bfloat16*)(smem + EPI_OFF + consumer_id * EPI_BUF_BYTES);
+            const int bar_id = consumer_id + 1;
             #pragma unroll
             for (int q = 0; q < NQ; q++)
-                store_acc_n64(C, acc[q], consumer_row, ctaCol + q * 64, M, N, local_tid);
+                store_acc_n64_smem(C, acc[q], consumer_row, ctaCol + q * 64,
+                                   M, N, local_tid, epi_buf, bar_id, q == NQ - 1);
         }
     }
 }
@@ -409,12 +447,12 @@ extern "C" int kernel_run(
     const int grid_n = (N + TILE_N - 1) / TILE_N;
     const int total_tiles = grid_m * grid_n;
     const int num_blocks = (total_tiles < num_sms) ? total_tiles : num_sms;
-    constexpr int SMEM = STAGES * STAGE_BYTES + 256;
+    constexpr int SMEM = STAGES * STAGE_BYTES + 256 + 2 * EPI_BUF_BYTES;
 
     cudaFuncSetAttribute(matmul_wgmma,
         cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     matmul_wgmma<<<num_blocks, THREADS, SMEM, stream>>>(
-        C, M, N, K, tma_A, tma_B);
+        C, M, N, K, tma_A, tma_B, grid_m, grid_n, total_tiles);
 
     return 0;
 }

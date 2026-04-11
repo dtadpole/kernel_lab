@@ -99,7 +99,6 @@ the code, notes, results). If no gem exists, start from scratch.
 Read and understand these before doing anything else:
 - **Your gen code** (if it exists from a previous gem)
 - **Reference implementations** — read the ACTUAL source code:
-  - `.peak/{arch}/{kernel}/cuda/cuda.cu` — the hand-tuned peak kernel
   - `data/ref/{kernel}/cutedsl/cutedsl.py` — the CuTe DSL reference
   - `data/ref/{kernel}/pytorch/pytorch.py` — the PyTorch reference
 - **Sample code** — `data/sample/{arch}/{kernel}/cuda/cuda.cu` — a simplified

@@ -5,7 +5,7 @@ Used by compile, trial, bench, and any future tool.
 
 Slug format: {source}-{name}
   - source: "ref" (data/ref/{kernel}/), "gen" (~/kernel_lab_kb/runs/<run_tag>/gen/{arch}/{kernel}/),
-            "peak" (.peak/{arch}/{kernel}/), or "sample" (data/sample/{kernel}/)
+            "peak" (.peak/{arch}/{kernel}/), or "sample" (data/sample/{arch}/{kernel}/)
   - name: file stem (e.g., "cublas", "cutedsl", "cuda")
 
 Full identifier: {kernel}/{impl_slug}  (e.g., "matmul/ref-pytorch")
@@ -15,7 +15,7 @@ File resolution: slug → try .py first, then .cu
   - gen-cuda     → ~/kernel_lab_kb/runs/<run_tag>/gen/sm90/matmul/cuda/cuda.cu
   - gen-cutedsl  → ~/kernel_lab_kb/runs/<run_tag>/gen/sm90/matmul/cutedsl/cutedsl.py
   - peak-cuda    → .peak/sm90/fa4/cuda/cuda.cu
-  - sample-cuda  → data/sample/matmul/cuda/cuda.cu
+  - sample-cuda  → data/sample/sm90/matmul/cuda/cuda.cu
 
 Helper files (dependencies of an entry point) are auto-discovered:
   - .py entry points: all other .py files in the same directory are included
@@ -36,8 +36,8 @@ def _ref_dir(kernel: str, data_root: Path | None = None) -> Path:
     return (data_root or _DEFAULT_DATA_ROOT) / "ref" / kernel
 
 
-def _sample_dir(kernel: str, data_root: Path | None = None) -> Path:
-    return (data_root or _DEFAULT_DATA_ROOT) / "sample" / kernel
+def _sample_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
+    return (data_root or _DEFAULT_DATA_ROOT) / "sample" / arch / kernel
 
 
 def _peak_dir(kernel: str, arch: str, data_root: Path | None = None) -> Path:
@@ -329,7 +329,7 @@ def resolve_impl(
     elif source == "peak":
         impl_dir = _peak_dir(kernel, arch, data_root) / name
     elif source == "sample":
-        impl_dir = _sample_dir(kernel, data_root) / name
+        impl_dir = _sample_dir(kernel, arch, data_root) / name
     else:
         impl_dir = _gen_dir(kernel, arch, data_root) / name
 
@@ -411,7 +411,7 @@ def list_impls(kernel: str, arch: str, *, data_root: Path | None = None) -> List
                 })
 
     _scan_dir(_ref_dir(kernel, data_root), "ref")
-    _scan_dir(_sample_dir(kernel, data_root), "sample")
+    _scan_dir(_sample_dir(kernel, arch, data_root), "sample")
     _scan_dir(_peak_dir(kernel, arch, data_root), "peak")
     _scan_dir(_gen_dir(kernel, arch, data_root), "gen")
 

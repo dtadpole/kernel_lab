@@ -501,9 +501,9 @@ def prepare_run(
     if ref_src.exists() and not ref_dst.exists():
         shutil.copytree(ref_src, ref_dst)
 
-    # 2b. Snapshot data/sample/<kernel>/ → sample/<kernel>/
-    sample_src = PROJECT_ROOT / "data" / "sample" / kernel
-    sample_dst = run_dir / "sample" / kernel
+    # 2b. Snapshot data/sample/<arch>/<kernel>/ → sample/<arch>/<kernel>/
+    sample_src = PROJECT_ROOT / "data" / "sample" / arch / kernel
+    sample_dst = run_dir / "sample" / arch / kernel
     if sample_src.exists() and not sample_dst.exists():
         shutil.copytree(sample_src, sample_dst)
 

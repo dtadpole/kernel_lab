@@ -1,0 +1,19 @@
+# Per-config autotune for SM100 TCGEN05 sample matmul.
+#
+# Only STAGES is tunable (TILE_M/N/K are fixed by TCGEN05 constraints).
+# Configs not listed use the default STAGES=4.
+
+configs:
+  mat-256x256:
+    autotune:
+      params:
+        STAGES: [2, 3, 4]
+  mat-512x512:
+    autotune:
+      params:
+        STAGES: [2, 3, 4, 5]
+  mat-1024x1024:
+    autotune:
+      params:
+        STAGES: [3, 4, 5]
+  # Larger configs: use default STAGES=4

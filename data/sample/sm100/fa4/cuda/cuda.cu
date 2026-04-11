@@ -172,14 +172,16 @@ fa_tcgen05(
     const float softmax_scale = rsqrtf((float)DIM);
     const float softmax_scale_log2 = softmax_scale * 1.4426950408889634f;
 
-    /* Alloc two TMEM regions: S (QK scores, 128×128) and O (output, 128×128) */
+    /* Alloc TMEM: S (128 cols for QK scores 128×128), O_lo/O_hi (64 each) */
     if (wid == 0) {
-        _alloc(tmem_slot, 128);      /* S_tmem at tmem_slot[0] */
-        _alloc(tmem_slot + 1, 128);  /* O_tmem at tmem_slot[1] */
+        _alloc(tmem_slot, 128);     /* S_tmem — QK scores */
+        _alloc(tmem_slot + 1, 64);  /* O_lo — output cols 0-63 */
+        _alloc(tmem_slot + 2, 64);  /* O_hi — output cols 64-127 */
     }
     __syncthreads();
     uint32_t S_tmem = tmem_slot[0];
-    uint32_t O_tmem = tmem_slot[1];
+    uint32_t O_lo   = tmem_slot[1];
+    uint32_t O_hi   = tmem_slot[2];
 
     if (tid == 0) {
         _mi(load_bar, 1);
@@ -190,8 +192,8 @@ fa_tcgen05(
     }
     __syncthreads();
 
-    /* Zero O_tmem accumulator */
-    for (int c = lid; c < 128; c += 32) _st1(O_tmem + c, 0);
+    /* Zero O accumulators */
+    for (int c = lid; c < 64; c += 32) { _st1(O_lo + c, 0); _st1(O_hi + c, 0); }
     _ws();
     __syncthreads();
 
@@ -224,10 +226,9 @@ fa_tcgen05(
         __syncthreads();
 
         /* ---- QK GEMM: S = Q × K^T ---- */
-        /* Zero S_tmem */
+        /* Zero S_tmem (128 cols) */
         for (int c = lid; c < 128; c += 32) _st1(S_tmem + c, 0);
-        _ws();
-        __syncthreads();
+        _ws(); __syncthreads();
 
         if (tid == 0) {
             _mi(mma_bar, 1);
@@ -261,11 +262,13 @@ fa_tcgen05(
         /* ---- Read S from TMEM, apply softmax in registers ---- */
         _fb(); __syncthreads(); _fa();
 
-        /* Read S: 128 columns → need two x64 loads (col 0-63, col 64-127) */
+        /* Read S (128 cols): two x64 loads at S_tmem and S_tmem+64.
+         * S_tmem was allocated with 128 cols, so +64 addresses cols 64-127
+         * for tcgen05.ld (NOT for tcgen05.mma — ld addressing is different). */
         uint32_t s_regs_lo[64], s_regs_hi[64];
         _ld64(s_regs_lo, S_tmem);
         _wl();
-        _ld64(s_regs_hi, S_tmem + 64);  /* second half of columns */
+        _ld64(s_regs_hi, S_tmem + 64);
         _wl();
 
         /* Softmax: find row max, compute exp, sum */
@@ -305,21 +308,18 @@ fa_tcgen05(
         rowsum = rowsum * rescale + local_sum;
 
         /* ---- Rescale O by rescale factor ---- */
-        /* O cols 0-63 in O_tmem, O cols 64-127 in S_tmem (from prev KV iter) */
         if (rescale > 0.0f && rescale < 1.0f) {
             uint32_t o_vals[64];
-            /* Rescale O_tmem (cols 0-63) */
-            _ld64(o_vals, O_tmem); _wl();
+            /* Rescale O_lo (cols 0-63) */
+            _ld64(o_vals, O_lo); _wl();
             for (int i = 0; i < 64; i++)
                 o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
-            _st64(O_tmem, o_vals); _ws();
-            /* Rescale S_tmem (cols 64-127 of O) — only if kv_id > 1 */
-            if (kv_id > 1) {
-                _ld64(o_vals, S_tmem); _wl();
-                for (int i = 0; i < 64; i++)
-                    o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
-                _st64(S_tmem, o_vals); _ws();
-            }
+            _st64(O_lo, o_vals); _ws();
+            /* Rescale O_hi (cols 64-127) */
+            _ld64(o_vals, O_hi); _wl();
+            for (int i = 0; i < 64; i++)
+                o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
+            _st64(O_hi, o_vals); _ws();
         }
         __syncthreads();
 
@@ -422,7 +422,7 @@ fa_tcgen05(
             uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
             uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
 
-            /* Pass 1: O_tmem += P × V_lo (output DIM cols 0-63) */
+            /* Pass 1: O_lo += P × V_lo (output DIM cols 0-63) */
             if (tid == 0) {
                 _mi(mma_bar, 1);
                 uint64_t vd0 = _desc(smem + V_OFF, 8 * 64 * 2);
@@ -430,19 +430,14 @@ fa_tcgen05(
                     uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
                                            : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
                     uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_tmem, pd, vd, idesc_pv, true);
+                    _mma(O_lo, pd, vd, idesc_pv, true);  /* accumulate */
                 }
                 _commit(mma_bar);
             }
             _mw(mma_bar, 0);
             __syncthreads();
 
-            /* Zero S_tmem for pass 2 (reuse as O cols 64-127 accumulator) */
-            for (int c = lid; c < 64; c += 32) _st1(S_tmem + c, 0);
-            _ws();
-            __syncthreads();
-
-            /* Pass 2: S_tmem += P × V_hi (output DIM cols 64-127) */
+            /* Pass 2: O_hi += P × V_hi (output DIM cols 64-127) */
             if (tid == 0) {
                 _mi(mma_bar, 1);
                 uint64_t vd0 = _desc(smem + V_OFF + HALF_BYTES, 8 * 64 * 2);
@@ -450,7 +445,7 @@ fa_tcgen05(
                     uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
                                            : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
                     uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(S_tmem, pd, vd, idesc_pv, (kk > 0));
+                    _mma(O_hi, pd, vd, idesc_pv, true);  /* accumulate */
                 }
                 _commit(mma_bar);
             }
@@ -462,17 +457,16 @@ fa_tcgen05(
     /* ---- Finalize: O = O / rowsum ---- */
     _fb(); __syncthreads(); _fa();
 
-    /* O cols 0-63 in O_tmem, O cols 64-127 in S_tmem */
-    uint32_t o_lo[64], o_hi[64];
-    _ld64(o_lo, O_tmem);
+    uint32_t o_lo_r[64], o_hi_r[64];
+    _ld64(o_lo_r, O_lo);
     _wl();
-    _ld64(o_hi, S_tmem);  /* S_tmem holds O cols 64-127 */
+    _ld64(o_hi_r, O_hi);
     _wl();
 
     float inv_sum = fast_rcp(rowsum);
     for (int i = 0; i < 64; i++) {
-        o_lo[i] = __float_as_int(__int_as_float(o_lo[i]) * inv_sum);
-        o_hi[i] = __float_as_int(__int_as_float(o_hi[i]) * inv_sum);
+        o_lo_r[i] = __float_as_int(__int_as_float(o_lo_r[i]) * inv_sum);
+        o_hi_r[i] = __float_as_int(__int_as_float(o_hi_r[i]) * inv_sum);
     }
 
     /* Write O to global */
@@ -483,7 +477,7 @@ fa_tcgen05(
         int gRow = q_block_id * BLOCK_Q + row;
         if (gRow < len_q && col < DIM) {
             int idx = (batch_id * S + gRow) * seq_stride + head_id * DIM + col;
-            O_global[idx] = __float2bfloat16(__int_as_float(o_lo[i]));
+            O_global[idx] = __float2bfloat16(__int_as_float(o_lo_r[i]));
         }
     }
     for (int i = 0; i < 64; i++) {
@@ -492,7 +486,7 @@ fa_tcgen05(
         int gRow = q_block_id * BLOCK_Q + row;
         if (gRow < len_q && col < DIM) {
             int idx = (batch_id * S + gRow) * seq_stride + head_id * DIM + col;
-            O_global[idx] = __float2bfloat16(__int_as_float(o_hi[i]));
+            O_global[idx] = __float2bfloat16(__int_as_float(o_hi_r[i]));
         }
     }
 
@@ -500,7 +494,8 @@ fa_tcgen05(
     __syncthreads();
     if (wid == 0) {
         _dealloc(S_tmem, 128);
-        _dealloc(O_tmem, 128);
+        _dealloc(O_lo, 64);
+        _dealloc(O_hi, 64);
     }
 }
 
@@ -533,7 +528,7 @@ extern "C" int kernel_run(
     __nv_bfloat16** outputs, int num_outputs,
     int n, cudaStream_t stream)
 {
-    if(!init_enc())return -1;
+    /* TMA uses cuTensorMapEncodeTiled directly (linked with -lcuda) */
 
     const char*cj=getenv("CUDA_EXEC_CONFIG_JSON");
     int B=parse_int_env("CUDA_EXEC_PARAM_BATCH_SIZE",0);
@@ -560,18 +555,23 @@ extern "C" int kernel_run(
     cuuint32_t el[2]={1,1};
 
     CUtensorMap tQ,tK,tV,tO;
-    if(s_enc(&tQ,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)Q,gd,gs,bx,el,
+    CUresult r;
+    r=cuTensorMapEncodeTiled(&tQ,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)Q,gd,gs,bx,el,
        CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
-       CU_TENSOR_MAP_L2_PROMOTION_NONE,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE))return -3;
-    if(s_enc(&tK,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)K,gd,gs,bxkv,el,
+       CU_TENSOR_MAP_L2_PROMOTION_NONE,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    if(r)return -3;
+    r=cuTensorMapEncodeTiled(&tK,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)K,gd,gs,bxkv,el,
        CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
-       CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE))return -4;
-    if(s_enc(&tV,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)V,gd,gs,bxkv,el,
+       CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    if(r)return -4;
+    r=cuTensorMapEncodeTiled(&tV,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)V,gd,gs,bxkv,el,
        CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
-       CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE))return -5;
-    if(s_enc(&tO,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)O,gd,gs,bx,el,
+       CU_TENSOR_MAP_L2_PROMOTION_L2_128B,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    if(r)return -5;
+    r=cuTensorMapEncodeTiled(&tO,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)O,gd,gs,bx,el,
        CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
-       CU_TENSOR_MAP_L2_PROMOTION_NONE,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE))return -6;
+       CU_TENSOR_MAP_L2_PROMOTION_NONE,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    if(r)return -6;
 
     int num_blocks=B*H*cdiv(S,BLOCK_Q);
     cudaFuncSetAttribute(fa_tcgen05,cudaFuncAttributeMaxDynamicSharedMemorySize,SMEM_TOTAL);

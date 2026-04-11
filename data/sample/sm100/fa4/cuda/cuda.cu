@@ -194,10 +194,9 @@ fa_tcgen05(
     }
     __syncthreads();
 
-    /* Zero O accumulators */
-    for (int c = lid; c < 64; c += 32) { _st1(O_lo + c, 0); _st1(O_hi + c, 0); }
-    _ws();
-    __syncthreads();
+    /* O accumulator in REGISTERS (avoid TMEM rescale roundtrip) */
+    float O_reg_lo[64], O_reg_hi[64];
+    for (int i = 0; i < 64; i++) { O_reg_lo[i] = 0.0f; O_reg_hi[i] = 0.0f; }
 
     /* Load Q (once per CTA) — two half-DIM TMA loads */
     if (tid == 0) {
@@ -316,21 +315,11 @@ fa_tcgen05(
         /* Update running sum: rowsum = rowsum * rescale + local_sum */
         rowsum = rowsum * rescale + local_sum;
 
-        /* ---- Rescale O by rescale factor ---- */
-        /* Always execute _ld64/_st64 (they are .sync.aligned — all threads must participate).
-         * Threads where rescale==1.0f effectively no-op. */
-        {
-            uint32_t o_vals[64];
-            _ld64(o_vals, O_lo); _wl();
-            for (int i = 0; i < 64; i++)
-                o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
-            _st64(O_lo, o_vals); _ws();
-            _ld64(o_vals, O_hi); _wl();
-            for (int i = 0; i < 64; i++)
-                o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
-            _st64(O_hi, o_vals); _ws();
+        /* ---- Rescale O in registers ---- */
+        for (int i = 0; i < 64; i++) {
+            O_reg_lo[i] *= rescale;
+            O_reg_hi[i] *= rescale;
         }
-        __syncthreads();
 
         /* ---- PV GEMM: O += P × V via TCGEN05 MMA ---- */
         /* Write P (F32 in regs) to SMEM as BF16 with 128B swizzle layout.
@@ -431,7 +420,9 @@ fa_tcgen05(
             uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
             uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
 
-            /* Pass 1: O_lo += P × V_lo (output DIM cols 0-63) */
+            /* PV Pass 1: O_lo_tmem = P × V_lo (fresh, no accumulate) */
+            for (int c = lid; c < 64; c += 32) _st1(O_lo + c, 0);
+            _ws(); __syncthreads();
             if (tid == 0) {
                 _mi(mma_bar, 1);
                 uint64_t vd0 = _desc(smem + V_OFF, 8 * 64 * 2);
@@ -439,14 +430,15 @@ fa_tcgen05(
                     uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
                                            : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
                     uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_lo, pd, vd, idesc_pv, true);  /* accumulate */
+                    _mma(O_lo, pd, vd, idesc_pv, (kk > 0));
                 }
                 _commit(mma_bar);
             }
-            _mw(mma_bar, 0);
-            __syncthreads();
+            _mw(mma_bar, 0); __syncthreads();
 
-            /* Pass 2: O_hi += P × V_hi (output DIM cols 64-127) */
+            /* PV Pass 2: O_hi_tmem = P × V_hi (fresh) */
+            for (int c = lid; c < 64; c += 32) _st1(O_hi + c, 0);
+            _ws(); __syncthreads();
             if (tid == 0) {
                 _mi(mma_bar, 1);
                 uint64_t vd0 = _desc(smem + V_OFF + HALF_BYTES, 8 * 64 * 2);
@@ -454,48 +446,46 @@ fa_tcgen05(
                     uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
                                            : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
                     uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_hi, pd, vd, idesc_pv, true);  /* accumulate */
+                    _mma(O_hi, pd, vd, idesc_pv, (kk > 0));
                 }
                 _commit(mma_bar);
             }
-            _mw(mma_bar, 0);
+            _mw(mma_bar, 0); __syncthreads();
+
+            /* Read PV result from TMEM, add to O registers */
+            _fb(); __syncthreads(); _fa();
+            {
+                uint32_t pv_lo[64], pv_hi[64];
+                _ld64(pv_lo, O_lo); _wl();
+                _ld64(pv_hi, O_hi); _wl();
+                for (int i = 0; i < 64; i++) {
+                    O_reg_lo[i] += __int_as_float(pv_lo[i]);
+                    O_reg_hi[i] += __int_as_float(pv_hi[i]);
+                }
+            }
             __syncthreads();
         }
     }
 
-    /* ---- Finalize: O = O / rowsum ---- */
-    _fb(); __syncthreads(); _fa();
-
-    uint32_t o_lo_r[64], o_hi_r[64];
-    _ld64(o_lo_r, O_lo);
-    _wl();
-    _ld64(o_hi_r, O_hi);
-    _wl();
-
+    /* ---- Finalize: O = O_reg / rowsum ---- */
     float inv_sum = fast_rcp(rowsum);
     for (int i = 0; i < 64; i++) {
-        o_lo_r[i] = __float_as_int(__int_as_float(o_lo_r[i]) * inv_sum);
-        o_hi_r[i] = __float_as_int(__int_as_float(o_hi_r[i]) * inv_sum);
+        O_reg_lo[i] *= inv_sum;
+        O_reg_hi[i] *= inv_sum;
     }
 
-    /* Write O to global */
+    /* Write O from registers to global.
+     * TMEM layout (32x32b): reg_idx → col, lane → row within 32, warp → row offset. */
+    int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
+    int gRow = q_block_id * BLOCK_Q + my_row;
     int seq_stride = H * DIM;
-    for (int i = 0; i < 64; i++) {
-        int row, col;
-        tmem_coords_128(wid, lid, i, row, col);
-        int gRow = q_block_id * BLOCK_Q + row;
-        if (gRow < len_q && col < DIM) {
-            int idx = (batch_id * S + gRow) * seq_stride + head_id * DIM + col;
-            O_global[idx] = __float2bfloat16(__int_as_float(o_lo_r[i]));
+    if (gRow < len_q) {
+        int base_idx = (batch_id * S + gRow) * seq_stride + head_id * DIM;
+        for (int i = 0; i < 64; i++) {
+            O_global[base_idx + i] = __float2bfloat16(O_reg_lo[i]);
         }
-    }
-    for (int i = 0; i < 64; i++) {
-        int row, col;
-        tmem_coords_128(wid, lid, 64 + i, row, col);
-        int gRow = q_block_id * BLOCK_Q + row;
-        if (gRow < len_q && col < DIM) {
-            int idx = (batch_id * S + gRow) * seq_stride + head_id * DIM + col;
-            O_global[idx] = __float2bfloat16(__int_as_float(o_hi_r[i]));
+        for (int i = 0; i < 64; i++) {
+            O_global[base_idx + 64 + i] = __float2bfloat16(O_reg_hi[i]);
         }
     }
 

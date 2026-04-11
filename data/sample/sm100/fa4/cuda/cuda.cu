@@ -278,36 +278,36 @@ fa_tcgen05(
         int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
         int q_pos = q_block_id * BLOCK_Q + my_row;
 
+        /* Scale by softmax_scale_log2 (matching SM90: pre-scale for exp2) */
         float local_max = -FLT_MAX;
         for (int i = 0; i < 64; i++) {
-            float v = __int_as_float(s_regs_lo[i]) * softmax_scale;
-            /* Causal mask: col i = kv position kv_id*BLOCK_KV + i */
-            if (is_causal && (kv_id * BLOCK_KV + i) > q_pos) v = -1e9f;
+            float v = __int_as_float(s_regs_lo[i]) * softmax_scale_log2;
+            if (is_causal && (kv_id * BLOCK_KV + i) > q_pos) v = -FLT_MAX;
             s_regs_lo[i] = __float_as_int(v);
             local_max = fmaxf(local_max, v);
         }
         for (int i = 0; i < 64; i++) {
-            float v = __int_as_float(s_regs_hi[i]) * softmax_scale;
-            if (is_causal && (kv_id * BLOCK_KV + 64 + i) > q_pos) v = -1e9f;
+            float v = __int_as_float(s_regs_hi[i]) * softmax_scale_log2;
+            if (is_causal && (kv_id * BLOCK_KV + 64 + i) > q_pos) v = -FLT_MAX;
             s_regs_hi[i] = __float_as_int(v);
             local_max = fmaxf(local_max, v);
         }
 
-        /* Online softmax: update global max and rescale */
+        /* Online softmax (exp2-based, matching SM90) */
         float new_max = fmaxf(rowmax, local_max);
-        float rescale = (rowmax > -FLT_MAX) ? expf(rowmax - new_max) : 0.0f;
+        float rescale = (rowmax > -FLT_MAX)
+            ? fast_exp2f(rowmax - new_max) : 0.0f;
         rowmax = new_max;
 
-        /* Compute exp and sum */
         float local_sum = 0.0f;
         float neg_max = -new_max;
         for (int i = 0; i < 64; i++) {
-            float v = expf(__int_as_float(s_regs_lo[i]) + neg_max);
+            float v = fast_exp2f(__int_as_float(s_regs_lo[i]) + neg_max);
             s_regs_lo[i] = __float_as_int(v);
             local_sum += v;
         }
         for (int i = 0; i < 64; i++) {
-            float v = expf(__int_as_float(s_regs_hi[i]) + neg_max);
+            float v = fast_exp2f(__int_as_float(s_regs_hi[i]) + neg_max);
             s_regs_hi[i] = __float_as_int(v);
             local_sum += v;
         }

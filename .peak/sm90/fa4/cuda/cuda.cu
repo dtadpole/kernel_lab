@@ -270,6 +270,25 @@ uint32_t pack_bf16(float a, float b) {
     return result;
 }
 
+/* --- Apply O accumulator rescaling ------------------------------------ */
+
+template<bool IS_CAUSAL>
+__device__ __forceinline__
+void apply_o_rescale(float O_acc[64], const float o_rescale[2]) {
+    #pragma unroll
+    for (int half = 0; half < 2; half++) {
+        if constexpr (IS_CAUSAL) { if (o_rescale[half] == 1.0f) continue; }
+        const float r = o_rescale[half];
+        #pragma unroll
+        for (int p4 = 0; p4 < 8; p4++) {
+            O_acc[(p4<<2)|(half<<1)|0] *= r;
+            O_acc[(p4<<2)|(half<<1)|1] *= r;
+            O_acc[32+(p4<<2)|(half<<1)|0] *= r;
+            O_acc[32+(p4<<2)|(half<<1)|1] *= r;
+        }
+    }
+}
+
 /* ======================================================================
  *  Kernel
  * ====================================================================== */
@@ -440,6 +459,9 @@ void flash_attention_2wg(
         named_barrier_arrive(2, 256);
     }
 
+    /* Wave 2: persistent o_rescale, initialized to no-op for first iteration */
+    float o_rescale[2] = {1.0f, 1.0f};
+
     mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
 
     /* ---- PROLOGUE: QK[0] ---- */
@@ -590,9 +612,14 @@ void flash_attention_2wg(
         }
         wgmma_commit_group();
 
-        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
+        /* Wave 2: Apply o_rescale from PREVIOUS iteration while QK WGMMA runs
+         * on tensor cores. QK writes S_acc (not O_acc), so 64 FMUL ALU ops
+         * on O_acc overlap freely with tensor core activity (~256 cycle saving). */
+        apply_o_rescale<IS_CAUSAL>(O_acc, o_rescale);
+
         const uint32_t cur_V_lo = (v_stage == 0) ? V0_lo : V1_lo;
         const uint64_t dv = make_wgmma_desc_lbo(cur_V_lo, HALF_KV, STRIDE);
+        mbarrier_wait_parity(&V_full[v_stage], v_full_phase);
 
         wgmma_fence();
         #pragma unroll
@@ -615,7 +642,7 @@ void flash_attention_2wg(
         if (k_stage == 0) k_full_phase ^= 1;
 
         /* Softmax — causal: tree reduction, noncausal: interleaved h0/h1 */
-        float o_rescale[2];
+        /* o_rescale[] is persistent across iterations — declared before mainloop */
         if constexpr (IS_CAUSAL) {
             const int needs_mask = (kv_id + 1) * BLOCK_KV > q_block_id * BLOCK_Q + cwg * 64;
             #pragma unroll
@@ -714,18 +741,8 @@ void flash_attention_2wg(
         v_stage ^= 1;
         if (v_stage == 0) v_full_phase ^= 1;
 
-        /* Rescale: causal=conditional skip, noncausal=branchless */
-        #pragma unroll
-        for (int half = 0; half < 2; half++) {
-            if constexpr (IS_CAUSAL) { if (o_rescale[half] == 1.0f) continue; }
-            #pragma unroll
-            for (int p4 = 0; p4 < 8; p4++) {
-                O_acc[(p4<<2)|(half<<1)|0] *= o_rescale[half];
-                O_acc[(p4<<2)|(half<<1)|1] *= o_rescale[half];
-                O_acc[32+(p4<<2)|(half<<1)|0] *= o_rescale[half];
-                O_acc[32+(p4<<2)|(half<<1)|1] *= o_rescale[half];
-            }
-        }
+        /* Wave 2: rescale moved to start of NEXT iteration (after QK commit_group)
+         * to overlap ALU with tensor cores. Last iter's rescale applied post-mainloop. */
 
         #pragma unroll
         for (int ks = 0; ks < BLOCK_KV / 16; ks++) {
@@ -738,6 +755,11 @@ void flash_attention_2wg(
         if (kv_id + 1 < max_kv_iter)
             mbarrier_wait_parity(&K_full[k_stage], k_full_phase);
     }
+
+    /* Wave 2: Apply last iteration's o_rescale before epilogue PV.
+     * max_kv_iter==1: o_rescale is {1.0f,1.0f} → no-op.
+     * max_kv_iter>1: applies the rescale from the final mainloop iteration. */
+    apply_o_rescale<IS_CAUSAL>(O_acc, o_rescale);
 
     /* ---- EPILOGUE: PV[last] ---- */
     {
@@ -781,7 +803,7 @@ void flash_attention_2wg(
         }
     }
 
-    /* Write O from registers → Q SMEM (reuse Q region, swizzled layout) */
+    /* Write O from registers -> Q SMEM (reuse Q region, swizzled layout) */
     #pragma unroll
     for (int half = 0; half < 2; half++) {
         const int local_row = mywarp * 16 + half * 8 + (lane_id / 4);
@@ -936,7 +958,7 @@ extern "C" int kernel_run(
     if (res != CUDA_SUCCESS) return -6;
 
     /* Two template specializations: causal and non-causal.
-     * Eliminates all runtime is_causal branches — compiler optimizes
+     * Eliminates all runtime is_causal branches -- compiler optimizes
      * away dead code for each specialization. */
     auto kernel_c  = flash_attention_2wg<BLOCK_Q, BLOCK_KV, DIM_CONST, true>;
     auto kernel_nc = flash_attention_2wg<BLOCK_Q, BLOCK_KV, DIM_CONST, false>;

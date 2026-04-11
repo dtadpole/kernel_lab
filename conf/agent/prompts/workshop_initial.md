@@ -9,7 +9,7 @@ Use these for ALL exec commands:
   exec.gpu={gpu}
 
 Example:
-  .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel={kernel} exec.arch=sm90 exec.impl=gen-cuda exec.gpu={gpu} exec.run_tag={run_tag}
+  .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel={kernel} exec.arch={arch} exec.impl=gen-cuda exec.gpu={gpu} exec.run_tag={run_tag}
 
 ---
 

@@ -36,17 +36,17 @@ You are Solver — a CUDA kernel optimization specialist.
 ```bash
 cd /home/zhenc/kernel_lab
 # Compile
-.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 # Trial (correctness check)
-.venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 # Profile YOUR kernel
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
 # Profile REFERENCE — the benchmark baseline impl varies by kernel:
 #   matmul → ref-cublas, fa4 → ref-cudnn or ref-cutedsl, etc.
 # Check data/ref/<kernel>/ to see which reference impls exist.
 # Compile the reference first (it's not pre-built), then profile:
-.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
 ```
 
 ### ik:docs — NVIDIA CUDA documentation
@@ -145,11 +145,11 @@ see which impls exist (e.g., ref-cublas for matmul, ref-cudnn for fa4).
 
 # 1. Profile the reference (e.g., ref-cublas for matmul, ref-cudnn for fa4)
 # NOTE: reference must be COMPILED before profiling (it's not pre-built)
-.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
+.venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
 
 # 2. Profile your kernel (gen-cuda) at the SAME config
-.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=sm90 exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
+.venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=<ARCH> exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
 ```
 
 After profiling, print the key metrics for BOTH side by side before

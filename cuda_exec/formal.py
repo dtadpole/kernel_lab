@@ -435,6 +435,202 @@ def format_results_table(bench_result: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Per-config autotune: compile + trial per combo group
+# ---------------------------------------------------------------------------
+
+def _per_config_compile_and_trial(
+    *,
+    cu_impl: dict,
+    at_result,
+    py_impls: list,
+    configs: dict,
+    run_tag: str,
+    kernel: str,
+    timeout_seconds: int,
+) -> dict:
+    """Handle per-config autotune: group configs by combo, compile+trial per group.
+
+    Two-phase approach:
+      Phase 1 — Compile ALL groups sequentially (each needs its own NVCC_EXTRA_FLAGS).
+      Phase 2 — Trial ALL groups sequentially (GPU needs exclusive access).
+
+    Returns dict with:
+        impl_result: dict (merged trial results across all groups)
+    """
+    import os
+    from collections import defaultdict
+
+    per_config = at_result.per_config_results
+
+    # Step 1: Group autotuned configs by winning combo's defines_flags
+    groups: Dict[str, List[str]] = defaultdict(list)
+    for config_slug, pcw in per_config.items():
+        groups[pcw.defines_flags].append(config_slug)
+
+    logger.info("[%s] per-config autotune: %d unique combos for %d configs",
+                cu_impl["slug"], len(groups), len(per_config))
+
+    # ================================================================
+    # Phase 1: Compile ALL groups — collect binaries
+    # ================================================================
+    compile_impls = {cu_impl["slug"]: dict(cu_impl["files"])}
+    for py_impl in py_impls:
+        compile_impls[py_impl["slug"]] = dict(py_impl["files"])
+
+    # compiled_groups: {defines_flags: {"meta": ..., "binary": ..., "cr": ..., "config_slugs": ...}}
+    compiled_groups: Dict[str, dict] = {}
+    all_compile_ok = True
+    compile_results_all: Dict[str, dict] = {}
+
+    compile_phase_start = time.time()
+    for group_idx, (defines_flags, group_config_slugs) in enumerate(groups.items()):
+        unique_rev = (int(time.time_ns()) % 10000000) + group_idx
+        meta = Metadata(
+            run_tag=run_tag,
+            version="v1",
+            direction_id=0,
+            direction_slug=f"{kernel}-{cu_impl['slug']}",
+            revision=unique_rev,
+        )
+
+        # Set NVCC_EXTRA_FLAGS for this group's defines
+        old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")
+        existing = old_extra_flags or ""
+        os.environ["NVCC_EXTRA_FLAGS"] = f"{existing} {defines_flags}".strip()
+
+        logger.info("[%s] compile group %d/%d: %s (configs: %s)",
+                    cu_impl["slug"], group_idx + 1, len(groups),
+                    defines_flags, ", ".join(group_config_slugs))
+
+        try:
+            compile_start = time.time()
+            compile_req = CompileRequest(
+                metadata=meta,
+                timeout_seconds=timeout_seconds,
+                impls=compile_impls,
+            )
+            compile_resp = compile_endpoint(compile_req)
+            cr = compile_resp.model_dump(mode="json")
+            logger.info("[%s] compile group %d done (%.1fs)",
+                        cu_impl["slug"], group_idx + 1, time.time() - compile_start)
+        finally:
+            if old_extra_flags is not None:
+                os.environ["NVCC_EXTRA_FLAGS"] = old_extra_flags
+            else:
+                os.environ.pop("NVCC_EXTRA_FLAGS", None)
+
+        compile_results_all[defines_flags] = cr
+
+        if not compile_resp.all_ok:
+            logger.warning("[%s] compile group %d failed", cu_impl["slug"], group_idx + 1)
+            all_compile_ok = False
+            compiled_groups[defines_flags] = {
+                "meta": meta, "binary": None, "cr": cr,
+                "config_slugs": group_config_slugs,
+            }
+            continue
+
+        # Resolve binary
+        try:
+            workspace = resolve_workspace_bundle(**meta.model_dump())
+            target_path, _ = _primary_artifact_from_manifest(workspace)
+            binary_path = str(target_path)
+            logger.info("[%s] group %d binary: %s", cu_impl["slug"], group_idx + 1, target_path)
+        except Exception as exc:
+            logger.warning("[%s] binary resolution failed for group %d: %s",
+                          cu_impl["slug"], group_idx + 1, exc)
+            binary_path = None
+
+        compiled_groups[defines_flags] = {
+            "meta": meta, "binary": binary_path, "cr": cr,
+            "config_slugs": group_config_slugs,
+        }
+
+    logger.info("[%s] compile phase done (%.1fs): %d/%d groups have binaries",
+                cu_impl["slug"], time.time() - compile_phase_start,
+                sum(1 for g in compiled_groups.values() if g["binary"]),
+                len(compiled_groups))
+
+    # ================================================================
+    # Phase 2: Trial ALL groups — sequential (GPU exclusive)
+    # ================================================================
+    all_trial_configs: Dict[str, dict] = {}
+
+    trial_phase_start = time.time()
+    for defines_flags, group in compiled_groups.items():
+        group_config_slugs = group["config_slugs"]
+
+        if group["binary"] is None:
+            for cs in group_config_slugs:
+                all_trial_configs[cs] = {"status": "error", "impls": {}}
+            continue
+
+        group_configs = {s: configs[s] for s in group_config_slugs if s in configs}
+        binary_map_str = f"{cu_impl['slug']}={group['binary']}"
+
+        logger.info("[%s] trial group: %d configs with %s",
+                    cu_impl["slug"], len(group_configs), defines_flags)
+
+        trial_start = time.time()
+        trial_req = TrialRequest(
+            metadata=group["meta"],
+            timeout_seconds=timeout_seconds,
+            configs=group_configs,
+            binary_map=binary_map_str,
+        )
+        trial_resp = trial_endpoint(trial_req)
+        trial_result = trial_resp.model_dump(mode="json")
+        logger.info("[%s] trial group done (%.1fs)",
+                    cu_impl["slug"], time.time() - trial_start)
+
+        for config_slug, config_output in trial_result.get("configs", {}).items():
+            all_trial_configs[config_slug] = config_output
+
+    logger.info("[%s] trial phase done (%.1fs)",
+                cu_impl["slug"], time.time() - trial_phase_start)
+
+    # ================================================================
+    # Step 3: Build merged result
+    # ================================================================
+    merged_trial = {
+        "all_ok": all(
+            cfg.get("status") != "error"
+            for cfg in all_trial_configs.values()
+        ),
+        "configs": all_trial_configs,
+    }
+
+    impl_result = {
+        "impl": cu_impl["slug"],
+        "compile_ok": all_compile_ok,
+        "trial_ok": merged_trial["all_ok"],
+        "compile_results": compile_results_all,
+        "trial_result": merged_trial,
+    }
+
+    impl_result["autotune"] = {
+        "total_combos": at_result.total_combos,
+        "valid_combos": at_result.valid_combos,
+        "compiled_ok": at_result.compiled_ok,
+        "benchmarked_ok": at_result.benchmarked_ok,
+        "duration_s": round(at_result.duration_s, 1),
+        "num_groups": len(groups),
+        "configs_without_autotune": at_result.configs_without_autotune,
+        "per_config_winners": {
+            slug: {
+                "combo": pcw.best_combo,
+                "tag": pcw.best_tag,
+                "median_ms": pcw.best_median_ms,
+                "defines_flags": pcw.defines_flags,
+            }
+            for slug, pcw in per_config.items()
+        },
+    }
+
+    return {"impl_result": impl_result}
+
+
 def formal_benchmark(
     kernel: str,
     arch: str,
@@ -511,7 +707,7 @@ def formal_benchmark(
     run_tag = f"bench-{kernel}-{int(time.time())}"
 
     refs = [r for r in resolved if r["source"] in ("ref", "peak")]
-    gens = [r for r in resolved if r["source"] == "gen"]
+    gens = [r for r in resolved if r["source"] in ("gen", "sample")]
 
     # Golden = first ref (alphabetical). Used for speedup ratios.
     # Correctness is only valid between impls sharing the same input
@@ -636,8 +832,7 @@ print(json.dumps({{"ok": True, "configs": results}}))
             compile_metadata[cu_impl["slug"]] = meta
 
             # --- Autotune (gen impls only) ---
-            autotune_defines = ""
-            if cu_impl["source"] == "gen":
+            if cu_impl["source"] in ("gen", "sample"):
                 autotune_yaml = Path(cu_impl["entry_point"]).parent / "autotune.yaml"
                 if autotune_yaml.exists():
                     try:
@@ -659,29 +854,36 @@ print(json.dumps({{"ok": True, "configs": results}}))
                             arch=compile_arch,
                             env_base=autotune_env,
                         )
-                        autotune_defines = at_result.defines_flags
                         at_report = format_autotune_report(at_result)
                         logger.info("[%s] autotune done (%.1fs)\n%s",
                                     cu_impl["slug"], time.time() - at_start, at_report)
                         print(at_report, file=sys.stderr)
                         autotune_results[cu_impl["slug"]] = at_result
+
+                        # Per-config compile+trial per combo group
+                        pc_result = _per_config_compile_and_trial(
+                            cu_impl=cu_impl,
+                            at_result=at_result,
+                            py_impls=py_impls,
+                            configs=configs,
+                            run_tag=run_tag,
+                            kernel=kernel,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        results[cu_impl["slug"]] = pc_result["impl_result"]
+                        continue  # skip default compile+trial below
+
                     except Exception as exc:
                         logger.warning("[%s] autotune failed: %s — compiling with defaults",
                                        cu_impl["slug"], exc)
 
-            # --- Compile: only stage THIS impl's .cu + .py impls for trial ---
+            # --- Default: compile with kernel's default #define values ---
             compile_impls = {}
             compile_impls[cu_impl["slug"]] = dict(cu_impl["files"])
             for py_impl in py_impls:
                 compile_impls[py_impl["slug"]] = dict(py_impl["files"])
 
-            old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")
-            if autotune_defines:
-                existing = old_extra_flags or ""
-                os.environ["NVCC_EXTRA_FLAGS"] = f"{existing} {autotune_defines}".strip()
-
-            logger.info("[%s] compile start%s", cu_impl["slug"],
-                        f" (autotune: {autotune_defines})" if autotune_defines else "")
+            logger.info("[%s] compile start", cu_impl["slug"])
             compile_start = time.time()
             compile_req = CompileRequest(
                 metadata=meta,
@@ -692,12 +894,6 @@ print(json.dumps({{"ok": True, "configs": results}}))
             cr = compile_resp.model_dump(mode="json")
             compile_results[cu_impl["slug"]] = cr
             logger.info("[%s] compile done (%.1fs)", cu_impl["slug"], time.time() - compile_start)
-
-            if autotune_defines:
-                if old_extra_flags is not None:
-                    os.environ["NVCC_EXTRA_FLAGS"] = old_extra_flags
-                else:
-                    os.environ.pop("NVCC_EXTRA_FLAGS", None)
 
             if not compile_resp.all_ok:
                 results[cu_impl["slug"]] = {
@@ -763,16 +959,16 @@ print(json.dumps({{"ok": True, "configs": results}}))
                 at = autotune_results.get(slug)
                 if at is not None:
                     impl_result["autotune"] = {
-                        "best_combo": at.best_combo,
-                        "best_tag": at.best_tag,
-                        "best_median_ms": at.best_median_ms,
-                        "defines_flags": at.defines_flags,
                         "total_combos": at.total_combos,
                         "valid_combos": at.valid_combos,
                         "compiled_ok": at.compiled_ok,
                         "benchmarked_ok": at.benchmarked_ok,
                         "duration_s": round(at.duration_s, 1),
-                        "top_results": at.all_results[:5],
+                        "per_config_winners": {
+                            s: {"combo": p.best_combo, "tag": p.best_tag,
+                                "median_ms": p.best_median_ms, "defines_flags": p.defines_flags}
+                            for s, p in at.per_config_results.items()
+                        },
                     }
                 results[slug] = impl_result
 

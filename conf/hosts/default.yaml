@@ -174,3 +174,65 @@ hosts:
         cuda_visible_devices: "6"
     benchmark:
       cuda_visible_devices: "4,5"
+
+  b8_1:
+    ssh_host: "devgpu004.maz2.facebook.com"
+    hardware:
+      gpu: "NVIDIA B200"
+      gpu_count: 8
+      gpu_variant: "SXM 192GB"
+      driver_version: "580.82.07"
+      driver_cuda_version: "13.0"     # max CUDA version this driver supports
+      peak_tflops_bf16: null          # TODO: verify (B200 ~1800 TF dense BF16 at rated TDP)
+      peak_tflops_fp16: null          # TODO: verify
+      peak_tflops_fp32: null          # TODO: verify
+      peak_bandwidth_gb_s: null       # TODO: verify (B200 HBM3e ~8000 GB/s)
+    env:
+      cuda_home: /usr/local/cuda-13.0
+      cuda_available: ["12.8", "13.0"]
+      torch_cuda: "cu130"
+      torch_cuda_arch: "10.0"        # Blackwell = sm_100
+      ld_preload: null                # fbcode libcuda 580.82.07 matches driver — no workaround needed
+      python: /usr/local/bin/python3  # 3.12.13+meta
+      tvm_ffi_disable_torch_c_dlpack: true
+    network:
+      internet: true
+      proxy_bypass_method: null       # direct internet
+      pypi_nvidia_blocked: false
+    services:
+      cuda_exec:
+        port: 8980
+        cuda_visible_devices: "7"
+    benchmark:
+      cuda_visible_devices: "4,5"
+
+  b8_2:
+    ssh_host: null                    # TODO: fill in devvm hostname
+    hardware:
+      gpu: "NVIDIA B200"
+      gpu_count: 8
+      gpu_variant: null               # TODO: e.g. "SXM 192GB"
+      driver_version: null            # TODO: verify with nvidia-smi
+      driver_cuda_version: null       # TODO: max CUDA version this driver supports
+      peak_tflops_bf16: null          # TODO: verify
+      peak_tflops_fp16: null          # TODO: verify
+      peak_tflops_fp32: null          # TODO: verify
+      peak_bandwidth_gb_s: null       # TODO: verify (B200 HBM3e ~8000 GB/s)
+    env:
+      cuda_home: null                 # TODO: verify installed CUDA toolkit
+      cuda_available: []              # TODO: list installed CUDA versions
+      torch_cuda: null                # TODO: e.g. "cu130"
+      torch_cuda_arch: "10.0"        # Blackwell = sm_100
+      ld_preload: null                # TODO: check if fbcode libcuda workaround needed
+      python: /usr/local/bin/python3  # TODO: verify
+      tvm_ffi_disable_torch_c_dlpack: true
+    network:
+      internet: null                  # TODO: verify proxy/internet access
+      proxy_bypass_method: null       # TODO: verify
+      pypi_nvidia_blocked: null       # TODO: verify
+    services:
+      cuda_exec:
+        port: 8980
+        cuda_visible_devices: "7"
+    benchmark:
+      cuda_visible_devices: "4,5"

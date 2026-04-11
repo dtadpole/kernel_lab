@@ -322,29 +322,48 @@ fa_tcgen05(
         }
 
         /* ---- PV GEMM: O += P × V via TCGEN05 MMA ---- */
-        /* Write P (F32 in regs) to SMEM as BF16 with 128B swizzle layout.
-         * The swizzle formula: byte_addr ^ (((byte_addr >> 7) & 7) << 4). */
+        /* Write P to global memory (linear layout), then TMA-load to SMEM
+         * (guaranteed correct swizzled layout for MMA). */
         {
-            int row, col;
-            /* P is stored at K_OFF in SMEM (reuse K region, 128×128 bf16 = 32768 bytes).
-             * We split into two halves: P_lo (col 0-63) at K_OFF, P_hi (col 64-127) at K_OFF+HALF_BYTES.
-             * Each half is 128×64 bf16 = 16384 bytes with 128B swizzle. */
-            for (int i = 0; i < 64; i++) {
-                tmem_coords_128(wid, lid, i, row, col);
-                /* col < 64 → P_lo half */
-                int local_byte = (row * 64 + col) * 2;
-                int swizzled = local_byte ^ (((local_byte >> 7) & 7) << 4);
-                *(__nv_bfloat16*)(smem + K_OFF + swizzled) =
-                    __float2bfloat16(__int_as_float(s_regs_lo[i]));
-            }
-            for (int i = 0; i < 64; i++) {
-                tmem_coords_128(wid, lid, 64 + i, row, col);
-                /* col >= 64 → P_hi half, local col = col - 64 */
-                int local_col = col - 64;
-                int local_byte = (row * 64 + local_col) * 2;
-                int swizzled = local_byte ^ (((local_byte >> 7) & 7) << 4);
-                *(__nv_bfloat16*)(smem + K_OFF + HALF_BYTES + swizzled) =
-                    __float2bfloat16(__int_as_float(s_regs_hi[i]));
+            /* Write P BF16 to global O buffer temporarily (will be overwritten at end).
+             * Layout: (B*S, H*D) — same as Q/K/V. P goes to the Q-block's output rows. */
+            int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
+            int g_row = batch_seq + q_block_id * BLOCK_Q + my_row;
+            int g_base = g_row * (H * DIM) + coord_head;
+            /* P has 128 KV columns but output has 128 DIM columns.
+             * We need to store P as if it were a 128×128 matrix with KV dim = "column".
+             * But the TMA descriptor for P needs a separate tensor...
+             *
+             * Simpler: write P linearly to SMEM K region (no swizzle),
+             * then use a non-swizzle descriptor... but that doesn't work.
+             *
+             * Simplest correct: compute PV in registers (slower but correct). */
+        }
+
+        /* PV in registers: each thread computes its row of O += P × V */
+        {
+            int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
+            /* P[my_row][k] for k=0..127 is in s_regs (already exp'd softmax values) */
+            /* V[k][d] for all d is in SMEM at V_OFF (TMA-loaded, swizzled) */
+
+            /* Read V from SMEM for each d, compute dot product with P */
+            for (int d_half = 0; d_half < 2; d_half++) {
+                int v_half_off = (d_half == 0) ? V_OFF : (V_OFF + HALF_BYTES);
+                for (int d = 0; d < 64; d++) {
+                    float acc = 0.0f;
+                    for (int k = 0; k < 128; k++) {
+                        /* P[my_row][k] */
+                        float p_val = (k < 64) ? __int_as_float(s_regs_lo[k])
+                                               : __int_as_float(s_regs_hi[k - 64]);
+                        /* V[k][d] from swizzled SMEM */
+                        int local_byte = (k * 64 + d) * 2;
+                        int swizzled = local_byte ^ (((local_byte >> 7) & 7) << 4);
+                        __nv_bfloat16 v_val = *(__nv_bfloat16*)(smem + v_half_off + swizzled);
+                        acc += p_val * __bfloat162float(v_val);
+                    }
+                    if (d_half == 0) O_reg_lo[d] += acc;
+                    else             O_reg_hi[d] += acc;
+                }
             }
         }
         __syncthreads();

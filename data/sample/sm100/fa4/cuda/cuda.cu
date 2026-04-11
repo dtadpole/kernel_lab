@@ -308,14 +308,14 @@ fa_tcgen05(
         rowsum = rowsum * rescale + local_sum;
 
         /* ---- Rescale O by rescale factor ---- */
-        if (rescale > 0.0f && rescale < 1.0f) {
+        /* Always execute _ld64/_st64 (they are .sync.aligned — all threads must participate).
+         * Threads where rescale==1.0f effectively no-op. */
+        {
             uint32_t o_vals[64];
-            /* Rescale O_lo (cols 0-63) */
             _ld64(o_vals, O_lo); _wl();
             for (int i = 0; i < 64; i++)
                 o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
             _st64(O_lo, o_vals); _ws();
-            /* Rescale O_hi (cols 64-127) */
             _ld64(o_vals, O_hi); _wl();
             for (int i = 0; i < 64; i++)
                 o_vals[i] = __float_as_int(__int_as_float(o_vals[i]) * rescale);
@@ -577,5 +577,7 @@ extern "C" int kernel_run(
     cudaFuncSetAttribute(fa_tcgen05,cudaFuncAttributeMaxDynamicSharedMemorySize,SMEM_TOTAL);
     fa_tcgen05<<<num_blocks,THREADS,SMEM_TOTAL,stream>>>(
         O,B,S,H,S,S,tQ,tK,tV,tO);
+    /* Ensure kernel completes before harness calls kernel_run again */
+    cudaStreamSynchronize(stream);
     return 0;
 }

@@ -313,16 +313,24 @@ def _generate_report(results: dict, gem_info: dict | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 def _next_gem_version(gem_base: Path) -> int:
-    if not gem_base.exists():
-        return 1
+    """Next gem version, scanning ALL impl slugs under the kernel directory.
+
+    gem_base is e.g. gems/matmul/gen-cuda/. We scan the parent (gems/matmul/)
+    across all sibling impl slugs so version numbers never collide.
+    """
+    kernel_gems = gem_base.parent  # gems/matmul/
     max_ver = 0
-    for d in gem_base.iterdir():
-        if d.is_dir() and d.name.startswith("v"):
-            try:
-                ver = int(d.name.split("_", 1)[0][1:])
-                max_ver = max(max_ver, ver)
-            except (ValueError, IndexError):
-                pass
+    if kernel_gems.exists():
+        for slug_dir in kernel_gems.iterdir():
+            if not slug_dir.is_dir():
+                continue
+            for d in slug_dir.iterdir():
+                if d.is_dir() and d.name.startswith("v"):
+                    try:
+                        ver = int(d.name.split("_", 1)[0][1:])
+                        max_ver = max(max_ver, ver)
+                    except (ValueError, IndexError):
+                        pass
     return max_ver + 1
 
 

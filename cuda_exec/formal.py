@@ -553,6 +553,62 @@ def _per_config_compile_and_trial(
                 len(compiled_groups))
 
     # ================================================================
+    # Phase 1b: Compile default group (configs without autotune)
+    # ================================================================
+    default_config_slugs = at_result.configs_without_autotune
+    if default_config_slugs:
+        unique_rev = (int(time.time_ns()) % 10000000) + len(compiled_groups)
+        default_meta = Metadata(
+            run_tag=run_tag,
+            version="v1",
+            direction_id=0,
+            direction_slug=f"{kernel}-{cu_impl['slug']}",
+            revision=unique_rev,
+        )
+
+        old_extra_flags = os.environ.get("NVCC_EXTRA_FLAGS")
+        # No extra defines — use kernel's default #define values
+        os.environ.pop("NVCC_EXTRA_FLAGS", None)
+
+        logger.info("[%s] compile default group: %d configs (no autotune)",
+                    cu_impl["slug"], len(default_config_slugs))
+
+        try:
+            compile_start = time.time()
+            compile_req = CompileRequest(
+                metadata=default_meta,
+                timeout_seconds=timeout_seconds,
+                impls=compile_impls,
+            )
+            compile_resp = compile_endpoint(compile_req)
+            cr = compile_resp.model_dump(mode="json")
+            logger.info("[%s] compile default group done (%.1fs)",
+                        cu_impl["slug"], time.time() - compile_start)
+        finally:
+            if old_extra_flags is not None:
+                os.environ["NVCC_EXTRA_FLAGS"] = old_extra_flags
+
+        compile_results_all["__default__"] = cr
+        default_binary = None
+
+        if compile_resp.all_ok:
+            try:
+                workspace = resolve_workspace_bundle(**default_meta.model_dump())
+                target_path, _ = _primary_artifact_from_manifest(workspace)
+                default_binary = str(target_path)
+                logger.info("[%s] default group binary: %s", cu_impl["slug"], target_path)
+            except Exception as exc:
+                logger.warning("[%s] default group binary resolution failed: %s",
+                              cu_impl["slug"], exc)
+        else:
+            all_compile_ok = False
+
+        compiled_groups["__default__"] = {
+            "meta": default_meta, "binary": default_binary, "cr": cr,
+            "config_slugs": default_config_slugs,
+        }
+
+    # ================================================================
     # Phase 2: Trial ALL groups — sequential (GPU exclusive)
     # ================================================================
     all_trial_configs: Dict[str, dict] = {}

@@ -49,21 +49,22 @@ __global__ void matmul_tiled(
     int tx = threadIdx.x;
     int ty = threadIdx.y;
 
-    int row = by * BM + ty;
-    int col = bx * BN + tx;
+    /* Number of output elements per thread */
+    constexpr int ELEMS_M = (BM + THREADS_Y - 1) / THREADS_Y;
+    constexpr int ELEMS_N = (BN + THREADS_X - 1) / THREADS_X;
+    constexpr int LOAD_K_A = (BK + THREADS_X - 1) / THREADS_X;
+    constexpr int LOAD_K_B = (BK + THREADS_Y - 1) / THREADS_Y;
 
-    float acc = 0.0f;
-
-    /* Number of load iterations per thread for tiles larger than thread block */
-    int load_iters_m = (BM + THREADS_Y - 1) / THREADS_Y;
-    int load_iters_n = (BN + THREADS_X - 1) / THREADS_X;
-    int load_iters_k_a = (BK + THREADS_X - 1) / THREADS_X;
-    int load_iters_k_b = (BK + THREADS_Y - 1) / THREADS_Y;
+    /* Float accumulators in registers — NO BF16 round-trip through global mem */
+    float acc[ELEMS_M][ELEMS_N];
+    for (int i = 0; i < ELEMS_M; i++)
+        for (int j = 0; j < ELEMS_N; j++)
+            acc[i][j] = 0.0f;
 
     for (int k0 = 0; k0 < K; k0 += BK) {
         /* Load A tile: BM x BK */
-        for (int li = 0; li < load_iters_m; li++) {
-            for (int lj = 0; lj < load_iters_k_a; lj++) {
+        for (int li = 0; li < ELEMS_M; li++) {
+            for (int lj = 0; lj < LOAD_K_A; lj++) {
                 int lr = ty + li * THREADS_Y;
                 int lc = tx + lj * THREADS_X;
                 if (lr < BM && lc < BK) {
@@ -77,8 +78,8 @@ __global__ void matmul_tiled(
             }
         }
         /* Load B tile: BK x BN */
-        for (int li = 0; li < load_iters_k_b; li++) {
-            for (int lj = 0; lj < load_iters_n; lj++) {
+        for (int li = 0; li < LOAD_K_B; li++) {
+            for (int lj = 0; lj < ELEMS_N; lj++) {
                 int lr = ty + li * THREADS_Y;
                 int lc = tx + lj * THREADS_X;
                 if (lr < BK && lc < BN) {
@@ -93,27 +94,31 @@ __global__ void matmul_tiled(
         }
         __syncthreads();
 
-        /* Compute — each thread accumulates multiple output elements */
-        for (int li = 0; li < load_iters_m; li++) {
-            for (int lj = 0; lj < load_iters_n; lj++) {
+        /* Accumulate into float registers */
+        for (int li = 0; li < ELEMS_M; li++) {
+            for (int lj = 0; lj < ELEMS_N; lj++) {
                 int local_r = ty + li * THREADS_Y;
                 int local_c = tx + lj * THREADS_X;
                 if (local_r < BM && local_c < BN) {
-                    float sum = 0.0f;
                     for (int ki = 0; ki < BK && (k0 + ki) < K; ki++) {
-                        sum += __bfloat162float(As[local_r][ki]) *
-                               __bfloat162float(Bs[ki][local_c]);
-                    }
-                    int out_r = by * BM + local_r;
-                    int out_c = bx * BN + local_c;
-                    if (out_r < M && out_c < N) {
-                        float prev = (k0 == 0) ? 0.0f : __bfloat162float(C[out_r * N + out_c]);
-                        C[out_r * N + out_c] = __float2bfloat16(prev + sum);
+                        acc[li][lj] += __bfloat162float(As[local_r][ki]) *
+                                       __bfloat162float(Bs[ki][local_c]);
                     }
                 }
             }
         }
         __syncthreads();
+    }
+
+    /* Write results: float → BF16 only once at the end */
+    for (int li = 0; li < ELEMS_M; li++) {
+        for (int lj = 0; lj < ELEMS_N; lj++) {
+            int out_r = by * BM + ty + li * THREADS_Y;
+            int out_c = bx * BN + tx + lj * THREADS_X;
+            if (out_r < M && out_c < N) {
+                C[out_r * N + out_c] = __float2bfloat16(acc[li][lj]);
+            }
+        }
     }
 }
 

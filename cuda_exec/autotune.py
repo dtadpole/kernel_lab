@@ -380,7 +380,7 @@ def bench_variants(
     ok_variants = [r for r in compile_results if r.ok]
 
     for idx, cr in enumerate(ok_variants):
-        logger.info("  bench %d/%d: %s", idx + 1, len(ok_variants), cr.tag)
+        logger.info("    %d/%d: %s", idx + 1, len(ok_variants), cr.tag)
         latencies = _quick_bench_variant(
             cr.binary_path, configs, env_base,
             num_warmups=num_warmups, num_trials=num_trials,
@@ -661,46 +661,72 @@ def run_autotune(
             f"First error: {compile_results[0].error if compile_results else 'unknown'}"
         )
 
-    # 4. Benchmark — only on configs that have autotune
-    bench_cfg = {s: configs[s] for s in config_autotunes}
-    logger.info("Autotune: benchmarking %d variants on %d configs",
-                len(ok_compiles), len(bench_cfg))
+    # 4. Benchmark per config — each config only benchmarks its own combos
+    compile_by_tag = {cr.tag: cr for cr in compile_results if cr.ok}
+    per_config_results: dict[str, PerConfigWinner] = {}
+    all_results: list[dict] = []
+    total_benched = 0
 
     bench_started = time.perf_counter()
-    bench_results = bench_variants(
-        compile_results, bench_cfg, env_base,
-        num_warmups=bench_warmups, num_trials=bench_trials,
-    )
+    for config_slug, valid_tags in config_combo_tags.items():
+        # Filter to only this config's valid compiled combos
+        config_compiles = [compile_by_tag[t] for t in valid_tags if t in compile_by_tag]
+        if not config_compiles:
+            logger.warning("  %s: no compiled combos, skipping", config_slug)
+            continue
+
+        single_cfg = {config_slug: configs[config_slug]}
+        logger.info("  %s: benchmarking %d combos", config_slug, len(config_compiles))
+
+        # Benchmark this config's combos on this single config
+        cfg_bench = bench_variants(
+            config_compiles, single_cfg, env_base,
+            num_warmups=bench_warmups, num_trials=bench_trials,
+        )
+        total_benched += len([b for b in cfg_bench if b.ok])
+
+        # Pick best for this config
+        cfg_bench.sort(key=lambda r: r.median_ms)
+        ok_bench = [b for b in cfg_bench if b.ok]
+        if ok_bench:
+            best = ok_bench[0]
+            lat = best.all_latencies.get(config_slug)
+            best_ms = lat if lat is not None else best.median_ms
+            cr = compile_by_tag.get(best.tag)
+            per_config_results[config_slug] = PerConfigWinner(
+                config_slug=config_slug,
+                best_combo=best.combo,
+                best_tag=best.tag,
+                best_median_ms=best_ms,
+                best_registers=cr.registers if cr else 0,
+                best_smem_bytes=cr.smem_bytes if cr else 0,
+                defines_flags=" ".join(f"-D{k}={v}" for k, v in best.combo.items()),
+            )
+            logger.info("  %s: best=%s (%.4f ms)", config_slug, best.tag, best_ms)
+
+        # Collect for reporting
+        for br in cfg_bench:
+            cr = compile_by_tag.get(br.tag)
+            all_results.append({
+                "config": config_slug,
+                "tag": br.tag,
+                "combo": br.combo,
+                "median_ms": round(br.median_ms, 4) if br.ok else None,
+                "registers": cr.registers if cr else 0,
+                "smem_bytes": cr.smem_bytes if cr else 0,
+                "ok": br.ok,
+            })
+
     bench_duration = time.perf_counter() - bench_started
-    logger.info("Autotune: benchmarked in %.1fs", bench_duration)
+    logger.info("Autotune: benchmarked %d combos across %d configs in %.1fs",
+                total_benched, len(config_combo_tags), bench_duration)
 
-    # 5. Rank by geometric mean (for reporting) and select per-config winners
-    bench_results.sort(key=lambda r: r.median_ms)
-    ok_bench = [r for r in bench_results if r.ok]
+    if not per_config_results:
+        raise RuntimeError("All variants failed benchmarking on all configs")
 
-    if not ok_bench:
-        raise RuntimeError("All variants failed benchmarking")
-
-    per_config_results = _select_per_config_winners(
-        bench_results, compile_results, config_combo_tags,
-    )
     distinct_tags = {pcw.best_tag for pcw in per_config_results.values()}
     logger.info("Autotune: %d distinct winners for %d configs",
                 len(distinct_tags), len(per_config_results))
-
-    # Build sorted results list for reporting
-    all_results = []
-    for br in bench_results:
-        cr = next((c for c in compile_results if c.tag == br.tag), None)
-        all_results.append({
-            "tag": br.tag,
-            "combo": br.combo,
-            "median_ms": round(br.median_ms, 4) if br.ok else None,
-            "latencies": {k: round(v, 4) if v else None for k, v in br.all_latencies.items()},
-            "registers": cr.registers if cr else 0,
-            "smem_bytes": cr.smem_bytes if cr else 0,
-            "ok": br.ok,
-        })
 
     total_duration = time.perf_counter() - started
 
@@ -715,7 +741,7 @@ def run_autotune(
         total_combos=total_combos,
         valid_combos=len(combos),
         compiled_ok=len(ok_compiles),
-        benchmarked_ok=len(ok_bench),
+        benchmarked_ok=total_benched,
         all_results=all_results,
         duration_s=total_duration,
         configs_without_autotune=configs_without_autotune,

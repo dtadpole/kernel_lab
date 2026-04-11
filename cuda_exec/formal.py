@@ -439,7 +439,7 @@ def format_results_table(bench_result: dict) -> str:
 # Per-config autotune: compile + trial per combo group
 # ---------------------------------------------------------------------------
 
-def _per_config_compile_and_trial(
+def _autotune_compile_only(
     *,
     cu_impl: dict,
     at_result,
@@ -449,14 +449,13 @@ def _per_config_compile_and_trial(
     kernel: str,
     timeout_seconds: int,
 ) -> dict:
-    """Handle per-config autotune: group configs by combo, compile+trial per group.
-
-    Two-phase approach:
-      Phase 1 — Compile ALL groups sequentially (each needs its own NVCC_EXTRA_FLAGS).
-      Phase 2 — Trial ALL groups sequentially (GPU needs exclusive access).
+    """Compile autotune groups — NO trial. Trial happens in the main single-pass Phase C.
 
     Returns dict with:
-        impl_result: dict (merged trial results across all groups)
+        compiled_groups: {defines_flags: {meta, binary, cr, config_slugs}}
+        per_config_binary: {config_slug: binary_path} — maps each config to its winning binary
+        compile_ok: bool
+        autotune_info: dict
     """
     import os
     from collections import defaultdict
@@ -609,63 +608,14 @@ def _per_config_compile_and_trial(
         }
 
     # ================================================================
-    # Phase 2: Trial ALL groups — sequential (GPU exclusive)
+    # Build per-config binary map (NO trial here — trial in Phase C)
     # ================================================================
-    all_trial_configs: Dict[str, dict] = {}
-
-    trial_phase_start = time.time()
+    per_config_binary: Dict[str, str | None] = {}
     for defines_flags, group in compiled_groups.items():
-        group_config_slugs = group["config_slugs"]
+        for cs in group["config_slugs"]:
+            per_config_binary[cs] = group["binary"]  # None if compile failed
 
-        if group["binary"] is None:
-            for cs in group_config_slugs:
-                all_trial_configs[cs] = {"status": "error", "impls": {}}
-            continue
-
-        group_configs = {s: configs[s] for s in group_config_slugs if s in configs}
-        binary_map_str = f"{cu_impl['slug']}={group['binary']}"
-
-        logger.info("[%s] trial group: %d configs with %s",
-                    cu_impl["slug"], len(group_configs), defines_flags)
-
-        trial_start = time.time()
-        trial_req = TrialRequest(
-            metadata=group["meta"],
-            timeout_seconds=timeout_seconds,
-            configs=group_configs,
-            binary_map=binary_map_str,
-        )
-        trial_resp = trial_endpoint(trial_req)
-        trial_result = trial_resp.model_dump(mode="json")
-        logger.info("[%s] trial group done (%.1fs)",
-                    cu_impl["slug"], time.time() - trial_start)
-
-        for config_slug, config_output in trial_result.get("configs", {}).items():
-            all_trial_configs[config_slug] = config_output
-
-    logger.info("[%s] trial phase done (%.1fs)",
-                cu_impl["slug"], time.time() - trial_phase_start)
-
-    # ================================================================
-    # Step 3: Build merged result
-    # ================================================================
-    merged_trial = {
-        "all_ok": all(
-            cfg.get("status") != "error"
-            for cfg in all_trial_configs.values()
-        ),
-        "configs": all_trial_configs,
-    }
-
-    impl_result = {
-        "impl": cu_impl["slug"],
-        "compile_ok": all_compile_ok,
-        "trial_ok": merged_trial["all_ok"],
-        "compile_results": compile_results_all,
-        "trial_result": merged_trial,
-    }
-
-    impl_result["autotune"] = {
+    autotune_info = {
         "total_combos": at_result.total_combos,
         "valid_combos": at_result.valid_combos,
         "compiled_ok": at_result.compiled_ok,
@@ -684,7 +634,17 @@ def _per_config_compile_and_trial(
         },
     }
 
-    return {"impl_result": impl_result}
+    # Use any group's metadata for the trial workspace
+    any_meta = next((g["meta"] for g in compiled_groups.values() if g["binary"]), None)
+
+    return {
+        "compiled_groups": compiled_groups,
+        "per_config_binary": per_config_binary,
+        "compile_ok": all_compile_ok,
+        "compile_results": compile_results_all,
+        "autotune_info": autotune_info,
+        "meta": any_meta,
+    }
 
 
 def formal_benchmark(
@@ -849,10 +809,11 @@ print(json.dumps({{"ok": True, "configs": results}}))
         # Phase B: Compile ALL .cu impls, collect binary paths
         # (.py impls don't need compilation — they run via trial.py directly)
         # ================================================================
-        compiled_binaries: Dict[str, str] = {}     # slug → binary path
+        compiled_binaries: Dict[str, str] = {}     # slug → binary path (non-autotuned)
         compile_results: Dict[str, dict] = {}      # slug → compile result
         compile_metadata: Dict[str, object] = {}   # slug → Metadata
         autotune_results: Dict[str, object] = {}   # slug → autotune result
+        autotune_binaries: Dict[str, dict] = {}    # slug → _autotune_compile_only result
 
         for cu_impl in cu_impls:
             unique_rev = int(time.time()) % 100000
@@ -894,8 +855,8 @@ print(json.dumps({{"ok": True, "configs": results}}))
                         print(at_report, file=sys.stderr)
                         autotune_results[cu_impl["slug"]] = at_result
 
-                        # Per-config compile+trial per combo group
-                        pc_result = _per_config_compile_and_trial(
+                        # Compile autotune groups (NO trial — trial in Phase C)
+                        at_compiled = _autotune_compile_only(
                             cu_impl=cu_impl,
                             at_result=at_result,
                             py_impls=py_impls,
@@ -904,8 +865,13 @@ print(json.dumps({{"ok": True, "configs": results}}))
                             kernel=kernel,
                             timeout_seconds=timeout_seconds,
                         )
-                        results[cu_impl["slug"]] = pc_result["impl_result"]
-                        continue  # skip default compile+trial below
+                        autotune_results[cu_impl["slug"]] = at_result
+                        # Store per-config binary map for Phase C
+                        autotune_binaries[cu_impl["slug"]] = at_compiled
+                        compile_results[cu_impl["slug"]] = at_compiled.get("compile_results", {})
+                        if at_compiled.get("meta"):
+                            compile_metadata[cu_impl["slug"]] = at_compiled["meta"]
+                        continue  # skip default compile below
 
                     except Exception as exc:
                         logger.warning("[%s] autotune failed: %s — compiling with defaults",
@@ -959,65 +925,104 @@ print(json.dumps({{"ok": True, "configs": results}}))
                 }
 
         # ================================================================
-        # Phase C: Trial ALL impls in ONE pass per config.
-        # .cu impls via --binary-map, .py impls via inputs/{slug}/ dirs.
-        # All impls measured under identical GPU conditions per config.
+        # Phase C: Single-pass trial — ALL impls per config.
+        # For autotuned impls, the binary changes per config (different
+        # autotune winner). For non-autotuned impls, same binary for all.
         # ================================================================
-        if compiled_binaries or py_impls:
-            # Use the first successfully compiled impl's workspace for trial
+        has_any_impl = compiled_binaries or autotune_binaries or py_impls
+        if has_any_impl:
+            # Pick a workspace metadata for trial (any compiled impl works)
+            trial_meta = None
             if compiled_binaries:
                 first_slug = next(iter(compiled_binaries))
                 trial_meta = compile_metadata[first_slug]
-            else:
-                # No .cu impls compiled — create metadata for .py-only trial
+            elif autotune_binaries:
+                for at_data in autotune_binaries.values():
+                    if at_data.get("meta"):
+                        trial_meta = at_data["meta"]
+                        break
+            if trial_meta is None:
                 trial_meta = Metadata(
                     run_tag=run_tag, version="v1", direction_id=0,
-                    direction_slug=f"{kernel}-py", revision=int(time.time()) % 100000,
+                    direction_slug=f"{kernel}-trial", revision=int(time.time()) % 100000,
                 )
 
-            # Build binary-map string: slug=/path/to/bin,...
-            binary_map_str = ",".join(f"{s}={p}" for s, p in compiled_binaries.items())
+            # Check if any autotuned impl has per-config binaries
+            has_per_config = bool(autotune_binaries)
 
-            logger.info("Trial phase: %d configs × %d cu_impls + %d py_impls (single pass)",
-                         len(configs), len(compiled_binaries), len(py_impls))
+            if not has_per_config:
+                # Simple case: same binary for all configs → one trial call
+                binary_map_str = ",".join(f"{s}={p}" for s, p in compiled_binaries.items())
+                logger.info("Trial phase: %d configs × %d cu + %d py (single pass, uniform binaries)",
+                             len(configs), len(compiled_binaries), len(py_impls))
 
-            trial_start = time.time()
-            trial_req = TrialRequest(
-                metadata=trial_meta,
-                timeout_seconds=timeout_seconds,
-                configs=configs,
-                binary_map=binary_map_str,
-            )
-            trial_resp = trial_endpoint(trial_req)
-            trial_result = trial_resp.model_dump(mode="json")
-            logger.info("Trial phase done (%.1fs)", time.time() - trial_start)
+                trial_start = time.time()
+                trial_req = TrialRequest(
+                    metadata=trial_meta,
+                    timeout_seconds=timeout_seconds,
+                    configs=configs,
+                    binary_map=binary_map_str,
+                )
+                trial_resp = trial_endpoint(trial_req)
+                trial_result = trial_resp.model_dump(mode="json")
+                logger.info("Trial phase done (%.1fs)", time.time() - trial_start)
+            else:
+                # Autotuned: per-config binary map → one trial call per config
+                logger.info("Trial phase: %d configs × %d cu + %d at + %d py (single pass, per-config binaries)",
+                             len(configs), len(compiled_binaries), len(autotune_binaries), len(py_impls))
+
+                trial_start = time.time()
+                all_trial_configs = {}
+
+                for config_slug, config_params in configs.items():
+                    # Build binary map for this config: non-autotuned + autotuned
+                    config_binary_map = dict(compiled_binaries)  # copy non-autotuned
+
+                    for at_slug, at_data in autotune_binaries.items():
+                        per_config_bin = at_data.get("per_config_binary", {})
+                        binary = per_config_bin.get(config_slug)
+                        if binary:
+                            config_binary_map[at_slug] = binary
+
+                    binary_map_str = ",".join(f"{s}={p}" for s, p in config_binary_map.items())
+
+                    trial_req = TrialRequest(
+                        metadata=trial_meta,
+                        timeout_seconds=timeout_seconds,
+                        configs={config_slug: config_params},
+                        binary_map=binary_map_str,
+                    )
+                    trial_resp_single = trial_endpoint(trial_req)
+                    single_result = trial_resp_single.model_dump(mode="json")
+
+                    for cs, cv in single_result.get("configs", {}).items():
+                        all_trial_configs[cs] = cv
+
+                trial_result = {"all_ok": True, "configs": all_trial_configs}
+                trial_resp = type("Resp", (), {"all_ok": True})()  # mock
+                logger.info("Trial phase done (%.1fs)", time.time() - trial_start)
 
             # Distribute trial results to each .cu impl
             for cu_impl in cu_impls:
                 slug = cu_impl["slug"]
-                if slug not in compiled_binaries:
+                if slug not in compiled_binaries and slug not in autotune_binaries:
                     continue  # compile failed, already recorded
+                cr = compile_results.get(slug, {})
+                compile_ok = cr.get("all_ok", False) if isinstance(cr, dict) else False
+                # For autotuned impls, compile_ok = autotune compile_ok
+                if slug in autotune_binaries:
+                    compile_ok = autotune_binaries[slug].get("compile_ok", False)
                 impl_result = {
                     "impl": slug,
-                    "compile_ok": compile_results.get(slug, {}).get("all_ok", False),
+                    "compile_ok": compile_ok,
                     "trial_ok": trial_resp.all_ok,
-                    "compile_result": compile_results.get(slug),
+                    "compile_result": cr if isinstance(cr, dict) and "all_ok" in cr else None,
                     "trial_result": trial_result,
                 }
                 at = autotune_results.get(slug)
                 if at is not None:
-                    impl_result["autotune"] = {
-                        "total_combos": at.total_combos,
-                        "valid_combos": at.valid_combos,
-                        "compiled_ok": at.compiled_ok,
-                        "benchmarked_ok": at.benchmarked_ok,
-                        "duration_s": round(at.duration_s, 1),
-                        "per_config_winners": {
-                            s: {"combo": p.best_combo, "tag": p.best_tag,
-                                "median_ms": p.best_median_ms, "defines_flags": p.defines_flags}
-                            for s, p in at.per_config_results.items()
-                        },
-                    }
+                    at_data = autotune_binaries.get(slug, {})
+                    impl_result["autotune"] = at_data.get("autotune_info", {})
                 results[slug] = impl_result
 
             # Distribute trial results to each .py impl

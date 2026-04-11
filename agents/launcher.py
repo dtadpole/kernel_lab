@@ -42,8 +42,8 @@ class Launcher:
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         # Open log files
-        self._stdout_file = open(self.run_dir / "stdout.log", "w")
-        self._stderr_file = open(self.run_dir / "stderr.log", "w")
+        self._stdout_file = open(self.run_dir / "stdout.log", "a")
+        self._stderr_file = open(self.run_dir / "stderr.log", "a")
 
         # Start subprocess
         self._proc = await asyncio.create_subprocess_exec(
@@ -183,23 +183,21 @@ async def async_main(cfg) -> int:
 
 
 def main():
-    """CLI entry point using Hydra Compose API."""
-    from hydra import compose, initialize_config_dir
-    from omegaconf import OmegaConf
+    """CLI entry point."""
 
-    _CONF_DIR = str(Path(__file__).resolve().parents[1] / "conf")
+    # Parse key=value args from sys.argv
+    args = {}
+    for arg in sys.argv[1:]:
+        if "=" in arg:
+            key, _, val = arg.partition("=")
+            args[key] = val
 
-    # Parse overrides from sys.argv (key=value pairs)
-    overrides = [arg for arg in sys.argv[1:] if "=" in arg]
-
-    # Check for required run
-    has_run = any(arg.startswith("run=") for arg in overrides)
-    if not has_run:
+    if "run" not in args:
         print(
             "Usage: .venv/bin/python -m agents.launcher run=<GROUP> [OPTIONS]\n"
             "\n"
             "Required:\n"
-            "  run=<name>     Agent group to run (workshop, library)\n"
+            "  run=<name>             Agent group to run (workshop, library)\n"
             "\n"
             "Options:\n"
             "  kernel=<name>          Kernel to optimize (default: matmul)\n"
@@ -216,23 +214,13 @@ def main():
         )
         sys.exit(1)
 
-    with initialize_config_dir(config_dir=_CONF_DIR, version_base="1.3"):
-        cfg = compose(config_name="config", overrides=overrides)
-    OmegaConf.resolve(cfg)
+    # Apply defaults
+    args.setdefault("kernel", "matmul")
+    args.setdefault("gpu", 4)
+    args.setdefault("config", "conf/agent/agents.yaml")
+    args["gpu"] = int(args["gpu"])
 
-    # Extract launcher-specific keys (not in config.yaml, passed as overrides)
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    # Launcher keys live at the top level of overrides, not nested
-    launcher_cfg = {}
-    for arg in overrides:
-        key, _, val = arg.partition("=")
-        launcher_cfg[key] = val
-    # Merge with defaults
-    launcher_cfg.setdefault("kernel", "matmul")
-    launcher_cfg.setdefault("gpu", 4)
-    launcher_cfg["gpu"] = int(launcher_cfg["gpu"])
-
-    exit_code = asyncio.run(async_main(launcher_cfg))
+    exit_code = asyncio.run(async_main(args))
     sys.exit(exit_code or 0)
 
 

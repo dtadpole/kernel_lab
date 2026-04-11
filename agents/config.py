@@ -207,7 +207,17 @@ class SystemConfig:
         )
 
     def get_agent(self, name: str) -> AgentConfig:
-        """Get agent config by name, raise if not found."""
+        """Get agent config by name, reload prompt file from disk.
+
+        Prompt files are re-read on every call so that edits to
+        solver.md / steward.md take effect without restarting.
+        """
         if name not in self.agents:
             raise KeyError(f"Agent '{name}' not found. Available: {list(self.agents.keys())}")
-        return self.agents[name]
+        agent = self.agents[name]
+        # Reload system prompt from file if one was specified
+        if agent.system_prompt_file:
+            prompt_path = Path(__file__).resolve().parent.parent / "conf" / "agent" / agent.system_prompt_file
+            if prompt_path.exists():
+                agent.system_prompt = prompt_path.read_text()
+        return agent

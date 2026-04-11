@@ -229,8 +229,7 @@ class Workshop(DefaultHandler):
         print(f"[Workshop] Kill with Ctrl+C to stop")
         print(f"{'='*60}\n")
 
-        wave = 0
-        wave_history: list[dict] = []
+        wave, wave_history = self._resume_wave_state(kernel, kb_run_dir)
         consecutive_errors = 0
         max_consecutive_errors = 5
         recent_wave_starts: list[float] = []
@@ -390,6 +389,44 @@ class Workshop(DefaultHandler):
             "Do NOT repeat approaches that already failed.\n"
         )
         return "\n".join(parts)
+
+    def _resume_wave_state(self, kernel: str, kb_run_dir: Path) -> tuple[int, list[dict]]:
+        """Resume wave number and history from previous run with same run_tag.
+
+        Returns (next_wave_number, wave_history).
+        """
+        import glob as _glob
+
+        # Restore wave_history from waves_kernel.jsonl
+        wave_history: list[dict] = []
+        log_path = self.config.storage.journal_path / f"waves_{kernel}.jsonl"
+        if log_path.exists():
+            try:
+                with open(log_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            wave_history.append(json.loads(line))
+                print(f"[Workshop] Restored {len(wave_history)} wave(s) from {log_path.name}")
+            except Exception as e:
+                print(f"[Workshop] Failed to restore wave history: {e}")
+
+        # Find max wave number from existing wave directories
+        max_wave = -1
+        journal_dirs = _glob.glob(str(kb_run_dir / "journal" / "solver" / "*" / "w*"))
+        for d in journal_dirs:
+            wname = os.path.basename(d)
+            try:
+                num = int(wname.split("_")[0][1:])  # w007_timestamp → 7
+                max_wave = max(max_wave, num)
+            except (ValueError, IndexError):
+                pass
+
+        next_wave = max_wave + 1
+        if next_wave > 0:
+            print(f"[Workshop] Resuming at wave {next_wave} (found w000-w{max_wave:03d})")
+
+        return next_wave, wave_history
 
     def _save_wave_log(self, kernel: str, history: list[dict]) -> None:
         """Save wave history to the run's journal."""

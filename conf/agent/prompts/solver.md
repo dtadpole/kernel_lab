@@ -245,32 +245,56 @@ what to optimize. For example:
 - **Memory-bound**: DRAM % high, tensor core util low → optimize memory access patterns
 - **Latency-bound**: both low → fix warp stalls (sync, barriers, dependencies)
 
-### Consult Documentation and External Sources — NOT OPTIONAL
+### Research: Documentation and External Sources
 
-Before writing your first kernel, spend time researching. You MUST cite at least
-one external source in your brainstorming phase.
+New optimization ideas come from understanding hardware capabilities and
+state-of-the-art techniques. NCU data tells you WHAT is slow; documentation
+and research tell you HOW to fix it.
 
-1. **Architecture-specific features** (WebSearch):
-   - `site:docs.nvidia.com SM90 WGMMA programming` — wgmma instruction semantics
-   - `site:docs.nvidia.com TMA asynchronous copy` — TMA descriptor setup
-   - `site:docs.nvidia.com hopper tuning guide` — SM90-specific optimization tips
+**1. NVIDIA documentation (ik:docs via Bash):**
 
-2. **State-of-the-art techniques** (WebSearch):
-   - `CUTLASS 3.x GEMM kernel github` — study their warp specialization pattern
-   - `"persistent kernel" GEMM Hopper` — persistent scheduling for large matrices
-   - `GTC "efficient GEMM" Hopper SM90` — conference talks with perf data
+Search for instruction semantics, hardware constraints, and tuning guidance:
+```bash
+# Search for relevant docs
+.venv/bin/python -m doc_retrieval find query="wgmma mma_async descriptor" top_k=5
+# Read a specific section
+.venv/bin/python -m doc_retrieval read doc_id=parallel-thread-execution section_id=asynchronous-warpgroup-level-matrix-instructions-wgmma-mma
+.venv/bin/python -m doc_retrieval read doc_id=cuda-c-best-practices-guide section_id=shared-memory
+```
 
-3. **PTX instruction details** (ik:docs):
-   - wgmma.mma_async instruction variants and constraints
-   - mbarrier semantics: init, arrive, wait, phaseParity
-   - cp.async.bulk.tensor: TMA descriptor creation and usage
+Key docs: `parallel-thread-execution` (PTX ISA — instruction semantics, matrix
+descriptor format, barrier operations), `cuda-c-programming-guide` (TMA, async
+copy, warp scheduling), `cuda-c-best-practices-guide` (occupancy, memory
+coalescing, SMEM bank conflicts).
 
-4. **Roofline analysis** (`data/roofline/`):
-   - Calculate arithmetic intensity for each config size
-   - Determine compute-bound vs memory-bound boundary
-   - Set target TFLOPS based on hardware peak
+**2. Web search (WebSearch — load it first via ToolSearch):**
+
+WebSearch is a deferred tool. You MUST load it before first use:
+```
+ToolSearch("select:WebSearch")   ← call this ONCE, then WebSearch is available
+```
+
+Then search for architecture-specific features, CUTLASS/CuTe patterns, GTC
+talks, and published benchmarks:
+- `site:docs.nvidia.com hopper tuning guide` — SM90 optimization tips
+- `CUTLASS 3.x warp specialization GEMM github` — scheduling patterns
+- `"persistent kernel" GEMM Hopper SM90` — tile scheduling strategies
+- `GTC "efficient GEMM" SM90 wgmma` — conference talks with perf data
+
+**3. Roofline analysis (`data/roofline/`):**
+- Calculate arithmetic intensity for each config size
+- Determine compute-bound vs memory-bound boundary
+- Set target TFLOPS based on hardware peak
 
 ## Phase 3: Brainstorm
+
+Before generating ideas, you MUST have completed at least ONE of these
+research actions in Phase 2:
+- Searched ik:docs (`.venv/bin/python -m doc_retrieval find/read ...`)
+- Used WebSearch (load via `ToolSearch("select:WebSearch")` first)
+- Read roofline data (`data/roofline/`)
+
+If you skipped all research, go back to Phase 2 now.
 
 Generate optimization ideas. Each idea MUST satisfy ALL FOUR criteria:
 

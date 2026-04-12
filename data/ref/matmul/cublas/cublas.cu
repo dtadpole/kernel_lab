@@ -2,8 +2,8 @@
  * cuBLAS LT BF16 GEMM reference — PyTorch-matching configuration.
  *
  * C = A @ B, all BF16, FP32 accumulation.
- * Uses the same cublasLtMatmul setup as PyTorch's bgemm_internal_cublaslt:
- *   - TRANSA=T, TRANSB=N (PyTorch convention for row-major)
+ * Uses the standard row-major cuBLAS trick: C = A@B → C^T = B^T @ A^T
+ *   - TRANSA=N, TRANSB=N, swap A↔B pointers (PyTorch convention)
  *   - Alignment hints for A, B, C pointers
  *   - Heuristic #1 (no manual autotune — cuBLAS heuristic is accurate)
  *   - Workspace from cudaMalloc
@@ -103,31 +103,28 @@ static CachedState create_cached(
     /* Compute descriptor: FP32 accumulation */
     cublasLtMatmulDescCreate(&state.op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
 
-    /* PyTorch convention: row-major A(M,K) @ B(K,N) = C(M,N)
-     * In cuBLAS col-major world: TRANSA=T, TRANSB=N
-     * A is (K, M) col-major with ld=K → reads as (M, K) row-major transposed
-     * B is (K, N) col-major with ld=K → reads as (K, N) row-major non-transposed
-     * C is (M, N) col-major with ld=M */
-    cublasOperation_t op_t = CUBLAS_OP_T;
+    /* Row-major C = A @ B via the standard cuBLAS col-major trick:
+     *   C^T = B^T @ A^T  (col-major)
+     * Row-major data is col-major transposed, so no explicit transposes needed:
+     *   TRANSA=N (first matrix = B), TRANSB=N (second matrix = A)
+     *   cuBLAS "A" desc = B as col-major (N, K) with ld=N
+     *   cuBLAS "B" desc = A as col-major (K, M) with ld=K
+     *   cuBLAS "C" desc = C^T as col-major (N, M) with ld=N
+     * The col-major (N, M) output is exactly row-major (M, N) — correct. */
     cublasOperation_t op_n = CUBLAS_OP_N;
     cublasLtMatmulDescSetAttribute(state.op_desc, CUBLASLT_MATMUL_DESC_TRANSA,
-                                   &op_t, sizeof(op_t));
+                                   &op_n, sizeof(op_n));
     cublasLtMatmulDescSetAttribute(state.op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
                                    &op_n, sizeof(op_n));
 
-    /* Matrix layouts — match PyTorch's CuBlasLtMatrixLayout construction
-     * PyTorch: CuBlasLtMatrixLayout(type, m, k, lda, opa != CUBLAS_OP_N)
-     * For TRANSA=T: Adesc is (K, M) with ld=K (physical), transposed to (M, K)
-     * For TRANSB=N: Bdesc is (K, N) with ld=K (physical)
-     * Cdesc is (M, N) with ld=M */
-    int lda = K;  /* A stored as (M, K) row-major → col-major (K, M) with ld=K */
-    int ldb = K;  /* B stored as (K, N) row-major → col-major (K, N) with ld=K */
-    int ldc = M;  /* C stored as (M, N) row-major → col-major (M, N) with ld=M */
+    /* Matrix layouts — "A" in cuBLAS = our B, "B" in cuBLAS = our A */
+    int lda = N;  /* cuBLAS "A" = B: col-major (N, K), ld=N */
+    int ldb = K;  /* cuBLAS "B" = A: col-major (K, M), ld=K */
+    int ldc = N;  /* cuBLAS "C" = C^T: col-major (N, M), ld=N */
 
-    /* Note: with TRANSA=T, cuBLAS expects physical layout (K, M) */
-    cublasLtMatrixLayoutCreate(&state.layout_a, CUDA_R_16BF, K, M, lda);
-    cublasLtMatrixLayoutCreate(&state.layout_b, CUDA_R_16BF, K, N, ldb);
-    cublasLtMatrixLayoutCreate(&state.layout_c, CUDA_R_16BF, M, N, ldc);
+    cublasLtMatrixLayoutCreate(&state.layout_a, CUDA_R_16BF, N, K, lda);
+    cublasLtMatrixLayoutCreate(&state.layout_b, CUDA_R_16BF, K, M, ldb);
+    cublasLtMatrixLayoutCreate(&state.layout_c, CUDA_R_16BF, N, M, ldc);
 
     /* Preference with alignment hints (matches PyTorch) */
     cublasLtMatmulPreference_t pref;
@@ -136,9 +133,9 @@ static CachedState create_cached(
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
         &g_workspace_size, sizeof(g_workspace_size));
 
-    /* Alignment hints — tell cuBLAS how our pointers are aligned */
-    uint32_t align_a = get_alignment(reinterpret_cast<uintptr_t>(A));
-    uint32_t align_b = get_alignment(reinterpret_cast<uintptr_t>(B));
+    /* Alignment hints — cuBLAS "A" = our B, cuBLAS "B" = our A */
+    uint32_t align_a = get_alignment(reinterpret_cast<uintptr_t>(B));  /* cuBLAS "A" = B */
+    uint32_t align_b = get_alignment(reinterpret_cast<uintptr_t>(A));  /* cuBLAS "B" = A */
     uint32_t align_c = get_alignment(reinterpret_cast<uintptr_t>(C));
     cublasLtMatmulPreferenceSetAttribute(pref,
         CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &align_a, sizeof(align_a));
@@ -224,10 +221,10 @@ extern "C" int kernel_run(
 
     float alpha = 1.0f, beta = 0.0f;
 
-    /* PyTorch passes (A, layout_a, B, layout_b) where A is the "first" matrix
-     * With TRANSA=T: cuBLAS reads A as transposed → row-major A(M,K) */
+    /* Row-major trick: swap A↔B in cuBLAS call.
+     * cuBLAS "A" = our B, cuBLAS "B" = our A → C^T = B^T @ A^T = (A@B)^T */
     cublasStatus_t st = cublasLtMatmul(handle, s.op_desc,
-        &alpha, A, s.layout_a, B, s.layout_b,
+        &alpha, B, s.layout_a, A, s.layout_b,
         &beta, C, s.layout_c, C, s.layout_c,
         &s.algo, g_workspace, s.workspace_size, stream);
 

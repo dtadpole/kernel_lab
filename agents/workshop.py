@@ -338,7 +338,7 @@ class Workshop(DefaultHandler):
                         result_text=result.result_text,
                         stop_reason=result.stop_reason,
                         elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
-                        total_tool_calls=self.state.turn_seqs_completed,
+                        total_tool_calls=self.state.turns_completed,
                         error_count=self.state.error_count,
                     )
 
@@ -650,7 +650,7 @@ class Workshop(DefaultHandler):
     # ── EventHandler implementation ──
 
     async def on_tool_call(self, event: ToolCallEvent) -> None:
-        self.state.turn_seqs_completed += 1
+        self.state.turns_completed += 1
         self.state.current_action = event.tool_name
         self._last_tool_input = event.tool_input  # save for diffusion trigger
 
@@ -1058,7 +1058,7 @@ class Workshop(DefaultHandler):
             "gpu": self.state.gpu,
             "run_tag": self.state.run_tag,
             "wave": self.state.wave,
-            "turns": self.state.turn_seqs_completed,
+            "turns": self.state.turns_completed,
             "errors": self.state.error_count,
             "consecutive_stuck": self.state.consecutive_stuck,
             "current_action": self.state.current_action,

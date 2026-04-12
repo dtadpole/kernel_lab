@@ -1344,6 +1344,32 @@ def cli_main() -> None:
         if bench_gpus:
             os.environ["CUDA_VISIBLE_DEVICES"] = bench_gpus
 
+    # Kill any existing formal bench on the same GPU.
+    # Only one formal bench per GPU — concurrent instances fight for GPU
+    # resources and all stall. The newest one wins.
+    if gpu is not None:
+        import signal
+        my_pid = os.getpid()
+        try:
+            result = __import__("subprocess").run(
+                ["pgrep", "-af", f"cuda_exec.formal"],
+                capture_output=True, text=True,
+            )
+            for line in result.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                parts = line.split(None, 1)
+                pid = int(parts[0])
+                cmdline = parts[1] if len(parts) > 1 else ""
+                if pid != my_pid and f"bench.gpu={gpu}" in cmdline:
+                    logger.info("Killing existing formal bench PID %d on GPU %s", pid, gpu)
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+        except Exception as e:
+            logger.warning("Failed to check/kill existing bench: %s", e)
+
     # Kill existing processes on the target GPU (ensures exclusive access)
     gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES")
     if gpu_id is not None and gpu_id != "0":

@@ -490,6 +490,21 @@ class AgentRunner:
                         }
                     }
 
+                # Log direction gate decision
+                if needs_direction and self._storage:
+                    direction = getattr(handler.state, 'current_direction', None) if hasattr(handler, 'state') else None
+                    decision = "deny" if result else "allow"
+                    target = tool_input.get("file_path", "") or tool_input.get("command", "")[:200]
+                    self._storage.append_event({
+                        "ts": datetime.now().isoformat(),
+                        "type": "PreToolHook",
+                        "subtype": "direction_gate",
+                        "tool": tool_name,
+                        "target": target,
+                        "direction": direction,
+                        "decision": decision,
+                    })
+
             return result
 
         async def on_post_tool_use(input_data, tool_use_id, context):

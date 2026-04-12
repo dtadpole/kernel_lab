@@ -518,6 +518,18 @@ class Workshop(DefaultHandler):
             reason=reason,
         )
 
+        # Log MCP tool hook
+        dir_name = self.state.current_direction.get("name", "?") if self.state.current_direction else "?"
+        if self._solver_runner and self._solver_runner._storage:
+            self._solver_runner._storage.append_event({
+                "ts": datetime.now().isoformat(),
+                "type": "MCPToolHook",
+                "subtype": "start_exploring",
+                "direction_name": dir_name,
+                "reason": reason[:200],
+                "steward_result": response.action,
+            })
+
         if response.action == "APPROVED":
             old_name = self.state.current_direction.get("name", "?")
             self.state.current_direction = None
@@ -664,6 +676,17 @@ class Workshop(DefaultHandler):
         if self._pulse_last_fired and (now - self._pulse_last_fired).total_seconds() < cooldown:
             return
         self._pulse_last_fired = now
+
+        # Log pulse trigger
+        if self._solver_runner and self._solver_runner._storage:
+            self._solver_runner._storage.append_event({
+                "ts": now.isoformat(),
+                "type": "PostToolHook",
+                "subtype": "direction_pulse",
+                "tool": event.tool_name,
+                "trigger": trigger,
+                "direction": self.state.current_direction,
+            })
 
         # Fire async — don't block Solver
         asyncio.create_task(
@@ -830,6 +853,16 @@ class Workshop(DefaultHandler):
             **self._get_steward_context(),
             direction=direction,
         )
+
+        # Log MCP tool hook
+        if self._solver_runner and self._solver_runner._storage:
+            self._solver_runner._storage.append_event({
+                "ts": datetime.now().isoformat(),
+                "type": "MCPToolHook",
+                "subtype": "set_direction",
+                "direction_name": direction.get("name", "?"),
+                "steward_result": response.action,
+            })
 
         if response.action == "APPROVED":
             # Persist + switch to building

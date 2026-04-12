@@ -419,6 +419,7 @@ class PerConfigWinner:
     best_registers: int
     best_smem_bytes: int
     defines_flags: str  # e.g. "-DBM=128 -DBN=256"
+    binary_path: str = ""  # path to compiled binary (reusable, no need to recompile)
 
 
 @dataclass
@@ -580,6 +581,7 @@ def run_autotune(
     max_compile_workers: int = 16,
     bench_warmups: int = 2,
     bench_trials: int = 3,
+    output_dir: Path | None = None,
 ) -> AutotuneResult:
     """Run per-config autotune pipeline.
 
@@ -595,9 +597,12 @@ def run_autotune(
         max_compile_workers: Max parallel compilations.
         bench_warmups: Warmup iterations per variant.
         bench_trials: Timed iterations per variant.
+        output_dir: Directory for compiled binaries. If None, uses a temp dir.
+            When provided, binaries are KEPT (not deleted) so formal.py can
+            reuse them without recompiling.
 
     Returns:
-        AutotuneResult with per-config winners.
+        AutotuneResult with per-config winners (including binary_path).
     """
     started = time.perf_counter()
 
@@ -639,7 +644,14 @@ def run_autotune(
         raise ValueError("No valid parameter combinations after applying constraints")
 
     # 3. Parallel compile
-    work_dir = Path(tempfile.mkdtemp(prefix="autotune_"))
+    if output_dir:
+        work_dir = Path(output_dir)
+        # Clean previous autotune results to avoid stale binaries
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
+        work_dir.mkdir(parents=True)
+    else:
+        work_dir = Path(tempfile.mkdtemp(prefix="autotune_"))
     logger.info("Autotune: compiling %d variants (max %d workers) in %s",
                 len(combos), max_compile_workers, work_dir)
 
@@ -701,6 +713,7 @@ def run_autotune(
                 best_registers=cr.registers if cr else 0,
                 best_smem_bytes=cr.smem_bytes if cr else 0,
                 defines_flags=" ".join(f"-D{k}={v}" for k, v in best.combo.items()),
+                binary_path=cr.binary_path if cr else "",
             )
             logger.info("  %s: best=%s (%.4f ms)", config_slug, best.tag, best_ms)
 
@@ -730,11 +743,12 @@ def run_autotune(
 
     total_duration = time.perf_counter() - started
 
-    # Clean up work dir
-    try:
-        shutil.rmtree(work_dir)
-    except OSError:
-        pass
+    # Clean up work dir only if we created a temp dir (no output_dir provided)
+    if not output_dir:
+        try:
+            shutil.rmtree(work_dir)
+        except OSError:
+            pass
 
     result = AutotuneResult(
         per_config_results=per_config_results,

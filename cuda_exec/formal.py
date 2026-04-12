@@ -842,12 +842,15 @@ print(json.dumps({{"ok": True, "configs": results}}))
 
                         logger.info("[%s] autotune start", cu_impl["slug"])
                         at_start = time.time()
+                        # Autotune compiles to bench_runtime dir — binaries are reused, not recompiled
+                        autotune_dir = bench_runtime / "autotune" / cu_impl["slug"]
                         at_result = run_autotune(
                             cu_path=Path(cu_impl["entry_point"]),
                             autotune_yaml=autotune_yaml,
                             configs=configs,
                             arch=compile_arch,
                             env_base=autotune_env,
+                            output_dir=autotune_dir,
                         )
                         at_report = format_autotune_report(at_result)
                         logger.info("[%s] autotune done (%.1fs)\n%s",
@@ -855,22 +858,33 @@ print(json.dumps({{"ok": True, "configs": results}}))
                         print(at_report, file=sys.stderr)
                         autotune_results[cu_impl["slug"]] = at_result
 
-                        # Compile autotune groups (NO trial — trial in Phase C)
-                        at_compiled = _autotune_compile_only(
-                            cu_impl=cu_impl,
-                            at_result=at_result,
-                            py_impls=py_impls,
-                            configs=configs,
-                            run_tag=run_tag,
-                            kernel=kernel,
-                            timeout_seconds=timeout_seconds,
-                        )
-                        autotune_results[cu_impl["slug"]] = at_result
-                        # Store per-config binary map for Phase C
-                        autotune_binaries[cu_impl["slug"]] = at_compiled
-                        compile_results[cu_impl["slug"]] = at_compiled.get("compile_results", {})
-                        if at_compiled.get("meta"):
-                            compile_metadata[cu_impl["slug"]] = at_compiled["meta"]
+                        # Build per-config binary map directly from autotune results
+                        # (no recompile — binaries already exist in autotune_dir)
+                        per_config_binary: Dict[str, str | None] = {}
+                        for cfg_slug, pcw in at_result.per_config_results.items():
+                            per_config_binary[cfg_slug] = pcw.binary_path if pcw.binary_path else None
+                        # Configs without autotune use default binary (compiled below in Phase C fallback)
+                        for cfg_slug in at_result.configs_without_autotune:
+                            per_config_binary[cfg_slug] = None  # will use default compile
+
+                        autotune_binaries[cu_impl["slug"]] = {
+                            "per_config_binary": per_config_binary,
+                            "compile_ok": True,
+                            "autotune_info": {
+                                "total_combos": at_result.total_combos,
+                                "valid_combos": at_result.valid_combos,
+                                "compiled_ok": at_result.compiled_ok,
+                                "benchmarked_ok": at_result.benchmarked_ok,
+                                "duration_s": round(at_result.duration_s, 1),
+                                "configs_without_autotune": at_result.configs_without_autotune,
+                                "per_config_winners": {
+                                    s: {"combo": p.best_combo, "tag": p.best_tag,
+                                        "median_ms": p.best_median_ms, "defines_flags": p.defines_flags}
+                                    for s, p in at_result.per_config_results.items()
+                                },
+                            },
+                        }
+                        compile_metadata[cu_impl["slug"]] = meta
                         continue  # skip default compile below
 
                     except Exception as exc:

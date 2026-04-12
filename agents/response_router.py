@@ -1,6 +1,6 @@
 """ResponseRouter: scenario-specific Steward dispatch.
 
-Each hook scenario (ask_question, permission, stuck, session_end, time_limit)
+Each hook scenario (ask_question, permission, session_end, progress_check, etc.)
 has its own system prompt and context-building template. The router dispatches
 through AgentRunner for uniform journal logging.
 """
@@ -22,34 +22,35 @@ SCENARIO_MAX_TURNS: dict[str, int] = {
     "permission": 5,
     "progress_check": 10,
     "ask_question": 20,
-    "time_limit": 20,
     "session_end": 20,
-    "stuck": 20,
+    "set_direction": 20,
+    "direction_pulse": 10,
+    "start_exploring": 20,
 }
 
+# Common context block prepended to every scenario
+_CONTEXT_HEADER = """## Solver Mode: {mode}
+
+## Recent Events
+{recent_events}
+
+## For Details
+- Transcript: {transcript_path}
+- Events: {events_path}"""
+
 CONTEXT_TEMPLATES: dict[str, str] = {
-    "ask_question": """## Trajectory
-Read the full trajectory at: {transcript_path}
+    "ask_question": _CONTEXT_HEADER + """
 
 ## Question
 {question}""",
 
-    "permission": """## Trajectory
-Read the full trajectory at: {transcript_path}
+    "permission": _CONTEXT_HEADER + """
 
 ## Permission Request
 Tool: {tool_name}
 Input: {tool_input}""",
 
-    "stuck": """## Trajectory
-Read the full trajectory at: {transcript_path}
-
-## Alert
-{alert_type}: {alert_details}
-Elapsed: {elapsed_time}""",
-
-    "session_end": """## Trajectory
-Read the full trajectory at: {transcript_path}
+    "session_end": _CONTEXT_HEADER + """
 
 ## Session Ended
 Stop reason: {stop_reason}
@@ -60,17 +61,38 @@ Errors: {error_count}
 ## Solver's Final Output
 {result_text}""",
 
-    "time_limit": """## Trajectory
-Read the full trajectory at: {transcript_path}
+    "progress_check": """## Current Direction
+Name: {direction_name}
+Description: {direction_description}
+Opportunity: {direction_opportunity}
+Evidence: {direction_evidence}
+Ideas: {direction_ideas}
 
-## Time Limit
-Elapsed: {elapsed_time} (limit: {time_limit})""",
-
-    "progress_check": """## Trajectory
-Read the full trajectory at: {transcript_path}
+""" + _CONTEXT_HEADER + """
 
 ## Progress Check
 Elapsed: {elapsed_time}""",
+
+    "set_direction": """## Direction Proposal
+{direction_json}
+
+""" + _CONTEXT_HEADER,
+
+    "direction_pulse": """## Current Direction
+{direction_json}
+
+## Trigger
+Solver just completed: {trigger_type}
+
+""" + _CONTEXT_HEADER,
+
+    "start_exploring": """## Current Direction
+{direction_json}
+
+## Solver's Reason for Wanting to Change
+{reason}
+
+""" + _CONTEXT_HEADER,
 }
 
 
@@ -198,7 +220,7 @@ class ResponseRouter:
         """Call the Steward and return a parsed verdict.
 
         Args:
-            scenario: Scenario name (ask_question, permission, stuck, session_end, time_limit).
+            scenario: Scenario name (ask_question, permission, session_end, progress_check, etc.).
             variables: Template variables for context building.
 
         Returns:

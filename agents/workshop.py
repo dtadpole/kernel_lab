@@ -39,6 +39,11 @@ from agents.api_server import WorkshopAPIServer
 from agents.runner import AgentRunner, RunResult
 from agents.session_log import SessionLog
 from agents.steward import Steward, StewardResponse
+from agents.direction import write_direction, read_active_direction, next_seq
+
+# ── Mode constants ──
+MODE_EXPLORING = "exploring"    # no direction — research, profile, brainstorm
+MODE_BUILDING = "building"      # has direction — implement, compile, bench
 
 PROMPTS_DIR = Path("conf/agent/prompts")
 
@@ -125,6 +130,9 @@ class WorkshopState:
     kernel: str = ""               # kernel name (matmul, fa4, etc.)
     gpu: int = 4                   # GPU index for exec/trial/bench
     wave: int = 0
+    mode: str = MODE_EXPLORING          # "exploring" (no direction) or "building" (has direction)
+    turn_seq: int = 0                # current turn within wave (increments on CONTINUE/EXPLORE)
+    direction_seq: int = 0           # current direction sequence number within wave
     turns_completed: int = 0
     error_count: int = 0
     current_action: str = ""
@@ -132,6 +140,7 @@ class WorkshopState:
     consecutive_stuck: int = 0     # consecutive stuck checks without progress
     bench_results: list[dict] = field(default_factory=list)
     verdict_history: list[dict] = field(default_factory=list)
+    current_direction: dict | None = None
 
 
 @dataclass
@@ -169,6 +178,16 @@ class Workshop(DefaultHandler):
         self._current_log: SessionLog | None = None
         self._pending_stop_event: StopEvent | None = None
         self._api_server: WorkshopAPIServer | None = None
+
+        # Direction gate: tools + dirs + message from config + prompt file
+        self._direction_gate_tools = config.direction.gate_tools
+        self._direction_gate_dirs = config.direction.gate_dirs_resolved()
+        gate_prompt_path = Path("conf/agent/prompts/direction_gate.md")
+        self._direction_gate_message = gate_prompt_path.read_text().strip() if gate_prompt_path.exists() else "You must set_direction first."
+
+        # Direction pulse: dirs + triggers from config
+        self._direction_pulse_dirs = config.direction.pulse_dirs_resolved()
+        self._direction_pulse_triggers = config.direction.pulse_triggers
 
     # ── Main loop ──
 
@@ -261,6 +280,12 @@ class Workshop(DefaultHandler):
             self._gem_produced = False
             self._reflection_received = False
 
+            # Inherit direction from previous wave
+            # Every wave starts in exploring mode — no direction inherited
+            self.state.mode = MODE_EXPLORING
+            self.state.current_direction = None
+            self.state.direction_seq = 0
+
             wave_start = datetime.now()
             initial_prompt = self._build_initial_prompt(task, run_tag, kernel, gpu)
             if wave_history:
@@ -276,6 +301,13 @@ class Workshop(DefaultHandler):
 
                 while True:  # Session loop within Wave
                     self.state.phase = "solving"
+                    # Update log context so events include mode + turn + direction
+                    if self._solver_runner and self._solver_runner.log:
+                        self._solver_runner.log.set_context(
+                            mode=self.state.mode,
+                            turn_seq=self.state.turn_seq,
+                            direction_seq=self.state.direction_seq,
+                        )
                     result = await self._solver_runner.run_until_result()
                     self._current_log = result.log
 
@@ -302,11 +334,11 @@ class Workshop(DefaultHandler):
                     self.state.phase = "deciding"
                     print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={result.stop_reason})")
                     verdict = await self.steward.review_session_end(
-                        transcript_path=self._get_transcript_path(),
+                        **self._get_steward_context(),
                         result_text=result.result_text,
                         stop_reason=result.stop_reason,
                         elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
-                        total_tool_calls=self.state.turns_completed,
+                        total_tool_calls=self.state.turn_seqs_completed,
                         error_count=self.state.error_count,
                     )
 
@@ -327,10 +359,24 @@ class Workshop(DefaultHandler):
                         break  # End Wave
 
                     if verdict.action == "CONTINUE":
-                        # Steward explicitly said CONTINUE with guidance — send it.
+                        # Same direction — send guidance, keep working
                         session += 1
-                        continue_prompt = self._build_continue_prompt(verdict)
-                        await self._solver_runner.send_message(continue_prompt)
+                        self.state.turn_seq = session
+                        if self._solver_runner and self._solver_runner.log:
+                            self._solver_runner.log.set_context(turn_seq=session)
+                        await self._solver_runner.send_message(self._forward_steward_guidance(verdict))
+
+                    if verdict.action == "EXPLORE":
+                        # Direction exhausted — clear direction, back to exploring
+                        self.state.current_direction = None
+                        self.state.direction_seq = 0
+                        self.state.mode = MODE_EXPLORING
+                        session += 1
+                        self.state.turn_seq = session
+                        if self._solver_runner and self._solver_runner.log:
+                            self._solver_runner.log.set_context(turn_seq=session, direction_seq=0)
+                        await self._solver_runner.send_message(self._forward_steward_guidance(verdict))
+                        print(f"[Workshop] Mode: building → exploring (Steward EXPLORE)")
 
                 consecutive_errors = 0
 
@@ -413,7 +459,7 @@ class Workshop(DefaultHandler):
 
         # Find max wave number from existing wave directories
         max_wave = -1
-        journal_dirs = _glob.glob(str(kb_run_dir / "journal" / "solver" / "*" / "w*"))
+        journal_dirs = _glob.glob(str(kb_run_dir / "journal" / "w*"))
         for d in journal_dirs:
             wname = os.path.basename(d)
             try:
@@ -449,11 +495,44 @@ class Workshop(DefaultHandler):
         result = template.format(run_tag=run_tag, kernel=kernel, task=task, gpu=gpu)
         return result.replace("<run_tag>", run_tag)
 
-    def _build_continue_prompt(self, verdict: StewardResponse) -> str:
-        """Build the resume prompt for CONTINUE — injected into the same session."""
-        guidance = verdict.detail or verdict.reasoning[:500]
-        template = _load_prompt("workshop_continue")
-        return template.format(guidance=guidance)
+    def _forward_steward_guidance(self, verdict: StewardResponse) -> str:
+        """Forward Steward's guidance to Solver. No Workshop template — Steward's words directly."""
+        return verdict.detail or verdict.reasoning[:500]
+
+    async def _handle_start_exploring(self, reason: str) -> str:
+        """Handle start_exploring MCP tool."""
+        # Already exploring — just let it go
+        if self.state.mode == MODE_EXPLORING:
+            return (
+                "You are already in exploring mode.\n"
+                "Suggestions: search NVIDIA docs, search the web, "
+                "read reference implementations, review the knowledge base, "
+                "profile the reference kernel, explore the codebase. "
+                "When ready, call set_direction."
+            )
+
+        # Building mode — Steward reviews: is the direction really exhausted?
+        response = await self.steward.review_start_exploring(
+            **self._get_steward_context(),
+            direction=self.state.current_direction,
+            reason=reason,
+        )
+
+        if response.action == "APPROVED":
+            old_name = self.state.current_direction.get("name", "?")
+            self.state.current_direction = None
+            self.state.direction_seq = 0
+            self.state.mode = MODE_EXPLORING
+            print(f"[Workshop] Mode: building → exploring (direction '{old_name}' cleared)")
+            guidance = response.detail or ""
+            return f"Direction '{old_name}' cleared. Steward approved.\n{guidance}"
+        else:
+            # REDIRECT — direction not exhausted, keep building
+            return (
+                f"Direction not exhausted. Continue building: "
+                f"'{self.state.current_direction.get('name', '?')}'.\n"
+                f"Steward: {response.detail}"
+            )
 
     # ── Benchmarker dispatch ──
 
@@ -559,19 +638,95 @@ class Workshop(DefaultHandler):
     # ── EventHandler implementation ──
 
     async def on_tool_call(self, event: ToolCallEvent) -> None:
-        self.state.turns_completed += 1
+        self.state.turn_seqs_completed += 1
         self.state.current_action = event.tool_name
+        self._last_tool_input = event.tool_input  # save for diffusion trigger
 
     async def on_tool_result(self, event: ToolResultEvent) -> None:
         if event.is_error:
             self.state.error_count += 1
         self.state.current_action = ""
 
+        # Direction diffusion: check for triggers
+        if not self.state.current_direction:
+            return
+
+        trigger = self._detect_trigger(event.tool_name, getattr(self, '_last_tool_input', {}))
+        if not trigger:
+            return
+
+        # Global cooldown — any trigger fire resets for all
+        now = datetime.now()
+        if not hasattr(self, '_pulse_last_fired'):
+            self._pulse_last_fired: datetime | None = None
+        trigger_config = self._direction_pulse_triggers.get(trigger)
+        cooldown = trigger_config.cooldown if trigger_config else 60
+        if self._pulse_last_fired and (now - self._pulse_last_fired).total_seconds() < cooldown:
+            return
+        self._pulse_last_fired = now
+
+        # Fire async — don't block Solver
+        asyncio.create_task(
+            self._steward_direction_pulse(trigger)
+        )
+
+    def _get_steward_context(self) -> dict:
+        """Build the common context for all Steward calls."""
+        tp = self._get_transcript_path()
+        ep = str(Path(tp).parent / "events.jsonl") if tp else ""
+        recent = ""
+        if self._current_log:
+            recent = self._current_log.recent_summary(n=5)
+        return {
+            "mode": self.state.mode,
+            "transcript_path": tp,
+            "events_path": ep,
+            "recent_events": recent or "(no events yet)",
+        }
+
+    def _detect_trigger(self, tool_name: str, tool_input: dict) -> str | None:
+        """Detect if a tool call should trigger a Steward direction pulse."""
+        dc = self.config.direction
+        if tool_name in dc.pulse_file_write_tools:
+            path = tool_input.get("file_path", "")
+            if any(path.startswith(d) for d in self._direction_pulse_dirs):
+                return "file_write"
+        if tool_name == dc.pulse_command_match_tool:
+            cmd = tool_input.get("command", "")
+            for name, trigger in self._direction_pulse_triggers.items():
+                if trigger.match and trigger.match in cmd:
+                    return name
+        return None
+
+    async def _steward_direction_pulse(self, trigger: str) -> None:
+        """Fire async Steward review and inject guidance into Solver."""
+        try:
+            response = await self.steward.direction_pulse(
+                **self._get_steward_context(),
+                direction=self.state.current_direction,
+                trigger_type=trigger,
+            )
+            # Only inject if Steward has something to say
+            if response.action == "REDIRECT" and response.detail:
+                if self._solver_runner and self._solver_runner._client:
+                    await self._solver_runner._client.query(response.detail)
+                    print(f"[Workshop] Direction diffusion ({trigger}): {response.action}")
+        except Exception as e:
+            print(f"[Workshop] Direction diffusion error: {e}")
+
     async def on_text(self, event: TextOutputEvent) -> None:
         pass
 
     async def on_ask(self, event: AskEvent) -> str:
         """Handle Solver questions and benchmark requests."""
+        # ── start_exploring ──
+        if event.question == "START_EXPLORING":
+            return await self._handle_start_exploring(event.context)
+
+        # ── set_direction ──
+        if event.question == "SET_DIRECTION":
+            return await self._handle_set_direction(event.context)
+
         # ── request_formal_bench ──
         if event.question.startswith("REQUEST_FORMAL_BENCH:"):
             return await self._handle_bench_request(event)
@@ -582,7 +737,7 @@ class Workshop(DefaultHandler):
 
         # ── Regular question → Steward ──
         return await self.steward.answer_question(
-            transcript_path=self._get_transcript_path(),
+            **self._get_steward_context(),
             question=event.question,
             solver_context=event.context,
         )
@@ -635,6 +790,48 @@ class Workshop(DefaultHandler):
         parts.append("Continue optimizing.")
 
         return " ".join(parts)
+
+    async def _handle_set_direction(self, direction_json: str) -> str:
+        """Handle set_direction MCP tool call."""
+        # Must be in exploring mode
+        if self.state.mode == MODE_BUILDING:
+            return (
+                f"You already have a direction: '{self.state.current_direction.get('name', '?')}'. "
+                f"You cannot set a new direction while building. "
+                f"Call start_exploring first if you believe the current direction is exhausted."
+            )
+
+        try:
+            direction = json.loads(direction_json)
+        except json.JSONDecodeError as e:
+            return f"Invalid JSON: {e}"
+
+        # Validate required fields
+        required = ["name", "description", "opportunity", "evidence", "ideas"]
+        missing = [f for f in required if f not in direction]
+        if missing:
+            return f"Missing required fields: {', '.join(missing)}"
+
+        # Steward reviews
+        response = await self.steward.review_direction(
+            **self._get_steward_context(),
+            direction=direction,
+        )
+
+        if response.action == "APPROVED":
+            # Persist + switch to building
+            directions_dir = self._solver_runner._storage.directions_path if self._solver_runner else None
+            seq = 0
+            if directions_dir:
+                seq = next_seq(directions_dir)
+                write_direction(directions_dir, seq, direction)
+            self.state.current_direction = direction
+            self.state.direction_seq = seq
+            self.state.mode = MODE_BUILDING
+            print(f"[Workshop] Mode: exploring → building (direction: {direction['name']})")
+            return f"Direction approved: {direction['name']}.\nSteward: {response.detail}"
+        else:  # REDIRECT
+            return f"Direction not approved.\nSteward: {response.detail}\nRevise and call set_direction again."
 
     async def _handle_bench_request(self, event: AskEvent) -> str:
         """Solver requested a formal benchmark. Run via subprocess."""
@@ -734,7 +931,7 @@ class Workshop(DefaultHandler):
 
     async def on_permission(self, event: PermissionEvent) -> bool:
         response = await self.steward.check_permission(
-            transcript_path=self._get_transcript_path(),
+            **self._get_steward_context(),
             tool_name=event.tool_name,
             tool_input=event.tool_input,
         )
@@ -764,41 +961,49 @@ class Workshop(DefaultHandler):
             print(f"[Workshop] Time limit at {elapsed} — auto-continuing")
             return "continue"
         elif event.alert_type == "progress_check":
-            # Code decision: just log, no Steward needed
-            print(f"[Workshop] Progress check at {elapsed} — heartbeat OK")
+            # Actually call Steward with direction context
+            direction = self.state.current_direction
+            if direction and tp:
+                response = await self.steward.check_progress(
+                    **self._get_steward_context(),
+                    elapsed_time=elapsed,
+                    direction=direction,
+                )
+                print(f"[Workshop] Progress check at {elapsed} — Steward: {response.action}")
+                if response.action == "REDIRECT":
+                    self.state.consecutive_stuck = 0
+                    return f"inject:{response.detail}"
+            else:
+                print(f"[Workshop] Progress check at {elapsed} — direction not set, skipping")
             return "continue"
         elif event.alert_type in ("idle_timeout", "loop_detected"):
+            # Route through progress_check — Steward decides how to respond
             self.state.consecutive_stuck += 1
-
-            if self.state.consecutive_stuck >= 3:
-                print(f"[Workshop] 3 consecutive stuck alerts — forcing interrupt")
-                response = await self.steward.handle_stuck(
-                    transcript_path=tp,
-                    alert_type=event.alert_type,
-                    alert_details=f"{event.details} (consecutive_stuck={self.state.consecutive_stuck})",
+            direction = self.state.current_direction
+            if tp:
+                response = await self.steward.check_progress(
+                    **self._get_steward_context(),
                     elapsed_time=elapsed,
+                    direction=direction,
                 )
-                self.state.consecutive_stuck = 0
-                if response.action == "CONTINUE":
+                print(f"[Workshop] {event.alert_type} at {elapsed} — Steward: {response.action}")
+                if response.action == "REDIRECT":
+                    self.state.consecutive_stuck = 0
+                    return f"inject:{response.detail}"
+                if self.state.consecutive_stuck >= 3:
+                    print(f"[Workshop] 3 consecutive alerts — forcing interrupt")
+                    self.state.consecutive_stuck = 0
                     return "interrupt"
-            else:
-                response = await self.steward.handle_stuck(
-                    transcript_path=tp,
-                    alert_type=event.alert_type,
-                    alert_details=event.details,
-                    elapsed_time=elapsed,
-                )
+            return "continue"
         else:
             return "continue"
 
         # Map response to action
         if response.action in ("CONTINUE", "EXTEND", "ON_TRACK"):
             return "continue"
-        elif response.action in ("INJECT", "DRIFTING", "REDIRECT"):
+        elif response.action in ("INJECT", "REDIRECT"):
             self.state.consecutive_stuck = 0  # reset on intervention
             return f"inject:{response.detail}"
-        elif response.action == "WRAP_UP":
-            return "inject:Please save your current progress and summarize what you have accomplished, then finish."
         elif response.action in ("INTERRUPT", "KILL"):
             return "interrupt"
         return "continue"
@@ -813,7 +1018,7 @@ class Workshop(DefaultHandler):
             "gpu": self.state.gpu,
             "run_tag": self.state.run_tag,
             "wave": self.state.wave,
-            "turns": self.state.turns_completed,
+            "turns": self.state.turn_seqs_completed,
             "errors": self.state.error_count,
             "consecutive_stuck": self.state.consecutive_stuck,
             "current_action": self.state.current_action,

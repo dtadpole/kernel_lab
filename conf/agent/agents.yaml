@@ -16,6 +16,31 @@ monitor:
   loop_threshold: 100          # same tool 100x in a row
   progress_check_interval: 600 # 10 min — periodic progress check
 
+direction:
+  gate:
+    tools: [Write, Edit, Bash]
+    watched_dirs:
+      - ~/kernel_lab
+      - ~/kernel_lab_kb
+  pulse:
+    file_write_tools: [Write, Edit]
+    command_match_tool: Bash
+    watched_dirs:
+      - ~/kernel_lab
+      - ~/kernel_lab_kb
+    triggers:
+      file_write:
+        cooldown: 60
+      compile:
+        match: "exec.action=compile"
+        cooldown: 60
+      trial:
+        match: "exec.action=trial"
+        cooldown: 60
+      profile:
+        match: "exec.action=profile"
+        cooldown: 60
+
 steward:
   model: claude-sonnet-4-6
   max_tokens: 2000
@@ -48,6 +73,8 @@ agents:
         - ask_supervisor
         - request_formal_bench
         - submit_bench_reflection
+        - set_direction
+        - start_exploring
     tool_rules:
       - tool: Bash
         allow: true

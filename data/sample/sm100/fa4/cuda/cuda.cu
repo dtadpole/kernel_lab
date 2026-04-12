@@ -145,11 +145,13 @@ void tmem_coords_128(int warp, int lane, int reg_idx, int& row, int& col) {
 __global__ void __launch_bounds__(THREADS, 1)
 fa_tcgen05(
     __nv_bfloat16* __restrict__ O_global,
+    __nv_bfloat16* __restrict__ P_scratch,  /* temp buffer for P→global→TMA roundtrip */
     int B, int S, int H, int len_q, int len_kv, bool is_causal,
     const __grid_constant__ CUtensorMap tma_Q,
     const __grid_constant__ CUtensorMap tma_K,
     const __grid_constant__ CUtensorMap tma_V,
-    const __grid_constant__ CUtensorMap tma_O)
+    const __grid_constant__ CUtensorMap tma_O,
+    const __grid_constant__ CUtensorMap tma_P)  /* P scratch for PV GEMM */
 {
     extern __shared__ char smem[];
     uint64_t* load_bar = (uint64_t*)(smem + MBAR_OFF);
@@ -321,48 +323,79 @@ fa_tcgen05(
             O_reg_hi[i] *= rescale;
         }
 
-        /* ---- PV GEMM: O += P × V via TCGEN05 MMA ---- */
-        /* Write P to global memory (linear layout), then TMA-load to SMEM
-         * (guaranteed correct swizzled layout for MMA). */
+        /* ---- PV GEMM: O += P × V ---- */
+        /* Write P as BF16 to P_scratch (linear layout), then TMA-load back
+         * to SMEM K region with 128B swizzle (guaranteed correct for MMA). */
         {
-            /* Write P BF16 to global O buffer temporarily (will be overwritten at end).
-             * Layout: (B*S, H*D) — same as Q/K/V. P goes to the Q-block's output rows. */
             int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
-            int g_row = batch_seq + q_block_id * BLOCK_Q + my_row;
-            int g_base = g_row * (H * DIM) + coord_head;
-            /* P has 128 KV columns but output has 128 DIM columns.
-             * We need to store P as if it were a 128×128 matrix with KV dim = "column".
-             * But the TMA descriptor for P needs a separate tensor...
-             *
-             * Simpler: write P linearly to SMEM K region (no swizzle),
-             * then use a non-swizzle descriptor... but that doesn't work.
-             *
-             * Simplest correct: compute PV in registers (slower but correct). */
+            /* P_scratch has same layout as Q: (B*S, H*D). Each Q-block row writes
+             * its 128 P values (KV positions) into the DIM columns. */
+            int p_base = (batch_seq + q_block_id * BLOCK_Q + my_row) * (H * DIM) + coord_head;
+            for (int i = 0; i < 64; i++)
+                P_scratch[p_base + i] = __float2bfloat16(__int_as_float(s_regs_lo[i]));
+            for (int i = 0; i < 64; i++)
+                P_scratch[p_base + 64 + i] = __float2bfloat16(__int_as_float(s_regs_hi[i]));
         }
+        __threadfence();
+        __syncthreads();
 
-        /* PV in registers: each thread computes its row of O += P × V */
+        /* TMA-load P from P_scratch → SMEM K region (swizzled for MMA) */
+        if (tid == 0) {
+            _mi(load_bar, 1);
+            _ma_tx(load_bar, 2 * HALF_BYTES);
+            tma2d(smem + K_OFF,             &tma_P, coord_head,          batch_seq + q_block_id * BLOCK_Q, load_bar);
+            tma2d(smem + K_OFF + HALF_BYTES, &tma_P, coord_head + DIM/2, batch_seq + q_block_id * BLOCK_Q, load_bar);
+        }
+        _mw(load_bar, 0);
+        __syncthreads();
+
+        /* PV GEMM via TCGEN05 MMA (same pattern as QK GEMM) */
         {
-            int my_row = lid ^ ((wid & 1) * 32) ^ (((wid >> 1) & 1) * 64);
-            /* P[my_row][k] for k=0..127 is in s_regs (already exp'd softmax values) */
-            /* V[k][d] for all d is in SMEM at V_OFF (TMA-loaded, swizzled) */
+            uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
+            uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
+            uint32_t idesc_pv = (1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(8u<<17)|(8u<<24);
 
-            /* Read V from SMEM for each d, compute dot product with P */
-            for (int d_half = 0; d_half < 2; d_half++) {
-                int v_half_off = (d_half == 0) ? V_OFF : (V_OFF + HALF_BYTES);
-                for (int d = 0; d < 64; d++) {
-                    float acc = 0.0f;
-                    for (int k = 0; k < 128; k++) {
-                        /* P[my_row][k] */
-                        float p_val = (k < 64) ? __int_as_float(s_regs_lo[k])
-                                               : __int_as_float(s_regs_hi[k - 64]);
-                        /* V[k][d] from swizzled SMEM */
-                        int local_byte = (k * 64 + d) * 2;
-                        int swizzled = local_byte ^ (((local_byte >> 7) & 7) << 4);
-                        __nv_bfloat16 v_val = *(__nv_bfloat16*)(smem + v_half_off + swizzled);
-                        acc += p_val * __bfloat162float(v_val);
-                    }
-                    if (d_half == 0) O_reg_lo[d] += acc;
-                    else             O_reg_hi[d] += acc;
+            /* Pass 1: O_lo = P × V_lo */
+            for (int c = lid; c < 64; c += 32) _st1(O_lo + c, 0);
+            _ws(); __syncthreads();
+            if (tid == 0) {
+                _mi(mma_bar, 1);
+                uint64_t vd0 = _desc(smem + V_OFF, 8 * 64 * 2);
+                for (int kk = 0; kk < 8; kk++) {
+                    uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
+                                           : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
+                    uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
+                    _mma(O_lo, pd, vd, idesc_pv, (kk > 0));
+                }
+                _commit(mma_bar);
+            }
+            _mw(mma_bar, 0); __syncthreads();
+
+            /* Pass 2: O_hi = P × V_hi */
+            for (int c = lid; c < 64; c += 32) _st1(O_hi + c, 0);
+            _ws(); __syncthreads();
+            if (tid == 0) {
+                _mi(mma_bar, 1);
+                uint64_t vd0 = _desc(smem + V_OFF + HALF_BYTES, 8 * 64 * 2);
+                for (int kk = 0; kk < 8; kk++) {
+                    uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
+                                           : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
+                    uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
+                    _mma(O_hi, pd, vd, idesc_pv, (kk > 0));
+                }
+                _commit(mma_bar);
+            }
+            _mw(mma_bar, 0); __syncthreads();
+
+            /* Read PV result from TMEM, add to O registers */
+            _fb(); __syncthreads(); _fa();
+            {
+                uint32_t pv_lo[64], pv_hi[64];
+                _ld64(pv_lo, O_lo); _wl();
+                _ld64(pv_hi, O_hi); _wl();
+                for (int i = 0; i < 64; i++) {
+                    O_reg_lo[i] += __int_as_float(pv_lo[i]);
+                    O_reg_hi[i] += __int_as_float(pv_hi[i]);
                 }
             }
         }
@@ -584,7 +617,17 @@ extern "C" int kernel_run(
     cuuint32_t bxkv[2]={64,(cuuint32_t)BLOCK_KV};
     cuuint32_t el[2]={1,1};
 
-    CUtensorMap tQ,tK,tV,tO;
+    /* Allocate P scratch buffer (same size/layout as Q) */
+    static __nv_bfloat16* P_scratch = nullptr;
+    static size_t P_size = 0;
+    size_t needed = (size_t)B * S * seq_stride * sizeof(__nv_bfloat16);
+    if (!P_scratch || P_size < needed) {
+        if (P_scratch) cudaFree(P_scratch);
+        cudaMalloc(&P_scratch, needed);
+        P_size = needed;
+    }
+
+    CUtensorMap tQ,tK,tV,tO,tP;
     CUresult r;
     r=cuTensorMapEncodeTiled(&tQ,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)Q,gd,gs,bx,el,
        CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
@@ -602,13 +645,16 @@ extern "C" int kernel_run(
        CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
        CU_TENSOR_MAP_L2_PROMOTION_NONE,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     if(r)return -6;
+    /* P_scratch has same layout as Q — BLOCK_KV KV cols stored in DIM positions */
+    r=cuTensorMapEncodeTiled(&tP,CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,2,(void*)P_scratch,gd,gs,bxkv,el,
+       CU_TENSOR_MAP_INTERLEAVE_NONE,CU_TENSOR_MAP_SWIZZLE_128B,
+       CU_TENSOR_MAP_L2_PROMOTION_NONE,CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    if(r)return -7;
 
     int num_blocks=B*H*cdiv(S,BLOCK_Q);
     cudaFuncSetAttribute(fa_tcgen05,cudaFuncAttributeMaxDynamicSharedMemorySize,SMEM_TOTAL);
-    int max_kv = causal ? 0 : cdiv(S, BLOCK_KV);  /* 0 = per-block causal limit */
     fa_tcgen05<<<num_blocks,THREADS,SMEM_TOTAL,stream>>>(
-        O,B,S,H,S,S,causal,tQ,tK,tV,tO);
-    /* Ensure kernel completes before harness calls kernel_run again */
+        O,P_scratch,B,S,H,S,S,causal,tQ,tK,tV,tO,tP);
     cudaStreamSynchronize(stream);
     return 0;
 }

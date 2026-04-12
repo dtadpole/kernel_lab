@@ -460,6 +460,21 @@ class AgentRunner:
                 return {}  # allow tool to proceed on hook failure
 
         async def _pre_tool_use_inner(input_data, tool_use_id, context):
+            # Universal hook trace — always fires, before any logic
+            import json as _json
+            _trace = {
+                "ts": datetime.now().isoformat(),
+                "hook": "PreToolUse",
+                "tool": input_data.get("tool_name", ""),
+                "input_keys": list(input_data.get("tool_input", {}).keys()),
+            }
+            try:
+                with open("/tmp/hook_trace.jsonl", "a") as _f:
+                    _f.write(_json.dumps(_trace) + "\n")
+                    _f.flush()
+            except Exception:
+                pass
+
             tool_name = input_data.get("tool_name", "")
             tool_input = input_data.get("tool_input", {})
 
@@ -486,8 +501,8 @@ class AgentRunner:
                 isinstance(result, dict)
                 and result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
             )
+            needs_direction = False
             if not tool_denied:
-                needs_direction = False
                 gate_dirs = getattr(handler, '_direction_gate_dirs', None) or []
 
                 gate_tools = getattr(handler, '_direction_gate_tools', [])
@@ -528,9 +543,40 @@ class AgentRunner:
                         "decision": decision,
                     })
 
+            # Trace final decision
+            try:
+                _decision = "deny" if isinstance(result, dict) and result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny" else "allow"
+                _trace_end = {
+                    "ts": datetime.now().isoformat(),
+                    "hook": "PreToolUse_result",
+                    "tool": tool_name,
+                    "target": tool_input.get("file_path", "") or tool_input.get("command", "")[:100],
+                    "tool_rules": "deny" if tool_denied else "pass",
+                    "gate": "deny" if (needs_direction and not getattr(handler.state, 'current_direction', None)) else "pass" if needs_direction else "n/a",
+                    "final": _decision,
+                }
+                with open("/tmp/hook_trace.jsonl", "a") as _f:
+                    _f.write(_json.dumps(_trace_end) + "\n")
+                    _f.flush()
+            except Exception:
+                pass
+
             return result if result is not None else {}
 
         async def on_post_tool_use(input_data, tool_use_id, context):
+            # Universal hook trace
+            import json as _json
+            try:
+                with open("/tmp/hook_trace.jsonl", "a") as _f:
+                    _f.write(_json.dumps({
+                        "ts": datetime.now().isoformat(),
+                        "hook": "PostToolUse",
+                        "tool": input_data.get("tool_name", ""),
+                    }) + "\n")
+                    _f.flush()
+            except Exception:
+                pass
+
             tool_name = input_data.get("tool_name", "")
             tool_response = input_data.get("tool_response", "")
 

@@ -24,8 +24,8 @@ RUNS_DIR = KB_REPO / "runs"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Gem thresholds — both must be exceeded for a config to count as improved
-GEM_ABS_THRESHOLD_MS = 0.002   # minimum absolute improvement in milliseconds (2 μs)
-GEM_REL_THRESHOLD = 0.002      # minimum relative improvement (0.002 = 0.2%)
+GEM_ABS_THRESHOLD_MS = 0.003   # minimum absolute improvement in milliseconds (3 μs)
+GEM_REL_THRESHOLD = 0.003      # minimum relative improvement (0.003 = 0.3%)
 
 
 # ---------------------------------------------------------------------------

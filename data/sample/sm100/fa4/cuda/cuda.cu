@@ -387,112 +387,6 @@ fa_tcgen05(
                 _commit(mma_bar);
             }
             _mw(mma_bar, 0); __syncthreads();
-        }
-        __syncthreads();
-
-        /* PV GEMM via TCGEN05: O[128×128] += P[128×128] × V[128×128]
-         * P in SMEM at K_OFF (two 128×64 halves, swizzled).
-         * V in SMEM at V_OFF (two 128×64 halves, TMA-swizzled).
-         * O accumulates in O_tmem.
-         *
-         * K dimension = 128 (columns of P / rows of V).
-         * MMA K=16, so 8 K-steps.
-         * P_lo covers P columns 0-63, P_hi covers 64-127.
-         * V_lo covers V columns 0-63 (output cols 0-63), V_hi covers 64-127.
-         *
-         * Actually, for PV: C[m][n] = sum_k P[m][k] * V[k][n]
-         * P is MxK=128×128, V is KxN=128×128 (but V stored as rows×cols).
-         * The K dimension of PV = 128 = BLOCK_KV.
-         * P's "K" direction = P's column direction.
-         * V's "K" direction = V's row direction.
-         *
-         * P is stored as two halves: P_lo[128×64] and P_hi[128×64].
-         * Each half has stride 64 bf16 = 128 bytes per row.
-         * V is stored as two halves: V_lo[128×64] and V_hi[128×64].
-         * Each half has stride 64 bf16 = 128 bytes per row.
-         *
-         * For MMA K-stepping through P's columns (V's rows):
-         * K-steps 0-3 use P_lo columns 0-63 and V rows 0-63.
-         * K-steps 4-7 use P_hi columns 64-127 and V rows 64-127.
-         *
-         * But wait: V_lo covers V's first 64 COLUMNS (head_dim 0-63),
-         * not first 64 ROWS. V is [K×DIM] = [128×128]. V_lo is V[0:128][0:64].
-         * The K dimension of V is the ROW dimension (128 rows).
-         *
-         * For PV: we reduce over K=128, which means over V's ROWS.
-         * V_lo[128×64] has ALL 128 K-rows but only 64 output columns.
-         * So we need TWO PV GEMMs: one for output cols 0-63 (using V_lo),
-         * one for output cols 64-127 (using V_hi).
-         * Each PV GEMM: P[128×128] × V_half[128×64] → O_half[128×64].
-         *
-         * But 128×64 MMA → idesc N=64. And K=128 → 8 K-steps.
-         * P has 128 columns stored as P_lo[128×64] and P_hi[128×64].
-         * For K-stepping: K-steps 0-3 from P_lo, K-steps 4-7 from P_hi.
-         * V_half has 128 rows × 64 cols, stride=64*2=128B. */
-
-        /* PV GEMM via TCGEN05: O[128×128] += P[128×128] × V[128×128]
-         * Use IDESC_128x128 (same as QK GEMM).
-         * P is in SMEM at K_OFF as two contiguous 128×64 halves.
-         * V is in SMEM at V_OFF as two contiguous 128×64 halves.
-         * The 128-wide MMA reads across both halves (they're adjacent in SMEM).
-         *
-         * For PV: K dimension = BLOCK_KV = 128 (P's columns = V's rows).
-         * P halves split K at 64: P_lo=K[0:64], P_hi=K[64:128].
-         * V halves split N (DIM) at 64: V_lo=DIM[0:64], V_hi=DIM[64:128].
-         *
-         * K-stepping through P's columns:
-         *   K-steps 0-3: advance within P_lo (K=0..63)
-         *   K-steps 4-7: advance within P_hi (K=64..127)
-         * V descriptor stays at V_lo base but MMA reads 128 V-columns (both halves).
-         * V rows advance by MMA_K per K-step.
-         *
-         * BUT: V's K dimension is ROWS. V has 128 rows × 128 cols (two halves).
-         * V_lo = V[0:128][0:64], V_hi = V[0:128][64:128].
-         * Advancing V by K-step means advancing V's row index by MMA_K=16.
-         * V_lo stride = 64*2 = 128B per row. K-step advance = 16*128 = 2048B.
-         * But MMA needs 128 V-columns for N=128 output. V_lo only has 64 cols.
-         * The MMA reads across V_lo into V_hi (they're contiguous). */
-        /* PV GEMM: two passes for 128×128 output.
-         * Pass 1: P[128×128] × V_lo[128×64] → O_tmem (cols 0-63)
-         * Pass 2: P[128×128] × V_hi[128×64] → S_tmem (cols 0-63, used as O cols 64-127)
-         * idesc 128×64 for each pass. K=128, 8 K-steps per pass. */
-        {
-            /* PV idesc: 128×64 BF16→F32, transpose_b=1 */
-            uint32_t idesc_pv = (1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(8u<<17)|(8u<<24);
-            uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
-            uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
-
-            /* PV Pass 1: O_lo_tmem = P × V_lo (fresh, no accumulate) */
-            for (int c = lid; c < 64; c += 32) _st1(O_lo + c, 0);
-            _ws(); __syncthreads();
-            if (tid == 0) {
-                _mi(mma_bar, 1);
-                uint64_t vd0 = _desc(smem + V_OFF, 8 * 64 * 2);
-                for (int kk = 0; kk < 8; kk++) {
-                    uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
-                                           : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
-                    uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_lo, pd, vd, idesc_pv, (kk > 0));
-                }
-                _commit(mma_bar);
-            }
-            _mw(mma_bar, 0); __syncthreads();
-
-            /* PV Pass 2: O_hi_tmem = P × V_hi (fresh) */
-            for (int c = lid; c < 64; c += 32) _st1(O_hi + c, 0);
-            _ws(); __syncthreads();
-            if (tid == 0) {
-                _mi(mma_bar, 1);
-                uint64_t vd0 = _desc(smem + V_OFF + HALF_BYTES, 8 * 64 * 2);
-                for (int kk = 0; kk < 8; kk++) {
-                    uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
-                                           : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
-                    uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_hi, pd, vd, idesc_pv, (kk > 0));
-                }
-                _commit(mma_bar);
-            }
-            _mw(mma_bar, 0); __syncthreads();
 
             /* Read PV result from TMEM, add to O registers */
             _fb(); __syncthreads(); _fa();
@@ -505,8 +399,9 @@ fa_tcgen05(
                     O_reg_hi[i] += __int_as_float(pv_hi[i]);
                 }
             }
-            __syncthreads();
         }
+        __syncthreads();
+
     }
 
     /* ---- Finalize: O = O_reg / rowsum ---- */

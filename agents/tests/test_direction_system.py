@@ -172,6 +172,44 @@ def test_steward_action_levels():
     assert "WRAP_UP" not in _ACTION_LEVELS
 
 
+def test_context_header_has_direction():
+    """Context header includes direction_json and direction_path."""
+    from agents.response_router import _CONTEXT_HEADER
+
+    assert "{direction_json}" in _CONTEXT_HEADER
+    assert "{direction_path}" in _CONTEXT_HEADER
+    assert "{mode}" in _CONTEXT_HEADER
+    assert "{recent_events}" in _CONTEXT_HEADER
+    assert "{transcript_path}" in _CONTEXT_HEADER
+    assert "{events_path}" in _CONTEXT_HEADER
+
+
+def test_context_header_no_stale_fields():
+    """Context header should not have removed fields."""
+    from agents.response_router import _CONTEXT_HEADER
+
+    assert "{direction_name}" not in _CONTEXT_HEADER
+    assert "{direction_description}" not in _CONTEXT_HEADER
+    assert "{direction_opportunity}" not in _CONTEXT_HEADER
+
+
+def test_all_scenarios_registered():
+    """All expected scenarios are in SCENARIO_MAX_TURNS."""
+    from agents.response_router import SCENARIO_MAX_TURNS
+
+    expected = [
+        "ask_question", "permission", "session_end",
+        "progress_check", "set_direction", "start_exploring",
+        "direction_pulse",
+    ]
+    for name in expected:
+        assert name in SCENARIO_MAX_TURNS, f"Missing scenario: {name}"
+
+    # Removed scenarios
+    assert "stuck" not in SCENARIO_MAX_TURNS
+    assert "time_limit" not in SCENARIO_MAX_TURNS
+
+
 if __name__ == "__main__":
     tests = [v for k, v in globals().items() if k.startswith("test_")]
     for t in tests:

@@ -677,8 +677,21 @@ class Workshop(DefaultHandler):
         recent = ""
         if self._current_log:
             recent = self._current_log.recent_summary(n=5)
+        # Direction context: only in building mode
+        direction_json = "None (exploring mode)"
+        direction_path = ""
+        if self.state.mode == MODE_BUILDING and self.state.current_direction:
+            direction_json = json.dumps(self.state.current_direction, indent=2, ensure_ascii=False)
+            if self._solver_runner and self._solver_runner._storage:
+                dirs_dir = self._solver_runner._storage.directions_path
+                files = sorted(dirs_dir.glob("*.json")) if dirs_dir.exists() else []
+                if files:
+                    direction_path = str(files[-1])
+
         return {
             "mode": self.state.mode,
+            "direction_json": direction_json,
+            "direction_path": direction_path,
             "transcript_path": tp,
             "events_path": ep,
             "recent_events": recent or "(no events yet)",
@@ -961,30 +974,24 @@ class Workshop(DefaultHandler):
             print(f"[Workshop] Time limit at {elapsed} — auto-continuing")
             return "continue"
         elif event.alert_type == "progress_check":
-            # Actually call Steward with direction context
-            direction = self.state.current_direction
-            if direction and tp:
+            # Call Steward — direction context is in _get_steward_context()
+            if tp:
                 response = await self.steward.check_progress(
                     **self._get_steward_context(),
                     elapsed_time=elapsed,
-                    direction=direction,
                 )
                 print(f"[Workshop] Progress check at {elapsed} — Steward: {response.action}")
                 if response.action == "REDIRECT":
                     self.state.consecutive_stuck = 0
                     return f"inject:{response.detail}"
-            else:
-                print(f"[Workshop] Progress check at {elapsed} — direction not set, skipping")
             return "continue"
         elif event.alert_type in ("idle_timeout", "loop_detected"):
             # Route through progress_check — Steward decides how to respond
             self.state.consecutive_stuck += 1
-            direction = self.state.current_direction
             if tp:
                 response = await self.steward.check_progress(
                     **self._get_steward_context(),
                     elapsed_time=elapsed,
-                    direction=direction,
                 )
                 print(f"[Workshop] {event.alert_type} at {elapsed} — Steward: {response.action}")
                 if response.action == "REDIRECT":

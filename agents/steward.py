@@ -161,19 +161,14 @@ class Steward:
         transcript_path: str,
         events_path: str,
         recent_events: str,
+        mode: str,
         elapsed_time: str,
-        direction: dict | None = None,
+        **kwargs,
     ) -> StewardResponse:
         """Periodic progress assessment. Returns ON_TRACK/REDIRECT."""
-        ctx = _base_context(transcript_path, events_path, recent_events)
-        ctx.update({
-            "elapsed_time": elapsed_time,
-            "direction_name": direction.get("name", "None") if direction else "None",
-            "direction_description": direction.get("description", "None") if direction else "None",
-            "direction_opportunity": direction.get("opportunity", "None") if direction else "None",
-            "direction_evidence": direction.get("evidence", "None") if direction else "None",
-            "direction_ideas": str(direction.get("ideas", "None")) if direction else "None",
-        })
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx.update(kwargs)
+        ctx["elapsed_time"] = elapsed_time
         verdict = await self.router.respond("progress_check", ctx)
         return _to_steward_response(verdict)
 

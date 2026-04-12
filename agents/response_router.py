@@ -31,6 +31,10 @@ SCENARIO_MAX_TURNS: dict[str, int] = {
 # Common context block prepended to every scenario
 _CONTEXT_HEADER = """## Solver Mode: {mode}
 
+## Current Direction
+{direction_json}
+Direction file: {direction_path}
+
 ## Recent Events
 {recent_events}
 
@@ -61,14 +65,7 @@ Errors: {error_count}
 ## Solver's Final Output
 {result_text}""",
 
-    "progress_check": """## Current Direction
-Name: {direction_name}
-Description: {direction_description}
-Opportunity: {direction_opportunity}
-Evidence: {direction_evidence}
-Ideas: {direction_ideas}
-
-""" + _CONTEXT_HEADER + """
+    "progress_check": _CONTEXT_HEADER + """
 
 ## Progress Check
 Elapsed: {elapsed_time}""",

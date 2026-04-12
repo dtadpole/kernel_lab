@@ -773,7 +773,8 @@ def formal_benchmark(
     run_tag = f"bench-{kernel}-{int(time.time())}"
 
     refs = [r for r in resolved if r["source"] in ("ref", "peak")]
-    gens = [r for r in resolved if r["source"] in ("gen", "sample")]
+    gens = [r for r in resolved if r["source"] == "gen"]
+    samples = [r for r in resolved if r["source"] == "sample"]
 
     # Golden = first ref (alphabetical). Used for speedup ratios.
     # Correctness is only valid between impls sharing the same input
@@ -843,7 +844,7 @@ print(json.dumps({{"ok": True, "configs": results}}))
             return {"ok": False, "error": str(exc)}
 
     # Split ALL impls by file type, not by source.
-    all_impls = refs + gens
+    all_impls = refs + gens + samples
     py_impls = [i for i in all_impls if i["file_type"] == "py"]
     cu_impls = [i for i in all_impls if i["file_type"] == "cu"]
 

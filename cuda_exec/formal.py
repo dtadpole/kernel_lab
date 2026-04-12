@@ -1290,7 +1290,21 @@ def cli_main() -> None:
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
     import os
+    import signal
     import sys
+
+    # Create a new process group so all child processes (compile.sh, trial.py,
+    # autotune workers, etc.) belong to this group. When formal.py is killed,
+    # we forward the signal to the entire group — no orphan processes.
+    os.setpgrp()
+
+    def _kill_group(signum, frame):
+        """Forward kill signal to entire process group, then exit."""
+        os.killpg(os.getpgrp(), signal.SIGTERM)
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _kill_group)
+    signal.signal(signal.SIGINT, _kill_group)
 
     _CONF_DIR = str(Path(__file__).resolve().parents[1] / "conf")
 
@@ -1347,8 +1361,10 @@ def cli_main() -> None:
     # Kill any existing formal bench on the same GPU.
     # Only one formal bench per GPU — concurrent instances fight for GPU
     # resources and all stall. The newest one wins.
+    # Since each formal.py sets os.setpgrp(), killing the main process via
+    # SIGTERM triggers _kill_group which kills the entire process group
+    # (compile.sh, trial.py, autotune workers, etc.).
     if gpu is not None:
-        import signal
         my_pid = os.getpid()
         try:
             result = __import__("subprocess").run(

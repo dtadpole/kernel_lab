@@ -750,13 +750,18 @@ class Workshop(DefaultHandler):
             # Only inject if Steward has something to say
             if response.action == "REDIRECT" and response.detail:
                 if self._solver_runner and self._solver_runner._client:
-                    inject_msg = response.detail
-                    if response.reasoning:
-                        inject_msg += f"\n\n{response.reasoning}"
-                    await self._solver_runner._client.query(inject_msg)
-                    print(f"[Workshop] Direction diffusion ({trigger}): {response.action}")
+                    try:
+                        inject_msg = response.detail
+                        if response.reasoning:
+                            inject_msg += f"\n\n{response.reasoning}"
+                        await self._solver_runner._client.query(inject_msg)
+                        print(f"[Workshop] Injected steward guidance (direction_pulse/{trigger}): {response.detail[:80]}")
+                    except Exception as e:
+                        print(f"[Workshop] Inject failed (direction_pulse/{trigger}): {e}")
+                else:
+                    print(f"[Workshop] Inject skipped — no client (direction_pulse/{trigger})")
         except Exception as e:
-            print(f"[Workshop] Direction diffusion error: {e}")
+            print(f"[Workshop] Direction pulse error ({trigger}): {e}")
 
     async def on_text(self, event: TextOutputEvent) -> None:
         pass

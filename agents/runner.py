@@ -260,6 +260,17 @@ class AgentRunner:
 
         await self._client.query(prompt)
 
+    async def _inject_guidance(self, guidance: str, source: str) -> None:
+        """Inject Steward guidance into Solver via client.query(). Logs all outcomes."""
+        if not self._client:
+            print(f"[Runner] Inject skipped — no client ({source})")
+            return
+        try:
+            await self._client.query(guidance)
+            print(f"[Runner] Injected steward guidance ({source}): {guidance[:80]}")
+        except Exception as e:
+            print(f"[Runner] Inject failed ({source}): {e}")
+
     async def stop(self) -> None:
         """Kill subprocess. Write process_end.json. Close all logs.
 
@@ -1181,8 +1192,7 @@ class AgentRunner:
                 if action == "terminate":
                     self._strategy_terminate = True
                 elif action and action.startswith("inject:"):
-                    if self._client:
-                        await self._client.query(action[len("inject:"):])
+                    await self._inject_guidance(action[len("inject:"):], "total_timeout")
                 self._write_monitor_log(monitor_entry)
                 return
 
@@ -1203,8 +1213,8 @@ class AgentRunner:
                         await asyncio.wait_for(self._client.interrupt(), timeout=5)
                     except (asyncio.TimeoutError, Exception):
                         pass
-                elif action and action.startswith("inject:") and self._client:
-                    await self._client.query(action[len("inject:"):])
+                elif action and action.startswith("inject:"):
+                    await self._inject_guidance(action[len("inject:"):], "idle_timeout")
                 self._write_monitor_log(monitor_entry)
                 return
 
@@ -1219,8 +1229,8 @@ class AgentRunner:
                 monitor_entry["alerts"].append(f"loop_detected:{seq[0]}")
                 action = await self.handler.on_monitor_alert(alert)
                 monitor_entry["actions"].append(f"loop→{action}")
-                if action and action.startswith("inject:") and self._client:
-                    await self._client.query(action[len("inject:"):])
+                if action and action.startswith("inject:"):
+                    await self._inject_guidance(action[len("inject:"):], "loop_detected")
                 self._write_monitor_log(monitor_entry)
                 return
 
@@ -1236,7 +1246,12 @@ class AgentRunner:
                     )
                     log.append(alert)
                     monitor_entry["alerts"].append("progress_check")
-                    await self.handler.on_monitor_alert(alert)
+                    action = await self.handler.on_monitor_alert(alert)
+                    monitor_entry["actions"].append(f"progress_check→{action}")
+                    if action == "terminate":
+                        self._strategy_terminate = True
+                    elif action and action.startswith("inject:"):
+                        await self._inject_guidance(action[len("inject:"):], "progress_check")
 
             # No alerts triggered — healthy
             self._write_monitor_log(monitor_entry)

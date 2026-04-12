@@ -808,15 +808,31 @@ print(json.dumps({{"ok": True, "configs": results}}))
         # ================================================================
         # Phase B: Compile ALL .cu impls, collect binary paths
         # (.py impls don't need compilation — they run via trial.py directly)
+        #
+        # Two sub-phases:
+        #   B1: Autotune impls (sequential — autotune internally parallelizes combos)
+        #   B2: Non-autotune impls (parallel — independent compile_endpoint calls)
         # ================================================================
         compiled_binaries: Dict[str, str] = {}     # slug → binary path (non-autotuned)
         compile_results: Dict[str, dict] = {}      # slug → compile result
         compile_metadata: Dict[str, object] = {}   # slug → Metadata
         autotune_results: Dict[str, object] = {}   # slug → autotune result
-        autotune_binaries: Dict[str, dict] = {}    # slug → _autotune_compile_only result
+        autotune_binaries: Dict[str, dict] = {}    # slug → autotune binary info
 
+        # Classify impls: autotune vs non-autotune
+        autotune_impls = []
+        default_impls = []
         for cu_impl in cu_impls:
-            unique_rev = int(time.time()) % 100000
+            if cu_impl["source"] in ("gen", "sample"):
+                autotune_yaml = Path(cu_impl["entry_point"]).parent / "autotune.yaml"
+                if autotune_yaml.exists():
+                    autotune_impls.append(cu_impl)
+                    continue
+            default_impls.append(cu_impl)
+
+        # --- B1: Autotune impls (sequential) ---
+        for cu_impl in autotune_impls:
+            unique_rev = (int(time.time_ns()) % 10000000)
             meta = Metadata(
                 run_tag=run_tag,
                 version="v1",
@@ -826,85 +842,81 @@ print(json.dumps({{"ok": True, "configs": results}}))
             )
             compile_metadata[cu_impl["slug"]] = meta
 
-            # --- Autotune (gen impls only) ---
-            if cu_impl["source"] in ("gen", "sample"):
-                autotune_yaml = Path(cu_impl["entry_point"]).parent / "autotune.yaml"
-                if autotune_yaml.exists():
-                    try:
-                        from cuda_exec.autotune import run_autotune, format_autotune_report
-                        from cuda_exec.host_env import resolve_compile_arch, resolve_host_env
+            try:
+                from cuda_exec.autotune import run_autotune, format_autotune_report
+                from cuda_exec.host_env import resolve_compile_arch, resolve_host_env
 
-                        compile_arch = resolve_compile_arch()
-                        autotune_env = os.environ.copy()
-                        autotune_env.update(resolve_host_env())
-                        if "CUDA_VISIBLE_DEVICES" in os.environ:
-                            autotune_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+                compile_arch = resolve_compile_arch()
+                autotune_env = os.environ.copy()
+                autotune_env.update(resolve_host_env())
+                if "CUDA_VISIBLE_DEVICES" in os.environ:
+                    autotune_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
 
-                        logger.info("[%s] autotune start", cu_impl["slug"])
-                        at_start = time.time()
-                        # Autotune compiles to bench_runtime dir — binaries are reused, not recompiled
-                        autotune_dir = bench_runtime / "autotune" / cu_impl["slug"]
-                        at_result = run_autotune(
-                            cu_path=Path(cu_impl["entry_point"]),
-                            autotune_yaml=autotune_yaml,
-                            configs=configs,
-                            arch=compile_arch,
-                            env_base=autotune_env,
-                            output_dir=autotune_dir,
-                        )
-                        at_report = format_autotune_report(at_result)
-                        logger.info("[%s] autotune done (%.1fs)\n%s",
-                                    cu_impl["slug"], time.time() - at_start, at_report)
-                        print(at_report, file=sys.stderr)
-                        autotune_results[cu_impl["slug"]] = at_result
+                logger.info("[%s] autotune start", cu_impl["slug"])
+                at_start = time.time()
+                autotune_dir = bench_runtime / "autotune" / cu_impl["slug"]
+                at_result = run_autotune(
+                    cu_path=Path(cu_impl["entry_point"]),
+                    autotune_yaml=Path(cu_impl["entry_point"]).parent / "autotune.yaml",
+                    configs=configs,
+                    arch=compile_arch,
+                    env_base=autotune_env,
+                    output_dir=autotune_dir,
+                )
+                at_report = format_autotune_report(at_result)
+                logger.info("[%s] autotune done (%.1fs)\n%s",
+                            cu_impl["slug"], time.time() - at_start, at_report)
+                print(at_report, file=sys.stderr)
+                autotune_results[cu_impl["slug"]] = at_result
 
-                        # Build per-config binary map directly from autotune results
-                        # (no recompile — binaries already exist in autotune_dir)
-                        per_config_binary: Dict[str, str | None] = {}
-                        for cfg_slug, pcw in at_result.per_config_results.items():
-                            per_config_binary[cfg_slug] = pcw.binary_path if pcw.binary_path else None
-                        # Configs without autotune use default binary (compiled below in Phase C fallback)
-                        for cfg_slug in at_result.configs_without_autotune:
-                            per_config_binary[cfg_slug] = None  # will use default compile
+                per_config_binary: Dict[str, str | None] = {}
+                for cfg_slug, pcw in at_result.per_config_results.items():
+                    per_config_binary[cfg_slug] = pcw.binary_path if pcw.binary_path else None
+                for cfg_slug in at_result.configs_without_autotune:
+                    per_config_binary[cfg_slug] = None
 
-                        autotune_binaries[cu_impl["slug"]] = {
-                            "per_config_binary": per_config_binary,
-                            "compile_ok": True,
-                            "autotune_info": {
-                                "total_combos": at_result.total_combos,
-                                "valid_combos": at_result.valid_combos,
-                                "compiled_ok": at_result.compiled_ok,
-                                "benchmarked_ok": at_result.benchmarked_ok,
-                                "duration_s": round(at_result.duration_s, 1),
-                                "configs_without_autotune": at_result.configs_without_autotune,
-                                "per_config_winners": {
-                                    s: {"combo": p.best_combo, "tag": p.best_tag,
-                                        "median_ms": p.best_median_ms, "defines_flags": p.defines_flags}
-                                    for s, p in at_result.per_config_results.items()
-                                },
-                            },
-                        }
-                        compile_metadata[cu_impl["slug"]] = meta
-                        continue  # skip default compile below
+                autotune_binaries[cu_impl["slug"]] = {
+                    "per_config_binary": per_config_binary,
+                    "compile_ok": True,
+                    "autotune_info": {
+                        "total_combos": at_result.total_combos,
+                        "valid_combos": at_result.valid_combos,
+                        "compiled_ok": at_result.compiled_ok,
+                        "benchmarked_ok": at_result.benchmarked_ok,
+                        "duration_s": round(at_result.duration_s, 1),
+                        "configs_without_autotune": at_result.configs_without_autotune,
+                        "per_config_winners": {
+                            s: {"combo": p.best_combo, "tag": p.best_tag,
+                                "median_ms": p.best_median_ms, "defines_flags": p.defines_flags}
+                            for s, p in at_result.per_config_results.items()
+                        },
+                    },
+                }
 
-                    except Exception as exc:
-                        logger.warning("[%s] autotune failed: %s — compiling with defaults",
-                                       cu_impl["slug"], exc)
+            except Exception as exc:
+                logger.warning("[%s] autotune failed: %s — falling back to default compile",
+                               cu_impl["slug"], exc)
+                default_impls.append(cu_impl)  # fall back to default compile
 
-            # --- Default: compile with kernel's default #define values ---
-            # Include this .cu impl + other .cu impls for correctness.
-            # Include .py impls so they're staged in the workspace for trial.py
-            # to discover. (trial.py needs them in inputs/{slug}/ directories.)
-            compile_impls = {}
-            compile_impls[cu_impl["slug"]] = dict(cu_impl["files"])
+        # --- B2: Non-autotune impls (parallel compile) ---
+        def _compile_one_impl(cu_impl: dict) -> tuple:
+            """Compile a single impl. Returns (slug, meta, cr, binary_path, error)."""
+            unique_rev = (int(time.time_ns()) % 10000000) + hash(cu_impl["slug"]) % 1000
+            meta = Metadata(
+                run_tag=run_tag,
+                version="v1",
+                direction_id=0,
+                direction_slug=f"{kernel}-{cu_impl['slug']}",
+                revision=unique_rev,
+            )
+
+            compile_impls = {cu_impl["slug"]: dict(cu_impl["files"])}
             for other_cu in cu_impls:
                 if other_cu["slug"] != cu_impl["slug"]:
                     compile_impls[other_cu["slug"]] = dict(other_cu["files"])
             for py_impl in py_impls:
                 compile_impls[py_impl["slug"]] = dict(py_impl["files"])
 
-            logger.info("[%s] compile start", cu_impl["slug"])
-            compile_start = time.time()
             compile_req = CompileRequest(
                 metadata=meta,
                 timeout_seconds=timeout_seconds,
@@ -912,31 +924,45 @@ print(json.dumps({{"ok": True, "configs": results}}))
             )
             compile_resp = compile_endpoint(compile_req)
             cr = compile_resp.model_dump(mode="json")
-            compile_results[cu_impl["slug"]] = cr
-            logger.info("[%s] compile done (%.1fs)", cu_impl["slug"], time.time() - compile_start)
 
             if not compile_resp.all_ok:
-                results[cu_impl["slug"]] = {
-                    "impl": cu_impl["slug"],
-                    "compile_ok": False, "trial_ok": False,
-                    "compile_result": cr, "trial_result": None,
-                }
-                continue
+                return (cu_impl["slug"], meta, cr, None, "compile failed")
 
-            # Find compiled binary path
             try:
                 workspace = resolve_workspace_bundle(**meta.model_dump())
                 target_path, _ = _primary_artifact_from_manifest(workspace)
-                compiled_binaries[cu_impl["slug"]] = str(target_path)
-                logger.info("[%s] binary: %s", cu_impl["slug"], target_path)
+                return (cu_impl["slug"], meta, cr, str(target_path), None)
             except Exception as exc:
-                logger.warning("[%s] failed to resolve binary: %s", cu_impl["slug"], exc)
-                results[cu_impl["slug"]] = {
-                    "impl": cu_impl["slug"],
-                    "compile_ok": True, "trial_ok": False,
-                    "compile_result": cr, "trial_result": None,
-                    "error": f"binary resolution failed: {exc}",
-                }
+                return (cu_impl["slug"], meta, cr, None, f"binary resolution failed: {exc}")
+
+        if default_impls:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            compile_phase_start = time.time()
+            logger.info("Phase B2: compiling %d non-autotune impls in parallel", len(default_impls))
+
+            with ThreadPoolExecutor(max_workers=len(default_impls)) as pool:
+                futures = {pool.submit(_compile_one_impl, impl): impl for impl in default_impls}
+                for future in as_completed(futures):
+                    slug, meta, cr, binary_path, error = future.result()
+                    compile_metadata[slug] = meta
+                    compile_results[slug] = cr
+
+                    if error:
+                        logger.warning("[%s] %s", slug, error)
+                        results[slug] = {
+                            "impl": slug,
+                            "compile_ok": binary_path is not None,
+                            "trial_ok": False,
+                            "compile_result": cr,
+                            "trial_result": None,
+                            "error": error,
+                        }
+                    else:
+                        compiled_binaries[slug] = binary_path
+                        logger.info("[%s] compiled → %s", slug, binary_path)
+
+            logger.info("Phase B2: done (%.1fs)", time.time() - compile_phase_start)
 
         # ================================================================
         # Phase C: Single-pass trial — ALL impls per config.

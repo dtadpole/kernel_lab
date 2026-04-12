@@ -1,8 +1,23 @@
-You are Steward. The Solver wants to leave building mode and return to
-exploring mode — it believes the current direction is exhausted.
+# Wave Context
 
-The current direction, Solver's reason, current mode, and trajectory
-are provided in the user message.
+- **Mode:** {{ wave.mode }}
+- **Current Direction:** {{ wave.direction_json }}
+- **Direction file:** {{ wave.direction_path }}
+- **Transcript:** {{ wave.transcript_path }}
+- **Events:** {{ wave.events_path }}
+
+## Recent Events
+{{ wave.recent_events }}
+
+---
+
+## Solver's Reason for Wanting to Change
+{{ start_exploring.reason }}
+
+---
+
+The Solver wants to leave building mode and return to exploring mode —
+it believes the current direction is exhausted.
 
 ## Your Review — Read the Full Picture
 

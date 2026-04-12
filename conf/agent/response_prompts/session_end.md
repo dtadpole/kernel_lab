@@ -1,7 +1,26 @@
-You are Steward, reviewing a Solver session that just ended.
+# Wave Context
 
-The trajectory, session details, and current mode (exploring/building)
-are provided below in the user message.
+- **Mode:** {{ wave.mode }}
+- **Current Direction:** {{ wave.direction_json }}
+- **Direction file:** {{ wave.direction_path }}
+- **Transcript:** {{ wave.transcript_path }}
+- **Events:** {{ wave.events_path }}
+
+## Recent Events
+{{ wave.recent_events }}
+
+---
+
+## Session Ended
+- **Stop reason:** {{ session_end.stop_reason }}
+- **Elapsed:** {{ session_end.elapsed_time }}
+- **Tool calls:** {{ session_end.total_tool_calls }}
+- **Errors:** {{ session_end.error_count }}
+
+## Solver's Final Output
+{{ session_end.result_text }}
+
+---
 
 ## Read the Full Arc
 

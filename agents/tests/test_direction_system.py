@@ -172,27 +172,6 @@ def test_steward_action_levels():
     assert "WRAP_UP" not in _ACTION_LEVELS
 
 
-def test_context_header_has_direction():
-    """Context header includes direction_json and direction_path."""
-    from agents.response_router import _CONTEXT_HEADER
-
-    assert "{direction_json}" in _CONTEXT_HEADER
-    assert "{direction_path}" in _CONTEXT_HEADER
-    assert "{mode}" in _CONTEXT_HEADER
-    assert "{recent_events}" in _CONTEXT_HEADER
-    assert "{transcript_path}" in _CONTEXT_HEADER
-    assert "{events_path}" in _CONTEXT_HEADER
-
-
-def test_context_header_no_stale_fields():
-    """Context header should not have removed fields."""
-    from agents.response_router import _CONTEXT_HEADER
-
-    assert "{direction_name}" not in _CONTEXT_HEADER
-    assert "{direction_description}" not in _CONTEXT_HEADER
-    assert "{direction_opportunity}" not in _CONTEXT_HEADER
-
-
 def test_all_scenarios_registered():
     """All expected scenarios are in SCENARIO_MAX_TURNS."""
     from agents.response_router import SCENARIO_MAX_TURNS
@@ -210,18 +189,18 @@ def test_all_scenarios_registered():
     assert "time_limit" not in SCENARIO_MAX_TURNS
 
 
-def test_all_scenarios_render_mode_and_direction():
-    """All scenarios render mode and direction_json from context variables.
+def test_all_scenarios_render_with_jinja2():
+    """All scenario templates render correctly with wave_context + scenario vars.
 
-    This tests the bug fix: steward methods must pass mode/direction_json
-    through to the template, not leave them as '(not available)'.
+    Verifies that Jinja2 templates produce output containing the expected
+    wave context values and scenario-specific values.
     """
     from agents.response_router import ResponseRouter
 
     router = ResponseRouter(prompts_dir=Path("conf/agent/response_prompts"))
 
-    # Simulate what Workshop._get_steward_context() returns
-    base_vars = {
+    # Simulate wave_context (what Workshop._get_steward_context() returns)
+    wave_context = {
         "mode": "building",
         "direction_json": '{"name": "warp-specialization"}',
         "direction_path": "/tmp/directions/001_warp-specialization.json",
@@ -230,31 +209,53 @@ def test_all_scenarios_render_mode_and_direction():
         "recent_events": "compile succeeded",
     }
 
-    # Scenario-specific extra vars
-    extras = {
-        "ask_question": {"question": "How should I proceed?"},
-        "permission": {"tool_name": "Write", "tool_input": "{}"},
-        "session_end": {
+    # Scenario-specific variables (matching Jinja2 namespace)
+    scenario_vars = {
+        "ask_question": {"ask_question": {"question": "How should I proceed?"}},
+        "permission": {"permission": {"tool_name": "Write", "tool_input": "{}"}},
+        "session_end": {"session_end": {
             "result_text": "done", "stop_reason": "end_turn",
             "elapsed_time": "30m", "total_tool_calls": "50",
             "error_count": "2",
-        },
-        "progress_check": {"elapsed_time": "15m"},
-        "set_direction": {},  # direction_json already in base_vars
-        "direction_pulse": {"trigger_type": "compile"},
-        "start_exploring": {"reason": "direction exhausted"},
+        }},
+        "progress_check": {"progress_check": {"elapsed_time": "15m"}},
+        "set_direction": {"set_direction": {
+            "proposed_direction_json": '{"name": "new-approach"}',
+        }},
+        "direction_pulse": {"direction_pulse": {"trigger_type": "compile"}},
+        "start_exploring": {"start_exploring": {"reason": "direction exhausted"}},
     }
 
     for scenario in router.scenarios:
-        variables = {**base_vars, **extras.get(scenario, {})}
-        rendered = router.build_context(scenario, variables)
+        variables = {"wave": wave_context, **scenario_vars.get(scenario, {})}
+        rendered = router.render_user_message(scenario, variables)
 
         assert "building" in rendered, \
-            f"{scenario}: mode 'building' not rendered — got: {rendered[:200]}"
+            f"{scenario}: wave.mode 'building' not rendered"
         assert "warp-specialization" in rendered, \
-            f"{scenario}: direction_json not rendered — got: {rendered[:200]}"
-        assert "(not available)" not in rendered, \
-            f"{scenario}: has '(not available)' — missing variable: {rendered[:200]}"
+            f"{scenario}: wave.direction_json not rendered"
+        assert "/tmp/transcript.md" in rendered, \
+            f"{scenario}: wave.transcript_path not rendered"
+
+
+def test_jinja2_missing_variable_raises():
+    """Missing required template variable raises UndefinedError."""
+    import jinja2
+    from agents.response_router import ResponseRouter
+
+    router = ResponseRouter(prompts_dir=Path("conf/agent/response_prompts"))
+
+    # Pass wave but omit scenario-specific vars
+    try:
+        router.render_user_message("ask_question", {
+            "wave": {"mode": "exploring", "direction_json": "None",
+                     "direction_path": "", "transcript_path": "",
+                     "events_path": "", "recent_events": ""},
+            # Missing: ask_question.question
+        })
+        assert False, "Should have raised UndefinedError"
+    except jinja2.UndefinedError:
+        pass  # Expected
 
 
 if __name__ == "__main__":

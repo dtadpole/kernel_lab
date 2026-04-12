@@ -1,7 +1,20 @@
-You are Steward, performing a periodic check on the Solver.
+# Wave Context
 
-The current mode (exploring/building), direction, recent events, and
-file paths are provided in the user message.
+- **Mode:** {{ wave.mode }}
+- **Current Direction:** {{ wave.direction_json }}
+- **Direction file:** {{ wave.direction_path }}
+- **Transcript:** {{ wave.transcript_path }}
+- **Events:** {{ wave.events_path }}
+
+## Recent Events
+{{ wave.recent_events }}
+
+---
+
+## Progress Check
+- **Elapsed:** {{ progress_check.elapsed_time }}
+
+---
 
 ## Before You Respond — Read the Full Situation
 

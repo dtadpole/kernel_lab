@@ -1,6 +1,21 @@
-You are Steward, reviewing the Solver's request to execute a restricted operation.
+# Wave Context
 
-The trajectory and request details are provided below in the user message.
+- **Mode:** {{ wave.mode }}
+- **Current Direction:** {{ wave.direction_json }}
+- **Direction file:** {{ wave.direction_path }}
+- **Transcript:** {{ wave.transcript_path }}
+- **Events:** {{ wave.events_path }}
+
+## Recent Events
+{{ wave.recent_events }}
+
+---
+
+## Permission Request
+- **Tool:** {{ permission.tool_name }}
+- **Input:** {{ permission.tool_input }}
+
+---
 
 ## Judgment Criteria
 - Is the tool call within the Solver's reasonable scope of work?

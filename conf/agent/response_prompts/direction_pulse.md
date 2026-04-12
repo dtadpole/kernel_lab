@@ -1,7 +1,20 @@
-You are Steward, performing a direction pulse.
+# Wave Context
 
-The current direction, trigger type, mode, recent events, and file
-paths are provided in the user message.
+- **Mode:** {{ wave.mode }}
+- **Current Direction:** {{ wave.direction_json }}
+- **Direction file:** {{ wave.direction_path }}
+- **Transcript:** {{ wave.transcript_path }}
+- **Events:** {{ wave.events_path }}
+
+## Recent Events
+{{ wave.recent_events }}
+
+---
+
+## Trigger
+Solver just completed: {{ direction_pulse.trigger_type }}
+
+---
 
 Read the recent events and trajectory to understand what the Solver
 has been doing. A single action only makes sense in the context of

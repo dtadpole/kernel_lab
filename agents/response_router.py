@@ -1,8 +1,9 @@
 """ResponseRouter: scenario-specific Steward dispatch.
 
 Each hook scenario (ask_question, permission, session_end, progress_check, etc.)
-has its own system prompt and context-building template. The router dispatches
-through AgentRunner for uniform journal logging.
+has its own Jinja2 user-message template (conf/agent/response_prompts/*.md).
+The router renders the template with wave_context + scenario variables, then
+dispatches through AgentRunner for uniform journal logging.
 """
 
 from __future__ import annotations
@@ -11,11 +12,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import jinja2
+
 from agents.config import AgentConfig, MonitorConfig, StorageConfig
 
-
-# ── Context templates per scenario ──
-# Each template defines what variables are injected into the user prompt.
 
 # Per-scenario max_turns (how deep each scenario can go with tool calls)
 SCENARIO_MAX_TURNS: dict[str, int] = {
@@ -28,79 +28,15 @@ SCENARIO_MAX_TURNS: dict[str, int] = {
     "start_exploring": 20,
 }
 
-# Common context block prepended to every scenario
-_CONTEXT_HEADER = """## Solver Mode: {mode}
-
-## Current Direction
-{direction_json}
-Direction file: {direction_path}
-
-## Recent Events
-{recent_events}
-
-## For Details
-- Transcript: {transcript_path}
-- Events: {events_path}"""
-
-CONTEXT_TEMPLATES: dict[str, str] = {
-    "ask_question": _CONTEXT_HEADER + """
-
-## Question
-{question}""",
-
-    "permission": _CONTEXT_HEADER + """
-
-## Permission Request
-Tool: {tool_name}
-Input: {tool_input}""",
-
-    "session_end": _CONTEXT_HEADER + """
-
-## Session Ended
-Stop reason: {stop_reason}
-Elapsed: {elapsed_time}
-Tool calls: {total_tool_calls}
-Errors: {error_count}
-
-## Solver's Final Output
-{result_text}""",
-
-    "progress_check": _CONTEXT_HEADER + """
-
-## Progress Check
-Elapsed: {elapsed_time}""",
-
-    "set_direction": """## Direction Proposal
-{direction_json}
-
-""" + _CONTEXT_HEADER,
-
-    "direction_pulse": """## Current Direction
-{direction_json}
-
-## Trigger
-Solver just completed: {trigger_type}
-
-""" + _CONTEXT_HEADER,
-
-    "start_exploring": """## Current Direction
-{direction_json}
-
-## Solver's Reason for Wanting to Change
-{reason}
-
-""" + _CONTEXT_HEADER,
-}
-
 
 @dataclass
 class ResponseScenario:
     """Complete configuration for one response scenario."""
     name: str
     system_prompt: str
-    context_template: str
+    user_template: jinja2.Template
     tools: list[str] = field(default_factory=list)
-    max_turns: int = 10  # enough for reading trajectory + tool calls + verdict
+    max_turns: int = 10
     model: str = "claude-sonnet-4-6"
 
 
@@ -137,9 +73,11 @@ class ResponseVerdict:
 class ResponseRouter:
     """Routes hook events to scenario-specific Steward calls.
 
-    Loads system prompts from conf/agent/response_prompts/*.md.
-    Combines with context templates to build the full prompt.
-    Dispatches through AgentRunner for journal logging.
+    System prompt: conf/agent/prompts/steward.md (Steward identity, static).
+    User message:  conf/agent/response_prompts/<scenario>.md (Jinja2 template).
+
+    Each scenario MD file is a complete user-message template with {{ variables }}
+    that get rendered with wave_context (global) + scenario-specific variables.
     """
 
     def __init__(
@@ -153,6 +91,10 @@ class ResponseRouter:
         self.storage_config = storage_config or StorageConfig()
         self.scenarios: dict[str, ResponseScenario] = {}
         self._base_prompt = self._load_base_prompt(Path(base_prompt_path))
+        self._jinja_env = jinja2.Environment(
+            undefined=jinja2.StrictUndefined,
+            keep_trailing_newline=True,
+        )
         self._load_prompts(Path(prompts_dir))
 
     @staticmethod
@@ -163,28 +105,19 @@ class ResponseRouter:
         return ""
 
     def _load_prompts(self, prompts_dir: Path) -> None:
-        """Load all .md files from prompts_dir as scenarios.
-
-        Each scenario's system prompt = base Steward prompt + scenario-specific prompt.
-        """
+        """Load all .md files from prompts_dir as Jinja2 user-message templates."""
         if not prompts_dir.exists():
             return
 
         for md_file in sorted(prompts_dir.glob("*.md")):
             name = md_file.stem  # e.g., "ask_question"
-            scenario_prompt = md_file.read_text().strip()
-            context_template = CONTEXT_TEMPLATES.get(name, "{context}")
-
-            # Combine: base identity + scenario-specific instructions
-            if self._base_prompt:
-                system_prompt = f"{self._base_prompt}\n\n---\n\n## Current Scenario: {name}\n\n{scenario_prompt}"
-            else:
-                system_prompt = scenario_prompt
+            template_src = md_file.read_text()
+            user_template = self._jinja_env.from_string(template_src)
 
             self.scenarios[name] = ResponseScenario(
                 name=name,
-                system_prompt=system_prompt,
-                context_template=context_template,
+                system_prompt=self._base_prompt,
+                user_template=user_template,
                 max_turns=SCENARIO_MAX_TURNS.get(name, 10),
                 model=self.model,
             )
@@ -192,39 +125,31 @@ class ResponseRouter:
     def has_scenario(self, name: str) -> bool:
         return name in self.scenarios
 
-    def build_context(self, scenario: str, variables: dict[str, str]) -> str:
-        """Build the user prompt from template + variables.
+    def render_user_message(self, scenario: str, variables: dict) -> str:
+        """Render the scenario's Jinja2 template with the given variables.
 
-        Missing variables are replaced with '(not available)'.
+        Args:
+            scenario: Scenario name (ask_question, permission, etc.).
+            variables: Dict with 'wave' (wave_context) + scenario-specific keys.
+
+        Raises:
+            jinja2.UndefinedError: if a required template variable is missing.
+            KeyError: if scenario name is unknown.
         """
         if scenario not in self.scenarios:
             raise KeyError(f"Unknown scenario: {scenario}. Available: {list(self.scenarios.keys())}")
 
-        template = self.scenarios[scenario].context_template
-
-        # Safe format: replace {key} with value, leave unknown keys
-        def replacer(match):
-            key = match.group(1)
-            return variables.get(key, "(not available)")
-
-        return re.sub(r"\{(\w+)\}", replacer, template)
+        template = self.scenarios[scenario].user_template
+        return template.render(**variables)
 
     async def respond(
         self,
         scenario: str,
-        variables: dict[str, str],
+        variables: dict,
     ) -> ResponseVerdict:
-        """Call the Steward and return a parsed verdict.
-
-        Args:
-            scenario: Scenario name (ask_question, permission, session_end, progress_check, etc.).
-            variables: Template variables for context building.
-
-        Returns:
-            Parsed ResponseVerdict with action, detail, and reasoning.
-        """
+        """Call the Steward and return a parsed verdict."""
         config = self.scenarios[scenario]
-        user_prompt = self.build_context(scenario, variables)
+        user_prompt = self.render_user_message(scenario, variables)
 
         raw_response = await self._call_agent(config, user_prompt)
         return ResponseVerdict.parse(raw_response)
@@ -232,11 +157,11 @@ class ResponseRouter:
     async def respond_raw(
         self,
         scenario: str,
-        variables: dict[str, str],
+        variables: dict,
     ) -> str:
         """Call the Steward and return raw text (for ask_question scenario)."""
         config = self.scenarios[scenario]
-        user_prompt = self.build_context(scenario, variables)
+        user_prompt = self.render_user_message(scenario, variables)
         return await self._call_agent(config, user_prompt)
 
     async def _call_agent(

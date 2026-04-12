@@ -1,9 +1,25 @@
-You are Steward. The Solver has a question.
+# Wave Context
+
+- **Mode:** {{ wave.mode }}
+- **Current Direction:** {{ wave.direction_json }}
+- **Direction file:** {{ wave.direction_path }}
+- **Transcript:** {{ wave.transcript_path }}
+- **Events:** {{ wave.events_path }}
+
+## Recent Events
+{{ wave.recent_events }}
+
+---
+
+## Question
+{{ ask_question.question }}
+
+---
 
 ## Read the Situation First
 
 Before answering, understand the context:
-- What mode is the Solver in? (exploring / building)
+- The Solver is in **{{ wave.mode }}** mode.
 - What has the Solver been doing recently? (the trajectory tells you)
 - What does this question reveal about the Solver's state?
 

@@ -334,7 +334,7 @@ class Workshop(DefaultHandler):
                     self.state.phase = "deciding"
                     print(f"[Workshop] Wave {wave} session {session} ended (stop_reason={result.stop_reason})")
                     verdict = await self.steward.review_session_end(
-                        **self._get_steward_context(),
+                        self._get_steward_context(),
                         result_text=result.result_text,
                         stop_reason=result.stop_reason,
                         elapsed_time=str(self._current_log.elapsed()) if self._current_log else "unknown",
@@ -513,8 +513,7 @@ class Workshop(DefaultHandler):
 
         # Building mode — Steward reviews: is the direction really exhausted?
         response = await self.steward.review_start_exploring(
-            **self._get_steward_context(),
-            direction=self.state.current_direction,
+            self._get_steward_context(),
             reason=reason,
         )
 
@@ -738,8 +737,7 @@ class Workshop(DefaultHandler):
         """Fire async Steward review and inject guidance into Solver."""
         try:
             response = await self.steward.direction_pulse(
-                **self._get_steward_context(),
-                direction=self.state.current_direction,
+                self._get_steward_context(),
                 trigger_type=trigger,
             )
             # Only inject if Steward has something to say
@@ -772,10 +770,12 @@ class Workshop(DefaultHandler):
             return self._handle_bench_reflection(event.context)
 
         # ── Regular question → Steward ──
+        question = event.question
+        if event.context:
+            question = f"{event.question}\n\nContext: {event.context}"
         return await self.steward.answer_question(
-            **self._get_steward_context(),
-            question=event.question,
-            solver_context=event.context,
+            self._get_steward_context(),
+            question=question,
         )
 
     def _handle_bench_reflection(self, context: str) -> str:
@@ -850,8 +850,8 @@ class Workshop(DefaultHandler):
 
         # Steward reviews
         response = await self.steward.review_direction(
-            **self._get_steward_context(),
-            direction=direction,
+            self._get_steward_context(),
+            proposed_direction=direction,
         )
 
         # Log MCP tool hook
@@ -977,7 +977,7 @@ class Workshop(DefaultHandler):
 
     async def on_permission(self, event: PermissionEvent) -> bool:
         response = await self.steward.check_permission(
-            **self._get_steward_context(),
+            self._get_steward_context(),
             tool_name=event.tool_name,
             tool_input=event.tool_input,
         )
@@ -1010,7 +1010,7 @@ class Workshop(DefaultHandler):
             # Call Steward — direction context is in _get_steward_context()
             if tp:
                 response = await self.steward.check_progress(
-                    **self._get_steward_context(),
+                    self._get_steward_context(),
                     elapsed_time=elapsed,
                 )
                 print(f"[Workshop] Progress check at {elapsed} — Steward: {response.action}")
@@ -1023,7 +1023,7 @@ class Workshop(DefaultHandler):
             self.state.consecutive_stuck += 1
             if tp:
                 response = await self.steward.check_progress(
-                    **self._get_steward_context(),
+                    self._get_steward_context(),
                     elapsed_time=elapsed,
                 )
                 print(f"[Workshop] {event.alert_type} at {elapsed} — Steward: {response.action}")

@@ -66,21 +66,12 @@ def _to_steward_response(verdict: ResponseVerdict) -> StewardResponse:
     )
 
 
-def _base_context(transcript_path: str, events_path: str, recent_events: str, mode: str = "exploring") -> dict:
-    """Build the common context variables every scenario needs."""
-    return {
-        "mode": mode,
-        "transcript_path": transcript_path,
-        "events_path": events_path,
-        "recent_events": recent_events,
-    }
-
-
 class Steward:
     """Provides runtime guidance via typed methods.
 
-    Each method corresponds to a specific scenario. Internally delegates
-    to ResponseRouter which loads scenario-specific prompts.
+    Each method takes wave_context (dict) as its first argument — the shared
+    context built by Workshop._get_steward_context(). Scenario-specific
+    parameters follow as explicit keyword arguments.
     """
 
     def __init__(
@@ -98,145 +89,120 @@ class Steward:
 
     async def answer_question(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
+        wave_context: dict,
         question: str,
-        solver_context: str = "",
-        **kwargs,
     ) -> str:
         """Solver asks for guidance. Returns free-text answer."""
-        full_question = question
-        if solver_context:
-            full_question = f"{question}\n\nContext: {solver_context}"
-
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx.update(kwargs)
-        ctx["question"] = full_question
-        return await self.router.respond_raw("ask_question", ctx)
+        variables = {
+            "wave": wave_context,
+            "ask_question": {"question": question},
+        }
+        return await self.router.respond_raw("ask_question", variables)
 
     # ── Scenario 2: Permission check ──
 
     async def check_permission(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
+        wave_context: dict,
         tool_name: str,
         tool_input: dict,
-        **kwargs,
     ) -> StewardResponse:
         """Review a restricted tool call. Returns ALLOW/DENY."""
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx.update(kwargs)
-        ctx["tool_name"] = tool_name
-        ctx["tool_input"] = str(tool_input)
-        verdict = await self.router.respond("permission", ctx)
+        variables = {
+            "wave": wave_context,
+            "permission": {
+                "tool_name": tool_name,
+                "tool_input": str(tool_input),
+            },
+        }
+        verdict = await self.router.respond("permission", variables)
         return _to_steward_response(verdict)
 
     # ── Scenario 3: Session end review ──
 
     async def review_session_end(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
+        wave_context: dict,
         result_text: str,
         stop_reason: str,
         elapsed_time: str,
         total_tool_calls: int,
         error_count: int,
-        **kwargs,
     ) -> StewardResponse:
         """Review whether Solver truly finished. Returns SUCCESS/CONTINUE/ABORT."""
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx.update(kwargs)
-        ctx.update({
-            "result_text": result_text,
-            "stop_reason": stop_reason,
-            "elapsed_time": elapsed_time,
-            "total_tool_calls": str(total_tool_calls),
-            "error_count": str(error_count),
-        })
-        verdict = await self.router.respond("session_end", ctx)
+        variables = {
+            "wave": wave_context,
+            "session_end": {
+                "result_text": result_text,
+                "stop_reason": stop_reason,
+                "elapsed_time": elapsed_time,
+                "total_tool_calls": str(total_tool_calls),
+                "error_count": str(error_count),
+            },
+        }
+        verdict = await self.router.respond("session_end", variables)
         return _to_steward_response(verdict)
 
     # ── Scenario 4: Periodic progress check ──
 
     async def check_progress(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
+        wave_context: dict,
         elapsed_time: str,
-        **kwargs,
     ) -> StewardResponse:
         """Periodic progress assessment. Returns ON_TRACK/REDIRECT."""
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx.update(kwargs)
-        ctx["elapsed_time"] = elapsed_time
-        verdict = await self.router.respond("progress_check", ctx)
+        variables = {
+            "wave": wave_context,
+            "progress_check": {"elapsed_time": elapsed_time},
+        }
+        verdict = await self.router.respond("progress_check", variables)
         return _to_steward_response(verdict)
 
-    # ── Scenario 6: Direction review (set_direction) ──
+    # ── Scenario 5: Direction review (set_direction) ──
 
     async def review_direction(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
-        direction: dict,
-        **kwargs,
+        wave_context: dict,
+        proposed_direction: dict,
     ) -> StewardResponse:
         """Review a direction proposal. Returns APPROVED/REDIRECT."""
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx["direction_json"] = json.dumps(direction, indent=2, ensure_ascii=False)
-        verdict = await self.router.respond("set_direction", ctx)
+        variables = {
+            "wave": wave_context,
+            "set_direction": {
+                "proposed_direction_json": json.dumps(
+                    proposed_direction, indent=2, ensure_ascii=False
+                ),
+            },
+        }
+        verdict = await self.router.respond("set_direction", variables)
         return _to_steward_response(verdict)
 
-    # ── Scenario 7: Direction check (diffusion) ──
+    # ── Scenario 6: Direction pulse ──
 
     async def direction_pulse(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
-        direction: dict,
+        wave_context: dict,
         trigger_type: str,
     ) -> StewardResponse:
         """Check if Solver's work aligns with direction. Returns ON_TRACK/REDIRECT."""
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx.update({
-            "direction_json": json.dumps(direction, indent=2, ensure_ascii=False),
-            "trigger_type": trigger_type,
-        })
-        verdict = await self.router.respond("direction_pulse", ctx)
+        variables = {
+            "wave": wave_context,
+            "direction_pulse": {"trigger_type": trigger_type},
+        }
+        verdict = await self.router.respond("direction_pulse", variables)
         return _to_steward_response(verdict)
 
-    # ── Scenario 8: Start brainstorming review ──
+    # ── Scenario 7: Start exploring review ──
 
     async def review_start_exploring(
         self,
-        transcript_path: str,
-        events_path: str,
-        recent_events: str,
-        mode: str,
-        direction: dict,
+        wave_context: dict,
         reason: str,
-        **kwargs,
     ) -> StewardResponse:
-        """Review Solver's request to abandon direction and brainstorm. Returns APPROVED/REDIRECT."""
-        ctx = _base_context(transcript_path, events_path, recent_events, mode)
-        ctx.update(kwargs)
-        ctx.update({
-            "direction_json": json.dumps(direction, indent=2, ensure_ascii=False),
-            "reason": reason,
-        })
-        verdict = await self.router.respond("start_exploring", ctx)
+        """Review Solver's request to abandon direction. Returns APPROVED/REDIRECT."""
+        variables = {
+            "wave": wave_context,
+            "start_exploring": {"reason": reason},
+        }
+        verdict = await self.router.respond("start_exploring", variables)
         return _to_steward_response(verdict)

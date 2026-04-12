@@ -35,6 +35,56 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# GPU process cleanup — kill all processes on a specific GPU before benchmarking
+# ---------------------------------------------------------------------------
+
+def _kill_gpu_processes(gpu_id: int) -> None:
+    """Kill all processes running on the specified GPU (requires sudo).
+
+    Uses nvidia-smi to find PIDs, then sudo kill -9 each one.
+    Skips GPU 0 as a safety measure (GPU 0 is often the default/system GPU).
+    """
+    import subprocess, os
+
+    if gpu_id == 0:
+        return
+
+    my_pid = os.getpid()
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader",
+             f"--id={gpu_id}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return
+
+        pids = [int(line.strip()) for line in result.stdout.strip().split("\n")
+                if line.strip().isdigit()]
+
+        # Don't kill ourselves
+        pids = [p for p in pids if p != my_pid]
+
+        if not pids:
+            return
+
+        logger.info("GPU %d: killing %d existing processes: %s", gpu_id, len(pids), pids)
+        for pid in pids:
+            try:
+                subprocess.run(["sudo", "kill", "-9", str(pid)],
+                               capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+        # Brief pause for processes to fully exit
+        time.sleep(1)
+
+    except Exception as exc:
+        logger.warning("GPU cleanup failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # FLOPs computation per kernel family
 # ---------------------------------------------------------------------------
 
@@ -1292,6 +1342,11 @@ def cli_main() -> None:
         bench_gpus = resolve_benchmark_gpus()
         if bench_gpus:
             os.environ["CUDA_VISIBLE_DEVICES"] = bench_gpus
+
+    # Kill existing processes on the target GPU (ensures exclusive access)
+    gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if gpu_id is not None and gpu_id != "0":
+        _kill_gpu_processes(int(gpu_id))
 
     impls = bench_cfg.impls
     if isinstance(impls, str) and impls != "all":

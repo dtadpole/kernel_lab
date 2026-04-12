@@ -258,6 +258,106 @@ def test_jinja2_missing_variable_raises():
         pass  # Expected
 
 
+def test_steward_method_signatures():
+    """All Steward methods take wave_context: dict as first param, no **kwargs."""
+    import inspect
+    from agents.steward import Steward
+
+    expected = {
+        "answer_question":        ["wave_context", "question"],
+        "check_permission":       ["wave_context", "tool_name", "tool_input"],
+        "review_session_end":     ["wave_context", "result_text", "stop_reason",
+                                   "elapsed_time", "total_tool_calls", "error_count"],
+        "check_progress":         ["wave_context", "elapsed_time"],
+        "review_direction":       ["wave_context", "proposed_direction"],
+        "direction_pulse":        ["wave_context", "trigger_type"],
+        "review_start_exploring": ["wave_context", "reason"],
+    }
+
+    for method_name, expected_params in expected.items():
+        method = getattr(Steward, method_name)
+        sig = inspect.signature(method)
+        params = [p for p in sig.parameters if p != "self"]
+
+        # Check params match expected
+        assert params == expected_params, \
+            f"{method_name}: expected {expected_params}, got {params}"
+
+        # No **kwargs
+        has_var_keyword = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+        assert not has_var_keyword, f"{method_name} should not have **kwargs"
+
+
+def test_md_files_have_wave_context_variables():
+    """Each scenario MD file contains the standard {{ wave.* }} variables."""
+    prompts_dir = Path("conf/agent/response_prompts")
+    wave_vars = ["wave.mode", "wave.direction_json", "wave.direction_path",
+                 "wave.transcript_path", "wave.events_path", "wave.recent_events"]
+
+    for md_file in sorted(prompts_dir.glob("*.md")):
+        content = md_file.read_text()
+        for var in wave_vars:
+            assert f"{{{{ {var} }}}}" in content, \
+                f"{md_file.name}: missing {{{{ {var} }}}}"
+
+
+def test_md_files_have_scenario_variables():
+    """Each scenario MD file contains its scenario-specific variables."""
+    prompts_dir = Path("conf/agent/response_prompts")
+
+    expected_vars = {
+        "ask_question.md": ["ask_question.question"],
+        "permission.md": ["permission.tool_name", "permission.tool_input"],
+        "session_end.md": ["session_end.result_text", "session_end.stop_reason",
+                          "session_end.elapsed_time", "session_end.total_tool_calls",
+                          "session_end.error_count"],
+        "progress_check.md": ["progress_check.elapsed_time"],
+        "set_direction.md": ["set_direction.proposed_direction_json"],
+        "direction_pulse.md": ["direction_pulse.trigger_type"],
+        "start_exploring.md": ["start_exploring.reason"],
+    }
+
+    for filename, vars_list in expected_vars.items():
+        content = (prompts_dir / filename).read_text()
+        for var in vars_list:
+            assert f"{{{{ {var} }}}}" in content, \
+                f"{filename}: missing {{{{ {var} }}}}"
+
+
+def test_system_prompt_is_steward_base_only():
+    """System prompt should be steward.md only — no scenario content appended."""
+    from agents.response_router import ResponseRouter
+
+    router = ResponseRouter(prompts_dir=Path("conf/agent/response_prompts"))
+    base = Path("conf/agent/prompts/steward.md").read_text().strip()
+
+    for name, scenario in router.scenarios.items():
+        assert scenario.system_prompt == base, \
+            f"{name}: system_prompt differs from steward.md base"
+
+
+def test_no_old_context_header_pattern():
+    """No MD file should use old {variable} syntax (single braces)."""
+    import re
+    prompts_dir = Path("conf/agent/response_prompts")
+
+    for md_file in sorted(prompts_dir.glob("*.md")):
+        content = md_file.read_text()
+        # Find {word} patterns that aren't inside {{ }} (old regex syntax)
+        # Exclude markdown code blocks
+        lines = content.split("\n")
+        for i, line in enumerate(lines, 1):
+            if line.strip().startswith("```") or line.strip().startswith("#"):
+                continue
+            # Match single-brace {var} but not {{ var }}
+            matches = re.findall(r'(?<!\{)\{(\w+)\}(?!\})', line)
+            assert not matches, \
+                f"{md_file.name}:{i}: old {{var}} syntax found: {matches}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in globals().items() if k.startswith("test_")]
     for t in tests:

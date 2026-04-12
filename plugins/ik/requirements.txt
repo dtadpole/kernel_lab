@@ -40,6 +40,11 @@ apache-tvm-ffi>=0.1.10,<0.2
 torch-c-dlpack-ext>=0.1.5
 einops>=0.8
 
+# --- Doc retrieval ---
+tiktoken>=0.7,<1.0
+rank-bm25>=0.2,<1.0
+beautifulsoup4>=4.12,<5.0
+
 # --- Build tools ---
 ninja>=1.0
 packaging>=24.0

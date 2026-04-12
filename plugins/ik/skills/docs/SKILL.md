@@ -9,6 +9,10 @@ argument-hint: <query>
 
 Search, read, and browse indexed NVIDIA CUDA Toolkit documentation via CLI.
 
+**Prerequisite:** The search index must be built first via `/ik:index`.
+If `find` fails with `FileNotFoundError: all_chunks.jsonl`, the index
+hasn't been built on this host yet.
+
 ## Commands
 
 All commands use the project venv:

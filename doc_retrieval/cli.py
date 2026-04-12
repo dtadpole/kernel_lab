@@ -1,11 +1,11 @@
-"""CLI for doc_retrieval: download, parse, index, find, browse, read.
+"""CLI for doc_retrieval: build, rebuild, nuke, find, browse, read.
 
 Uses Hydra compose API for configuration. Subcommand is the first positional arg.
 
 Usage:
-    python -m doc_retrieval download
-    python -m doc_retrieval parse
-    python -m doc_retrieval index
+    python -m doc_retrieval build
+    python -m doc_retrieval rebuild
+    python -m doc_retrieval nuke
     python -m doc_retrieval find query="shared memory bank conflicts" top_k=10
     python -m doc_retrieval browse doc_id=cuda-c-programming-guide depth=1
     python -m doc_retrieval read doc_id=cuda-c-programming-guide section_id=shared-memory
@@ -31,19 +31,38 @@ def _load_cfg(overrides: list[str]):
     return cfg
 
 
-def cmd_download(cfg) -> None:
+def _do_build() -> None:
+    """Download HTML docs, parse into chunks, build BM25 index."""
     from doc_retrieval.downloader import download_docs
-    download_docs()
-
-
-def cmd_parse(cfg) -> None:
     from doc_retrieval.parser import parse_docs
-    parse_docs()
-
-
-def cmd_index(cfg) -> None:
     from doc_retrieval.indexer import build_index
+    download_docs()
+    parse_docs()
     build_index()
+
+
+def _do_nuke() -> None:
+    """Delete derived artifacts (chunks + index). Raw HTML is kept."""
+    import shutil
+    chunks_dir = Path.home() / ".doc_retrieval" / "chunks"
+    index_dir = Path.home() / ".doc_retrieval" / "index"
+    for d in (chunks_dir, index_dir):
+        if d.exists():
+            shutil.rmtree(d)
+            logging.getLogger(__name__).info(f"Removed {d}")
+
+
+def cmd_build(cfg) -> None:
+    _do_build()
+
+
+def cmd_rebuild(cfg) -> None:
+    _do_nuke()
+    _do_build()
+
+
+def cmd_nuke(cfg) -> None:
+    _do_nuke()
 
 
 def cmd_find(cfg, overrides: dict) -> None:
@@ -94,9 +113,9 @@ def cmd_read(cfg, overrides: dict) -> None:
 
 
 COMMANDS = {
-    "download": cmd_download,
-    "parse": cmd_parse,
-    "index": cmd_index,
+    "build": cmd_build,
+    "rebuild": cmd_rebuild,
+    "nuke": cmd_nuke,
     "find": cmd_find,
     "browse": cmd_browse,
     "read": cmd_read,
@@ -132,7 +151,7 @@ def main() -> None:
     cfg = _load_cfg([])  # Load base config (no Hydra overrides needed for most commands)
 
     handler = COMMANDS[command]
-    if command in ("download", "parse", "index"):
+    if command in ("build", "rebuild", "nuke"):
         handler(cfg)
     else:
         handler(cfg, cmd_overrides)

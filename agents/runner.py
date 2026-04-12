@@ -464,7 +464,13 @@ class AgentRunner:
             result = self._check_tool_rules(tool_name, tool_input)
 
             # Direction gate: block writes to watched dirs without approved direction
-            if not result:  # only check if tool_rules didn't already deny
+            # Run unless tool_rules explicitly denied (permissionDecision=deny).
+            # A constraint-only result (additionalContext) is NOT a deny — gate must still check.
+            tool_denied = (
+                isinstance(result, dict)
+                and result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+            )
+            if not tool_denied:
                 needs_direction = False
                 gate_dirs = getattr(handler, '_direction_gate_dirs', None) or []
 
@@ -493,7 +499,8 @@ class AgentRunner:
                 # Log direction gate decision
                 if needs_direction and self._storage:
                     direction = getattr(handler.state, 'current_direction', None) if hasattr(handler, 'state') else None
-                    decision = "deny" if result else "allow"
+                    gate_denied = isinstance(result, dict) and result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+                    decision = "deny" if gate_denied else "allow"
                     target = tool_input.get("file_path", "") or tool_input.get("command", "")[:200]
                     self._storage.append_event({
                         "ts": datetime.now().isoformat(),

@@ -4,16 +4,18 @@ Manages wave directories in the KB repo's journal/.
 Each wave = one subprocess = one directory with all logs.
 
 Directory structure:
-    journal/<agent>/<task_slug>/w000_<timestamp>/
-    ├── process_start.json
-    ├── process_end.json
-    ├── stdout.log
-    ├── stdin.log
-    ├── stderr.log
-    ├── events.jsonl
-    ├── transcript.md
-    ├── heartbeat
-    └── meta.json
+    journal/w000_<timestamp>/
+    ├── meta.json
+    ├── heartbeat.json
+    ├── solver/
+    │   ├── events.jsonl
+    │   ├── transcript.md
+    │   ├── stdin.log
+    │   ├── stdout.log
+    │   └── stderr.log
+    ├── steward/
+    │   └── <scenario>_<timestamp>/
+    └── directions/
 """
 
 from __future__ import annotations
@@ -33,15 +35,18 @@ class WaveStorage:
     A wave may contain multiple sessions (CONTINUE).
     """
 
-    def __init__(self, config: StorageConfig, agent_name: str, task_slug: str, wave: int):
+    def __init__(self, config: StorageConfig, agent_name: str, task_slug: str = "", wave: int = 0):
         self.agent_name = agent_name
-        self.task_slug = task_slug
+        self.task_slug = task_slug  # kept for backward compat (e.g. init_transcript)
         self.wave = wave
 
         now = datetime.now()
         wave_id = f"w{wave:03d}_{now.strftime('%Y%m%d_%H%M%S')}"
-        self.wave_dir = config.journal_path / agent_name / task_slug / wave_id
+        self.wave_dir = config.journal_path / wave_id
         self.wave_dir.mkdir(parents=True, exist_ok=True)
+        (self.wave_dir / "solver").mkdir(exist_ok=True)
+        (self.wave_dir / "steward").mkdir(exist_ok=True)
+        (self.wave_dir / "directions").mkdir(exist_ok=True)
 
         # Log file handles (opened lazily, closed in close_logs)
         self._stdin_log: open | None = None
@@ -52,11 +57,15 @@ class WaveStorage:
 
     @property
     def events_path(self) -> Path:
-        return self.wave_dir / "events.jsonl"
+        return self.wave_dir / "solver" / "events.jsonl"
 
     @property
     def transcript_path(self) -> Path:
-        return self.wave_dir / "transcript.md"
+        return self.wave_dir / "solver" / "transcript.md"
+
+    @property
+    def directions_path(self) -> Path:
+        return self.wave_dir / "directions"
 
     @property
     def meta_path(self) -> Path:
@@ -95,7 +104,7 @@ class WaveStorage:
     def log_stdin(self, raw_data: str) -> None:
         """Log a raw message written to subprocess stdin."""
         if self._stdin_log is None:
-            self._stdin_log = open(self.wave_dir / "stdin.log", "a")
+            self._stdin_log = open(self.wave_dir / "solver" / "stdin.log", "a")
         ts = datetime.now().isoformat(timespec="seconds")
         self._stdin_log.write(f"[{ts}] {raw_data}\n")
         self._stdin_log.flush()
@@ -103,7 +112,7 @@ class WaveStorage:
     def log_stdout(self, raw_data: str) -> None:
         """Log a raw message read from subprocess stdout."""
         if self._stdout_log is None:
-            self._stdout_log = open(self.wave_dir / "stdout.log", "a")
+            self._stdout_log = open(self.wave_dir / "solver" / "stdout.log", "a")
         ts = datetime.now().isoformat(timespec="seconds")
         self._stdout_log.write(f"[{ts}] {raw_data}\n")
         self._stdout_log.flush()
@@ -111,7 +120,7 @@ class WaveStorage:
     def log_stderr(self, line: str) -> None:
         """Log a line from subprocess stderr."""
         if self._stderr_log is None:
-            self._stderr_log = open(self.wave_dir / "stderr.log", "a")
+            self._stderr_log = open(self.wave_dir / "solver" / "stderr.log", "a")
         ts = datetime.now().isoformat(timespec="seconds")
         self._stderr_log.write(f"[{ts}] {line}\n")
         self._stderr_log.flush()
@@ -139,13 +148,13 @@ class WaveStorage:
         """Write heartbeat JSON. source is required."""
         if not source:
             raise ValueError("heartbeat source must not be empty")
-        path = self.wave_dir / "heartbeat"
+        path = self.wave_dir / "heartbeat.json"
         data = {"ts": ts.isoformat(), "source": source}
         path.write_text(json.dumps(data))
 
     def read_heartbeat(self) -> dict | None:
         """Read heartbeat JSON."""
-        path = self.wave_dir / "heartbeat"
+        path = self.wave_dir / "heartbeat.json"
         if path.exists():
             text = path.read_text().strip()
             try:
@@ -173,6 +182,15 @@ task: {self.task_slug}
 ## Transcript
 """
         self.transcript_path.write_text(header)
+
+    # ── Steward ──
+
+    def steward_storage(self, scenario: str) -> Path:
+        """Create a Steward sub-directory for a specific scenario call."""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = self.wave_dir / "steward" / f"{scenario}_{ts}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     # ── Cleanup ──
 

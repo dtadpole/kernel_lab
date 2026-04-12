@@ -1,23 +1,14 @@
-"""Steward — provides runtime guidance to Solver and other agents.
+"""Steward — provides runtime guidance to Solver.
 
-Six typed methods, one per scenario. Each delegates to ResponseRouter
-for prompt selection and Agent SDK query execution.
-
-Steward is read-only — it never modifies files. It can use WebSearch/WebFetch
-for research. All Steward calls are logged automatically by the AgentRunner's
-hook/event system (SessionLog → agent_journal).
-
-Current role: operational guidance (answer questions, review sessions).
-Future evolution:
-  - Mentor: teach from accumulated KB experience
-  - Coach: guide optimization methodology
-  - Critic: find logical flaws before implementation
-  - Strategist: select among competing strategies
-  - Consultant: strategic advice for Supervisor
+A methodologist who reads working patterns. Not a CUDA expert.
+Two core responsibilities:
+  1. Correctness stuck → guide decomposition
+  2. Performance direction drift → redirect to 初心
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,8 +21,8 @@ from agents.response_router import ResponseRouter, ResponseVerdict
 @dataclass
 class StewardResponse:
     """Steward's decision with explicit intervention level."""
-    action: str              # e.g. SUCCESS, CONTINUE, ABORT, INJECT, KILL, ON_TRACK
-    detail: str              # text after colon (guidance, reason, minutes)
+    action: str              # e.g. SUCCESS, CONTINUE, ABORT, APPROVED, REVISE
+    detail: str              # text after colon (guidance, reason)
     reasoning: str           # full analysis text
     intervention_level: int  # 1=inline, 2=inject, 3=restart, 4=kill
 
@@ -52,10 +43,10 @@ class StewardResponse:
 
 _ACTION_LEVELS = {
     # Level 1: inline
-    "ALLOW": 1, "DENY": 1, "SUCCESS": 1,
+    "ALLOW": 1, "DENY": 1, "SUCCESS": 1, "APPROVED": 1,
     "EXTEND": 1, "ON_TRACK": 1,
     # Level 2: inject / continue
-    "CONTINUE": 2, "INJECT": 2, "WRAP_UP": 2, "DRIFTING": 2, "REDIRECT": 2,
+    "CONTINUE": 2, "INJECT": 2, "REDIRECT": 2, "EXPLORE": 2,
     # Level 3: abort
     "ABORT": 3,
     # Level 4: kill
@@ -74,12 +65,21 @@ def _to_steward_response(verdict: ResponseVerdict) -> StewardResponse:
     )
 
 
+def _base_context(transcript_path: str, events_path: str, recent_events: str, mode: str = "exploring") -> dict:
+    """Build the common context variables every scenario needs."""
+    return {
+        "mode": mode,
+        "transcript_path": transcript_path,
+        "events_path": events_path,
+        "recent_events": recent_events,
+    }
+
+
 class Steward:
-    """Provides runtime guidance via six typed methods.
+    """Provides runtime guidance via typed methods.
 
     Each method corresponds to a specific scenario. Internally delegates
-    to ResponseRouter which loads scenario-specific prompts from
-    conf/agent/response_prompts/*.md.
+    to ResponseRouter which loads scenario-specific prompts.
     """
 
     def __init__(
@@ -98,101 +98,136 @@ class Steward:
     async def answer_question(
         self,
         transcript_path: str,
+        events_path: str,
+        recent_events: str,
         question: str,
         solver_context: str = "",
     ) -> str:
-        """Solver asks for guidance. Returns free-text answer (intervention_level=1)."""
+        """Solver asks for guidance. Returns free-text answer."""
         full_question = question
         if solver_context:
             full_question = f"{question}\n\nContext: {solver_context}"
 
-        return await self.router.respond_raw("ask_question", {
-            "transcript_path": transcript_path,
-            "question": full_question,
-        })
+        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx["question"] = full_question
+        return await self.router.respond_raw("ask_question", ctx)
 
     # ── Scenario 2: Permission check ──
 
     async def check_permission(
         self,
         transcript_path: str,
+        events_path: str,
+        recent_events: str,
         tool_name: str,
         tool_input: dict,
     ) -> StewardResponse:
-        """Review a restricted tool call. Returns ALLOW/DENY (intervention_level=1)."""
-        verdict = await self.router.respond("permission", {
-            "transcript_path": transcript_path,
-            "tool_name": tool_name,
-            "tool_input": str(tool_input),
-        })
+        """Review a restricted tool call. Returns ALLOW/DENY."""
+        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx["tool_name"] = tool_name
+        ctx["tool_input"] = str(tool_input)
+        verdict = await self.router.respond("permission", ctx)
         return _to_steward_response(verdict)
 
-    # ── Scenario 3: Solver is stuck ──
-
-    async def handle_stuck(
-        self,
-        transcript_path: str,
-        alert_type: str,
-        alert_details: str,
-        elapsed_time: str,
-    ) -> StewardResponse:
-        """Solver stalled. Returns CONTINUE/INJECT/INTERRUPT (intervention_level=1/2/4)."""
-        verdict = await self.router.respond("stuck", {
-            "transcript_path": transcript_path,
-            "alert_type": alert_type,
-            "alert_details": alert_details,
-            "elapsed_time": elapsed_time,
-        })
-        return _to_steward_response(verdict)
-
-    # ── Scenario 4: Session end review ──
+    # ── Scenario 3: Session end review ──
 
     async def review_session_end(
         self,
         transcript_path: str,
+        events_path: str,
+        recent_events: str,
         result_text: str,
         stop_reason: str,
         elapsed_time: str,
         total_tool_calls: int,
         error_count: int,
     ) -> StewardResponse:
-        """Review whether Solver truly finished. Returns SUCCESS/CONTINUE/ABORT (intervention_level=1/2/3)."""
-        verdict = await self.router.respond("session_end", {
-            "transcript_path": transcript_path,
+        """Review whether Solver truly finished. Returns SUCCESS/CONTINUE/ABORT."""
+        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx.update({
             "result_text": result_text,
             "stop_reason": stop_reason,
             "elapsed_time": elapsed_time,
             "total_tool_calls": str(total_tool_calls),
             "error_count": str(error_count),
         })
+        verdict = await self.router.respond("session_end", ctx)
         return _to_steward_response(verdict)
 
-    # ── Scenario 5: Time limit exceeded ──
-
-    async def handle_time_limit(
-        self,
-        transcript_path: str,
-        elapsed_time: str,
-        time_limit: str,
-    ) -> StewardResponse:
-        """Solver exceeded time budget. Returns EXTEND/WRAP_UP/KILL (intervention_level=1/2/4)."""
-        verdict = await self.router.respond("time_limit", {
-            "transcript_path": transcript_path,
-            "elapsed_time": elapsed_time,
-            "time_limit": time_limit,
-        })
-        return _to_steward_response(verdict)
-
-    # ── Scenario 6: Periodic progress check ──
+    # ── Scenario 4: Periodic progress check ──
 
     async def check_progress(
         self,
         transcript_path: str,
+        events_path: str,
+        recent_events: str,
         elapsed_time: str,
+        direction: dict | None = None,
     ) -> StewardResponse:
-        """Periodic progress assessment. Returns ON_TRACK/DRIFTING/REDIRECT (intervention_level=1/2)."""
-        verdict = await self.router.respond("progress_check", {
-            "transcript_path": transcript_path,
+        """Periodic progress assessment. Returns ON_TRACK/REDIRECT."""
+        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx.update({
             "elapsed_time": elapsed_time,
+            "direction_name": direction.get("name", "None") if direction else "None",
+            "direction_description": direction.get("description", "None") if direction else "None",
+            "direction_opportunity": direction.get("opportunity", "None") if direction else "None",
+            "direction_evidence": direction.get("evidence", "None") if direction else "None",
+            "direction_ideas": str(direction.get("ideas", "None")) if direction else "None",
         })
+        verdict = await self.router.respond("progress_check", ctx)
+        return _to_steward_response(verdict)
+
+    # ── Scenario 6: Direction review (set_direction) ──
+
+    async def review_direction(
+        self,
+        transcript_path: str,
+        events_path: str,
+        recent_events: str,
+        mode: str,
+        direction: dict,
+    ) -> StewardResponse:
+        """Review a direction proposal. Returns APPROVED/REDIRECT."""
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx["direction_json"] = json.dumps(direction, indent=2, ensure_ascii=False)
+        verdict = await self.router.respond("set_direction", ctx)
+        return _to_steward_response(verdict)
+
+    # ── Scenario 7: Direction check (diffusion) ──
+
+    async def direction_pulse(
+        self,
+        transcript_path: str,
+        events_path: str,
+        recent_events: str,
+        mode: str,
+        direction: dict,
+        trigger_type: str,
+    ) -> StewardResponse:
+        """Check if Solver's work aligns with direction. Returns ON_TRACK/REDIRECT."""
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx.update({
+            "direction_json": json.dumps(direction, indent=2, ensure_ascii=False),
+            "trigger_type": trigger_type,
+        })
+        verdict = await self.router.respond("direction_pulse", ctx)
+        return _to_steward_response(verdict)
+
+    # ── Scenario 8: Start brainstorming review ──
+
+    async def review_start_exploring(
+        self,
+        transcript_path: str,
+        events_path: str,
+        recent_events: str,
+        direction: dict,
+        reason: str,
+    ) -> StewardResponse:
+        """Review Solver's request to abandon direction and brainstorm. Returns APPROVED/REDIRECT."""
+        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx.update({
+            "direction_json": json.dumps(direction, indent=2, ensure_ascii=False),
+            "reason": reason,
+        })
+        verdict = await self.router.respond("start_exploring", ctx)
         return _to_steward_response(verdict)

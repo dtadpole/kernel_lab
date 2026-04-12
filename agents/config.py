@@ -67,6 +67,32 @@ class MonitorConfig:
 
 
 @dataclass
+class PulseTrigger:
+    """One pulse trigger configuration."""
+    match: str = ""        # Bash command pattern (empty = file_write, uses watched_dirs)
+    cooldown: int = 60     # seconds between triggers of this type
+
+
+@dataclass
+class DirectionConfig:
+    """Direction gate + pulse configuration."""
+    gate_tools: list[str] = field(default_factory=list)           # e.g. [Write, Edit, Bash]
+    gate_watched_dirs: list[str] = field(default_factory=list)
+    pulse_file_write_tools: list[str] = field(default_factory=list)  # e.g. [Write, Edit]
+    pulse_command_match_tool: str = "Bash"                           # tool for command pattern matching
+    pulse_watched_dirs: list[str] = field(default_factory=list)
+    pulse_triggers: dict[str, PulseTrigger] = field(default_factory=dict)
+
+    def gate_dirs_resolved(self) -> list[str]:
+        import os
+        return [os.path.expanduser(d) for d in self.gate_watched_dirs]
+
+    def pulse_dirs_resolved(self) -> list[str]:
+        import os
+        return [os.path.expanduser(d) for d in self.pulse_watched_dirs]
+
+
+@dataclass
 class StewardConfig:
     """Steward (guidance agent) settings."""
     model: str = "claude-sonnet-4-6"
@@ -134,6 +160,7 @@ class SystemConfig:
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     steward: StewardConfig = field(default_factory=StewardConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    direction: DirectionConfig = field(default_factory=DirectionConfig)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     @classmethod
@@ -160,6 +187,25 @@ class SystemConfig:
         st_raw = raw.get("storage", {})
         storage = StorageConfig(**{k: v for k, v in st_raw.items()
                                    if k in StorageConfig.__dataclass_fields__})
+
+        # Direction
+        dir_raw = raw.get("direction", {})
+        gate_raw = dir_raw.get("gate", {})
+        pulse_raw = dir_raw.get("pulse", {})
+        pulse_triggers = {}
+        for name, trigger_raw in pulse_raw.get("triggers", {}).items():
+            pulse_triggers[name] = PulseTrigger(
+                match=trigger_raw.get("match", ""),
+                cooldown=trigger_raw.get("cooldown", 60),
+            )
+        direction = DirectionConfig(
+            gate_tools=gate_raw.get("tools", []),
+            gate_watched_dirs=gate_raw.get("watched_dirs", []),
+            pulse_file_write_tools=pulse_raw.get("file_write_tools", []),
+            pulse_command_match_tool=pulse_raw.get("command_match_tool", "Bash"),
+            pulse_watched_dirs=pulse_raw.get("watched_dirs", []),
+            pulse_triggers=pulse_triggers,
+        )
 
         # Agents
         agents = {}
@@ -203,6 +249,7 @@ class SystemConfig:
             monitor=monitor,
             steward=steward,
             storage=storage,
+            direction=direction,
             agents=agents,
         )
 

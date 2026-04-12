@@ -462,6 +462,34 @@ class AgentRunner:
             await handler.on_tool_call(event)
 
             result = self._check_tool_rules(tool_name, tool_input)
+
+            # Direction gate: block writes to watched dirs without approved direction
+            if not result:  # only check if tool_rules didn't already deny
+                needs_direction = False
+                gate_dirs = getattr(handler, '_direction_gate_dirs', None) or []
+
+                gate_tools = getattr(handler, '_direction_gate_tools', [])
+                if tool_name in gate_tools:
+                    if tool_name in ("Write", "Edit"):
+                        path = tool_input.get("file_path", "")
+                        if any(path.startswith(d) for d in gate_dirs):
+                            needs_direction = True
+                    elif tool_name == "Bash":
+                        cmd = tool_input.get("command", "")
+                        if any(w in cmd for w in [" > ", " >> ", "tee ", "cp ", "mv ", "sed -i"]):
+                            if any(d in cmd for d in gate_dirs):
+                                needs_direction = True
+
+                if needs_direction and hasattr(handler, 'state') and not getattr(handler.state, 'current_direction', None):
+                    gate_msg = getattr(handler, '_direction_gate_message', "You must set_direction first.")
+                    result = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": gate_msg,
+                        }
+                    }
+
             return result
 
         async def on_post_tool_use(input_data, tool_use_id, context):
@@ -653,6 +681,52 @@ class AgentRunner:
                 return {"content": [{"type": "text", "text": answer}]}
 
             tools_list.append(submit_bench_reflection)
+
+        if "set_direction" in custom:
+            @tool(
+                "set_direction",
+                "Set your optimization direction after brainstorming. "
+                "Every call is reviewed by the Steward. Pass a JSON string with: "
+                "name, description, opportunity, evidence, ideas.",
+                {"direction_json": str},
+            )
+            async def set_direction(args):
+                direction_json = args.get("direction_json", "{}")
+
+                event = AskEvent(
+                    question="SET_DIRECTION",
+                    context=direction_json,
+                )
+                if runner_ref.log:
+                    runner_ref.log.append(event)
+
+                answer = await runner_ref.handler.on_ask(event)
+                return {"content": [{"type": "text", "text": answer}]}
+
+            tools_list.append(set_direction)
+
+        if "start_exploring" in custom:
+            @tool(
+                "start_exploring",
+                "Request to enter brainstorming mode for a new direction. "
+                "Call this when you believe the current direction is exhausted. "
+                "Explain what you tried and why you think no further progress is possible.",
+                {"reason": str},
+            )
+            async def start_exploring(args):
+                reason = args.get("reason", "")
+
+                event = AskEvent(
+                    question="START_EXPLORING",
+                    context=reason,
+                )
+                if runner_ref.log:
+                    runner_ref.log.append(event)
+
+                answer = await runner_ref.handler.on_ask(event)
+                return {"content": [{"type": "text", "text": answer}]}
+
+            tools_list.append(start_exploring)
 
         # ── Library system tools ──
 

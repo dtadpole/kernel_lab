@@ -117,7 +117,8 @@ class WorkshopAPIServer:
 
         transcript_path = self.workshop._get_transcript_path()
         has_transcript = transcript_path != "(no transcript available)"
-        session_dir = Path(transcript_path).parent if has_transcript else None
+        solver_dir = Path(transcript_path).parent if has_transcript else None
+        session_dir = solver_dir.parent if solver_dir else None  # wave root (parent of solver/)
 
         event_count = 0
         tool_call_count = 0
@@ -125,7 +126,7 @@ class WorkshopAPIServer:
         last_event_ts = ""
         last_tool_call_ts = ""
 
-        events_path = session_dir / "events.jsonl" if session_dir else None
+        events_path = solver_dir / "events.jsonl" if solver_dir else None
         if events_path and events_path.exists():
             with open(events_path) as f:
                 for line in f:
@@ -145,7 +146,7 @@ class WorkshopAPIServer:
                     last_event_ts = ev.get("ts", "")
 
         heartbeat = {}
-        heartbeat_path = session_dir / "heartbeat" if session_dir else None
+        heartbeat_path = session_dir / "heartbeat.json" if session_dir else None
         if heartbeat_path and heartbeat_path.exists():
             text = heartbeat_path.read_text().strip()
             try:

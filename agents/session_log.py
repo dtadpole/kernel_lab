@@ -30,6 +30,11 @@ class SessionLog:
         self.events: list[AgentEvent] = []
         self._storage = storage
         self._start_time: datetime | None = None
+        self._context: dict = {}  # turn, direction_seq — merged into every event
+
+    def set_context(self, **kwargs) -> None:
+        """Set context fields that get merged into every persisted event."""
+        self._context.update(kwargs)
 
     def append(self, event: AgentEvent) -> None:
         """Record an event. Persists to storage if available."""
@@ -39,7 +44,9 @@ class SessionLog:
 
         # Persist to disk
         if self._storage:
-            self._storage.append_event(event.to_dict())
+            event_dict = event.to_dict()
+            event_dict.update(self._context)  # inject turn, direction_seq
+            self._storage.append_event(event_dict)
             self._append_transcript_line(event)
 
     def elapsed(self) -> timedelta:
@@ -68,6 +75,23 @@ class SessionLog:
         """Last N tool names called, for loop detection."""
         tools = [e.tool_name for e in self.events if isinstance(e, ToolCallEvent)]
         return tools[-n:]
+
+    def recent_summary(self, n: int = 5) -> str:
+        """Last N events as a compact summary for Steward context."""
+        lines = []
+        for event in self.recent(n):
+            ts = event.timestamp.strftime("%H:%M:%S")
+            if isinstance(event, ToolCallEvent):
+                inp = str(event.tool_input)[:100]
+                lines.append(f"[{ts}] {event.tool_name}: {inp}")
+            elif isinstance(event, ToolResultEvent):
+                status = "ERROR" if event.is_error else "OK"
+                lines.append(f"[{ts}] → {event.tool_name} [{status}] {event.result_summary[:120]}")
+            elif isinstance(event, AskEvent):
+                lines.append(f"[{ts}] Ask: {event.question[:80]}")
+            elif isinstance(event, StopEvent):
+                lines.append(f"[{ts}] Stop: {event.reason}")
+        return "\n".join(lines) if lines else "(no events)"
 
     def to_summary(self, max_chars: int = 4000) -> str:
         """Generate a text summary for Steward context."""

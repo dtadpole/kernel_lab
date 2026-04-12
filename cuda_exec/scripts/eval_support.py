@@ -344,8 +344,10 @@ def measure_reference(
     config: dict[str, Any],
     device: torch.device,
     seed: int = DEFAULT_SEED,
-    num_warmups: int = NUM_WARMUP_RUNS,
-    num_trials: int = NUM_PERF_TRIALS,
+    warmup_ms: float = 25.0,
+    rep_ms: float = 100.0,
+    num_warmups: int | None = None,   # deprecated — ignored, kept for compat
+    num_trials: int | None = None,    # deprecated — ignored, kept for compat
 ) -> dict[str, Any]:
     model_cls = getattr(module, "Model", None)
     get_init_inputs = getattr(module, "get_init_inputs", None)
@@ -366,21 +368,40 @@ def measure_reference(
         # Harness generates inputs — fixtures do NOT own input generation
         inputs = generate_inputs(config, device)
 
-        # L2 cache flush buffer (Triton do_bench pattern)
+        # L2 cache flush buffer (Triton do_bench / eval_harness.cu pattern)
         l2_size = torch.cuda.get_device_properties(device).L2_cache_size
         l2_flush = torch.empty(l2_size, dtype=torch.uint8, device=device) if l2_size > 0 else None
 
-        for _ in range(num_warmups):
+        # Estimate single-run time (matches eval_harness.cu + triton do_bench)
+        model(*inputs)
+        torch.cuda.synchronize(device=device)
+
+        est_start = torch.cuda.Event(enable_timing=True)
+        est_end = torch.cuda.Event(enable_timing=True)
+        est_start.record()
+        for _ in range(5):
+            if l2_flush is not None:
+                l2_flush.zero_()
+            model(*inputs)
+        est_end.record()
+        torch.cuda.synchronize(device=device)
+        est_ms = est_start.elapsed_time(est_end) / 5.0
+        if est_ms <= 0:
+            est_ms = 0.001
+
+        # Time-based warmup (matches eval_harness.cu: warmup_ms / est_ms)
+        n_warmup = max(1, int(warmup_ms / est_ms))
+        for _ in range(n_warmup):
             model(*inputs)
         torch.cuda.synchronize(device=device)
 
-        # Pipelined measurement: L2 flush + kernel enqueued back-to-back
-        # with NO sync between iterations.  Matches eval_harness.cu and
-        # triton.testing.do_bench — hides CPU submission overhead.
-        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
-        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
+        # Time-based measurement — pipelined, no per-iteration sync.
+        # Matches eval_harness.cu and triton.testing.do_bench.
+        n_trials = max(1, int(rep_ms / est_ms))
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_trials)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_trials)]
 
-        for trial_idx in range(num_trials):
+        for trial_idx in range(n_trials):
             if l2_flush is not None:
                 l2_flush.zero_()
             start_events[trial_idx].record()
@@ -390,7 +411,7 @@ def measure_reference(
         torch.cuda.synchronize(device=device)
         latencies_ms: list[float] = [
             start_events[i].elapsed_time(end_events[i])
-            for i in range(num_trials)
+            for i in range(n_trials)
         ]
 
         # Run once more with deterministic inputs for correctness output

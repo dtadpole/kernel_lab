@@ -269,6 +269,12 @@ static void print_json(const HarnessConfig* cfg,
     printf("      \"max\": %.6f,\n", max_ms);
     printf("      \"mean\": %.6f\n", mean_ms);
     printf("    },\n");
+    printf("    \"raw_latencies_ms\": [");
+    for (size_t i = 0; i < latencies.size(); i++) {
+        if (i > 0) printf(",");
+        printf("%.6f", latencies[i]);
+    }
+    printf("],\n");
     printf("    \"runs\": %d\n", static_cast<int>(latencies.size()));
     printf("  },\n");
 
@@ -388,7 +394,9 @@ int main() {
     /* Init NVML for GPU state snapshots */
     nvml_init();
 
-    /* L2 cache flush buffer (Triton do_bench / NVBench pattern) */
+    /* L2 cache flush buffer — use actual L2 size (matches eval_support.py).
+     * In pipelined mode, oversized flush buffers cause DRAM bandwidth
+     * contention with the previous kernel, inflating latency. */
     int l2_attr = 0;
     cudaDeviceGetAttribute(&l2_attr, cudaDevAttrL2CacheSize, 0);
     size_t l2_size = static_cast<size_t>(l2_attr > 0 ? l2_attr : 0);
@@ -484,7 +492,7 @@ int main() {
         cudaStreamSynchronize(stream);
     }
 
-    /* ── Time-based measurement (per-iteration sync) ──────────────── */
+    /* ── Time-based measurement (pipelined — no per-iteration sync) ── */
     const int n_trials = (int)(cfg.rep_ms / est_ms);
     const int N = n_trials > 1 ? n_trials : 1;
 
@@ -499,22 +507,26 @@ int main() {
     const int mid = N / 2;
     GpuSnapshot snap_after = {};
 
+    /* Pipelined: enqueue all iterations without CPU sync.
+     * Each iteration: L2 flush (async) → start event → kernel → end event.
+     * No cudaStreamSynchronize between iterations — kernels can overlap
+     * with the next L2 flush on the GPU command queue. */
+    /* Check env: CUDA_EXEC_L2_FLUSH=0 disables L2 flush (for comparison with triton do_bench) */
+    const bool do_l2_flush = (l2_flush_buf != nullptr) && env_int("CUDA_EXEC_L2_FLUSH", 1);
+
     for (int i = 0; i < N; i++) {
-        /* L2 flush + sync: cold L2, no DRAM contention from previous kernel */
-        if (l2_flush_buf != nullptr) {
+        if (do_l2_flush) {
             cudaMemsetAsync(l2_flush_buf, 0, l2_size, stream);
         }
-        cudaStreamSynchronize(stream);
-
         cudaEventRecord(start_events[i], stream);
         invoke_kernel(stream);
         cudaEventRecord(end_events[i], stream);
-        cudaStreamSynchronize(stream);
-
-        if (i == mid) {
-            snap_after = gpu_snapshot();
-        }
+        /* NO cudaStreamSynchronize here — pipelined */
     }
+
+    /* Single sync after all iterations */
+    cudaStreamSynchronize(stream);
+    snap_after = gpu_snapshot();
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

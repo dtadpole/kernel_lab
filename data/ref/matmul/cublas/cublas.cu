@@ -1,17 +1,17 @@
 /*
- * cuBLAS LT BF16 GEMM reference — autotuned (top-20 heuristic candidates).
+ * cuBLAS LT BF16 GEMM reference — PyTorch-matching configuration.
  *
  * C = A @ B, all BF16, FP32 accumulation.
- * Config shape [M, N], M=N=K (square).
- *
- * On first call per size: requests 20 algorithm candidates from
- * cublasLtMatmulAlgoGetHeuristic, benchmarks each with 3 warmup + 10
- * timed runs, and caches the fastest. Subsequent calls use the winner.
+ * Uses the same cublasLtMatmul setup as PyTorch's bgemm_internal_cublaslt:
+ *   - TRANSA=T, TRANSB=N (PyTorch convention for row-major)
+ *   - Alignment hints for A, B, C pointers
+ *   - Heuristic #1 (no manual autotune — cuBLAS heuristic is accurate)
+ *   - Workspace from cudaMalloc
  *
  * Harness contract:
- *   inputs[0]  = A (M×K BF16)
- *   inputs[1]  = B (K×N BF16)
- *   outputs[0] = C (M×N BF16)
+ *   inputs[0]  = A (M×K BF16, row-major)
+ *   inputs[1]  = B (K×N BF16, row-major)
+ *   outputs[0] = C (M×N BF16, row-major)
  *   n = input_size = M * N
  */
 
@@ -23,9 +23,6 @@
 #include <cstring>
 #include <cmath>
 #include <map>
-#include <vector>
-#include <algorithm>
-#include <cfloat>
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
@@ -60,7 +57,7 @@ static cublasLtHandle_t get_lt_handle() {
     return g_lt_handle;
 }
 
-/* Per-size cached state: best algorithm + descriptors */
+/* Per-size cached state */
 struct CachedState {
     cublasLtMatmulAlgo_t algo;
     size_t workspace_size;
@@ -71,10 +68,10 @@ struct CachedState {
 };
 static std::map<int, CachedState> g_cache;
 
-/* Workspace */
+/* Workspace — 32 MB (matches PyTorch's default) */
 static void *g_workspace = nullptr;
 static size_t g_workspace_size = 0;
-static const size_t MAX_WORKSPACE = 32 * 1024 * 1024; /* 32 MB */
+static const size_t MAX_WORKSPACE = 32 * 1024 * 1024;
 
 static void ensure_workspace() {
     if (!g_workspace) {
@@ -83,13 +80,18 @@ static void ensure_workspace() {
     }
 }
 
-/* ── Autotune: benchmark top-N candidates, return best ──────────── */
+/* Pointer alignment (matches PyTorch's _getAlignment) */
+static uint32_t get_alignment(uintptr_t ptr) {
+    /* Returns the largest power-of-2 that divides ptr, capped at 256 */
+    for (int shift = 8; shift > 0; shift--) {
+        if (ptr % (1u << shift) == 0) return (1u << shift);
+    }
+    return 1;
+}
 
-static const int AUTOTUNE_CANDIDATES = 20;
-static const int AUTOTUNE_WARMUP     = 3;
-static const int AUTOTUNE_TRIALS     = 10;
+/* ── Setup: create descriptors + pick heuristic #1 (PyTorch style) ── */
 
-static CachedState create_and_autotune(
+static CachedState create_cached(
     cublasLtHandle_t handle,
     __nv_bfloat16 *A, __nv_bfloat16 *B, __nv_bfloat16 *C,
     int M, int N, int K, cudaStream_t stream)
@@ -98,31 +100,60 @@ static CachedState create_and_autotune(
 
     CachedState state;
 
+    /* Compute descriptor: FP32 accumulation */
     cublasLtMatmulDescCreate(&state.op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+
+    /* PyTorch convention: row-major A(M,K) @ B(K,N) = C(M,N)
+     * In cuBLAS col-major world: TRANSA=T, TRANSB=N
+     * A is (K, M) col-major with ld=K → reads as (M, K) row-major transposed
+     * B is (K, N) col-major with ld=K → reads as (K, N) row-major non-transposed
+     * C is (M, N) col-major with ld=M */
+    cublasOperation_t op_t = CUBLAS_OP_T;
     cublasOperation_t op_n = CUBLAS_OP_N;
     cublasLtMatmulDescSetAttribute(state.op_desc, CUBLASLT_MATMUL_DESC_TRANSA,
-                                   &op_n, sizeof(op_n));
+                                   &op_t, sizeof(op_t));
     cublasLtMatmulDescSetAttribute(state.op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
                                    &op_n, sizeof(op_n));
 
-    /* Row-major C = A @ B → col-major C^T = B^T @ A^T */
-    cublasLtMatrixLayoutCreate(&state.layout_a, CUDA_R_16BF, N, K, N);
-    cublasLtMatrixLayoutCreate(&state.layout_b, CUDA_R_16BF, K, M, K);
-    cublasLtMatrixLayoutCreate(&state.layout_c, CUDA_R_16BF, N, M, N);
+    /* Matrix layouts — match PyTorch's CuBlasLtMatrixLayout construction
+     * PyTorch: CuBlasLtMatrixLayout(type, m, k, lda, opa != CUBLAS_OP_N)
+     * For TRANSA=T: Adesc is (K, M) with ld=K (physical), transposed to (M, K)
+     * For TRANSB=N: Bdesc is (K, N) with ld=K (physical)
+     * Cdesc is (M, N) with ld=M */
+    int lda = K;  /* A stored as (M, K) row-major → col-major (K, M) with ld=K */
+    int ldb = K;  /* B stored as (K, N) row-major → col-major (K, N) with ld=K */
+    int ldc = M;  /* C stored as (M, N) row-major → col-major (M, N) with ld=M */
 
-    /* Get top-20 heuristic candidates */
+    /* Note: with TRANSA=T, cuBLAS expects physical layout (K, M) */
+    cublasLtMatrixLayoutCreate(&state.layout_a, CUDA_R_16BF, K, M, lda);
+    cublasLtMatrixLayoutCreate(&state.layout_b, CUDA_R_16BF, K, N, ldb);
+    cublasLtMatrixLayoutCreate(&state.layout_c, CUDA_R_16BF, M, N, ldc);
+
+    /* Preference with alignment hints (matches PyTorch) */
     cublasLtMatmulPreference_t pref;
     cublasLtMatmulPreferenceCreate(&pref);
     cublasLtMatmulPreferenceSetAttribute(pref,
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
         &g_workspace_size, sizeof(g_workspace_size));
 
-    cublasLtMatmulHeuristicResult_t results[AUTOTUNE_CANDIDATES];
+    /* Alignment hints — tell cuBLAS how our pointers are aligned */
+    uint32_t align_a = get_alignment(reinterpret_cast<uintptr_t>(A));
+    uint32_t align_b = get_alignment(reinterpret_cast<uintptr_t>(B));
+    uint32_t align_c = get_alignment(reinterpret_cast<uintptr_t>(C));
+    cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &align_a, sizeof(align_a));
+    cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, &align_b, sizeof(align_b));
+    cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &align_c, sizeof(align_c));
+
+    /* Get heuristic #1 — PyTorch uses requestedAlgoCount=1 */
+    cublasLtMatmulHeuristicResult_t heuristic;
     int num_returned = 0;
 
     cublasLtMatmulAlgoGetHeuristic(handle, state.op_desc,
         state.layout_a, state.layout_b, state.layout_c, state.layout_c,
-        pref, AUTOTUNE_CANDIDATES, results, &num_returned);
+        pref, 1, &heuristic, &num_returned);
 
     cublasLtMatmulPreferenceDestroy(pref);
 
@@ -133,62 +164,11 @@ static CachedState create_and_autotune(
         return state;
     }
 
-    /* Benchmark each candidate */
-    float alpha = 1.0f, beta = 0.0f;
-    cudaEvent_t start_ev, stop_ev;
-    cudaEventCreate(&start_ev);
-    cudaEventCreate(&stop_ev);
+    state.algo = heuristic.algo;
+    state.workspace_size = heuristic.workspaceSize;
 
-    int best_idx = 0;
-    float best_ms = FLT_MAX;
-
-    for (int c = 0; c < num_returned; c++) {
-        /* Verify algorithm works */
-        cublasStatus_t st = cublasLtMatmul(handle, state.op_desc,
-            &alpha, B, state.layout_a, A, state.layout_b,
-            &beta, C, state.layout_c, C, state.layout_c,
-            &results[c].algo, g_workspace, results[c].workspaceSize, stream);
-        cudaStreamSynchronize(stream);
-        if (st != CUBLAS_STATUS_SUCCESS) continue;
-
-        /* Warmup */
-        for (int w = 0; w < AUTOTUNE_WARMUP; w++) {
-            cublasLtMatmul(handle, state.op_desc,
-                &alpha, B, state.layout_a, A, state.layout_b,
-                &beta, C, state.layout_c, C, state.layout_c,
-                &results[c].algo, g_workspace, results[c].workspaceSize, stream);
-        }
-        cudaStreamSynchronize(stream);
-
-        /* Timed runs */
-        cudaEventRecord(start_ev, stream);
-        for (int t = 0; t < AUTOTUNE_TRIALS; t++) {
-            cublasLtMatmul(handle, state.op_desc,
-                &alpha, B, state.layout_a, A, state.layout_b,
-                &beta, C, state.layout_c, C, state.layout_c,
-                &results[c].algo, g_workspace, results[c].workspaceSize, stream);
-        }
-        cudaEventRecord(stop_ev, stream);
-        cudaEventSynchronize(stop_ev);
-
-        float elapsed_ms = 0.0f;
-        cudaEventElapsedTime(&elapsed_ms, start_ev, stop_ev);
-        float avg_ms = elapsed_ms / AUTOTUNE_TRIALS;
-
-        if (avg_ms < best_ms) {
-            best_ms = avg_ms;
-            best_idx = c;
-        }
-    }
-
-    cudaEventDestroy(start_ev);
-    cudaEventDestroy(stop_ev);
-
-    state.algo = results[best_idx].algo;
-    state.workspace_size = results[best_idx].workspaceSize;
-
-    fprintf(stderr, "[ref-cublas] autotune %dx%d: %d/%d candidates, best=#%d (%.3f ms)\n",
-            M, N, num_returned, AUTOTUNE_CANDIDATES, best_idx, best_ms);
+    fprintf(stderr, "[ref-cublas] heuristic %dx%d: workspace=%zu\n",
+            M, N, state.workspace_size);
 
     return state;
 }
@@ -235,17 +215,19 @@ extern "C" int kernel_run(
     if (!handle) return -3;
     ensure_workspace();
 
-    /* Autotune on first call per size, cache the winner */
+    /* Cache per size — heuristic #1 (no autotune needed) */
     if (g_cache.find(M) == g_cache.end()) {
-        g_cache[M] = create_and_autotune(handle, A, B, C, M, N, K, stream);
+        g_cache[M] = create_cached(handle, A, B, C, M, N, K, stream);
     }
 
     CachedState &s = g_cache[M];
 
     float alpha = 1.0f, beta = 0.0f;
 
+    /* PyTorch passes (A, layout_a, B, layout_b) where A is the "first" matrix
+     * With TRANSA=T: cuBLAS reads A as transposed → row-major A(M,K) */
     cublasStatus_t st = cublasLtMatmul(handle, s.op_desc,
-        &alpha, B, s.layout_a, A, s.layout_b,
+        &alpha, A, s.layout_a, B, s.layout_b,
         &beta, C, s.layout_c, C, s.layout_c,
         &s.algo, g_workspace, s.workspace_size, stream);
 

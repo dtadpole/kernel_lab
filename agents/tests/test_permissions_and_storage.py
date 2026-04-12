@@ -197,6 +197,104 @@ def test_steward_has_tool_rules():
     assert not _is_denied(runner._check_tool_rules("Bash", {"command": "ls /tmp"}))
 
 
+# ── Word boundary tests ──
+
+def test_kill_word_boundary():
+    """Words containing 'kill' as substring should NOT be blocked."""
+    runner = _make_runner_no_rules()
+    # "skillful" contains "kill" but \b should prevent false positive
+    assert not _is_denied(runner._check_tool_rules("Bash", {"command": "echo skillful"}))
+    assert not _is_denied(runner._check_tool_rules("Bash", {"command": "echo killer_app"}))
+    # But actual kill command should be blocked
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "kill 123"}))
+
+
+def test_forbidden_in_compound_commands():
+    """Forbidden commands blocked even inside compound commands."""
+    runner = _make_runner_no_rules()
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "echo hello; kill 123"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "echo hello && kill 123"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "ps aux | xargs kill"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "git log --oneline | head"}))
+
+
+def test_reboot_shutdown_forbidden():
+    """reboot and shutdown are forbidden."""
+    runner = _make_runner_no_rules()
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "reboot"}))
+    assert _is_denied(runner._check_tool_rules("Bash", {"command": "shutdown -h now"}))
+
+
+# ── Storage: events and transcript routing ──
+
+def test_solver_log_files_go_to_solver_dir():
+    """Solver's stdin/stdout/stderr logs go to solver/."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = StorageConfig(kb_root=tmpdir, run_tag="test")
+        storage = WaveStorage(config, agent_name="solver", task_slug="test")
+
+        storage.log_stdin("test")
+        storage.log_stdout("test")
+        storage.log_stderr("test")
+        storage.close_logs()
+
+        solver_dir = storage.wave_dir / "solver"
+        assert (solver_dir / "stdin.log").exists()
+        assert (solver_dir / "stdout.log").exists()
+        assert (solver_dir / "stderr.log").exists()
+
+
+def test_steward_events_go_to_steward_dir():
+    """Steward's events.jsonl is written to steward/ subdirectory."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = StorageConfig(kb_root=tmpdir, run_tag="test")
+        storage = WaveStorage(config, agent_name="steward_set_direction", task_slug="test")
+
+        storage.append_event({"type": "test", "ts": "2026-01-01T00:00:00"})
+
+        assert (storage.wave_dir / "steward" / "events.jsonl").exists()
+        assert not (storage.wave_dir / "solver" / "events.jsonl").exists()
+
+
+def test_each_agent_gets_own_subdir():
+    """Each agent routes to its own subdirectory (not shared solver/)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = StorageConfig(kb_root=tmpdir, run_tag="test")
+
+        cases = {
+            "solver": "solver",
+            "steward_ask_question": "steward",
+            "steward_progress_check": "steward",
+            "benchmarker": "benchmarker",
+            "rigger": "rigger",
+            "librarian": "librarian",
+        }
+        for agent_name, expected_subdir in cases.items():
+            storage = WaveStorage(config, agent_name=agent_name, task_slug="test", wave=0)
+            assert storage._subdir == expected_subdir, \
+                f"{agent_name}: expected {expected_subdir}/, got {storage._subdir}/"
+            # Verify the subdir was actually created
+            assert (storage.wave_dir / expected_subdir).is_dir(), \
+                f"{agent_name}: {expected_subdir}/ not created"
+
+
+# ── ResponseRouter constructs Steward config correctly ──
+
+def test_response_router_steward_config():
+    """ResponseRouter creates Steward AgentConfig with Write/Edit denied."""
+    from agents.response_router import ResponseRouter
+    import inspect
+
+    router = ResponseRouter(prompts_dir=Path("conf/agent/response_prompts"))
+
+    # Inspect _call_agent source to verify tool_rules are set
+    source = inspect.getsource(router._call_agent)
+    assert "ToolRule" in source, "_call_agent should use ToolRule"
+    assert "Write" in source, "_call_agent should have Write rule"
+    assert "Edit" in source, "_call_agent should have Edit rule"
+    assert "allow=False" in source, "Write/Edit should be denied"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in globals().items() if k.startswith("test_")]
     for t in tests:

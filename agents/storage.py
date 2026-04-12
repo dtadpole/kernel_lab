@@ -44,8 +44,7 @@ class WaveStorage:
         wave_id = f"w{wave:03d}_{now.strftime('%Y%m%d_%H%M%S')}"
         self.wave_dir = config.journal_path / wave_id
         self.wave_dir.mkdir(parents=True, exist_ok=True)
-        (self.wave_dir / "solver").mkdir(exist_ok=True)
-        (self.wave_dir / "steward").mkdir(exist_ok=True)
+        (self.wave_dir / self._subdir).mkdir(exist_ok=True)
         (self.wave_dir / "directions").mkdir(exist_ok=True)
 
         # Log file handles (opened lazily, closed in close_logs)
@@ -57,10 +56,14 @@ class WaveStorage:
 
     @property
     def _subdir(self) -> str:
-        """Agent subdirectory: 'steward' for steward agents, 'solver' for everything else."""
+        """Agent subdirectory based on agent_name.
+
+        steward_* → steward/, solver → solver/, others → their own name.
+        The directory is created on first use if it doesn't exist.
+        """
         if self.agent_name.startswith("steward"):
             return "steward"
-        return "solver"
+        return self.agent_name
 
     @property
     def events_path(self) -> Path:

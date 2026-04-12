@@ -191,6 +191,7 @@ class Steward:
         recent_events: str,
         mode: str,
         direction: dict,
+        **kwargs,
     ) -> StewardResponse:
         """Review a direction proposal. Returns APPROVED/REDIRECT."""
         ctx = _base_context(transcript_path, events_path, recent_events, mode)

@@ -1,24 +1,24 @@
-# Per-config autotune for sample WGMMA matmul kernel.
+# Per-config autotune for sample WMMA matmul kernel.
 #
-# Tunable: TILE_N (N-tile width, multiple of 64), STAGES (pipeline depth).
-# Fixed: TILE_M=128, TILE_K=64 (WGMMA constraints).
-#
-# Configs not listed use kernel defaults (TILE_N=128, STAGES=4).
+# Tunable: BM, BN (CTA tile sizes), BK (K-tile, multiple of 16).
 
 configs:
   mat-256x256:
     autotune:
       params:
-        TILE_N: [64, 128]
-        STAGES: [2, 3, 4]
+        BM: [64, 128]
+        BN: [64, 128]
+        BK: [32, 64]
   mat-512x512:
     autotune:
       params:
-        TILE_N: [64, 128, 256]
-        STAGES: [2, 3, 4]
+        BM: [64, 128]
+        BN: [64, 128]
+        BK: [32, 64]
   mat-1024x1024:
     autotune:
       params:
-        TILE_N: [128, 256]
-        STAGES: [2, 3, 4]
-  # mat-2048+: no autotune, use defaults (TILE_N=128, STAGES=4)
+        BM: [128, 256]
+        BN: [128, 256]
+        BK: [32, 64]
+  # mat-2048+: no autotune, use defaults (BM=128, BN=128, BK=64)

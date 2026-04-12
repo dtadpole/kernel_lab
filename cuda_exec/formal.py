@@ -1391,9 +1391,9 @@ def cli_main() -> None:
             logger.warning("Failed to check/kill existing bench: %s", e)
 
     # Kill existing processes on the target GPU (ensures exclusive access)
-    gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if gpu_id is not None and gpu_id != "0":
-        _kill_gpu_processes(int(gpu_id))
+    # Use bench.gpu param (not CUDA_VISIBLE_DEVICES) to avoid killing wrong GPU
+    if gpu is not None and int(gpu) != 0:
+        _kill_gpu_processes(int(gpu))
 
     impls = bench_cfg.impls
     if isinstance(impls, str) and impls != "all":

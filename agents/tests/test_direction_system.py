@@ -210,6 +210,53 @@ def test_all_scenarios_registered():
     assert "time_limit" not in SCENARIO_MAX_TURNS
 
 
+def test_all_scenarios_render_mode_and_direction():
+    """All scenarios render mode and direction_json from context variables.
+
+    This tests the bug fix: steward methods must pass mode/direction_json
+    through to the template, not leave them as '(not available)'.
+    """
+    from agents.response_router import ResponseRouter
+
+    router = ResponseRouter(prompts_dir=Path("conf/agent/response_prompts"))
+
+    # Simulate what Workshop._get_steward_context() returns
+    base_vars = {
+        "mode": "building",
+        "direction_json": '{"name": "warp-specialization"}',
+        "direction_path": "/tmp/directions/001_warp-specialization.json",
+        "transcript_path": "/tmp/transcript.md",
+        "events_path": "/tmp/events.jsonl",
+        "recent_events": "compile succeeded",
+    }
+
+    # Scenario-specific extra vars
+    extras = {
+        "ask_question": {"question": "How should I proceed?"},
+        "permission": {"tool_name": "Write", "tool_input": "{}"},
+        "session_end": {
+            "result_text": "done", "stop_reason": "end_turn",
+            "elapsed_time": "30m", "total_tool_calls": "50",
+            "error_count": "2",
+        },
+        "progress_check": {"elapsed_time": "15m"},
+        "set_direction": {},  # direction_json already in base_vars
+        "direction_pulse": {"trigger_type": "compile"},
+        "start_exploring": {"reason": "direction exhausted"},
+    }
+
+    for scenario in router.scenarios:
+        variables = {**base_vars, **extras.get(scenario, {})}
+        rendered = router.build_context(scenario, variables)
+
+        assert "building" in rendered, \
+            f"{scenario}: mode 'building' not rendered — got: {rendered[:200]}"
+        assert "warp-specialization" in rendered, \
+            f"{scenario}: direction_json not rendered — got: {rendered[:200]}"
+        assert "(not available)" not in rendered, \
+            f"{scenario}: has '(not available)' — missing variable: {rendered[:200]}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in globals().items() if k.startswith("test_")]
     for t in tests:

@@ -1,6 +1,7 @@
 """Steward — provides runtime guidance to Solver.
 
-A methodologist who reads working patterns. Not a CUDA expert.
+A situational methodologist who reads working patterns and tailors
+guidance to the current situation. Not a CUDA expert.
 Two core responsibilities:
   1. Correctness stuck → guide decomposition
   2. Performance direction drift → redirect to 初心
@@ -100,15 +101,18 @@ class Steward:
         transcript_path: str,
         events_path: str,
         recent_events: str,
+        mode: str,
         question: str,
         solver_context: str = "",
+        **kwargs,
     ) -> str:
         """Solver asks for guidance. Returns free-text answer."""
         full_question = question
         if solver_context:
             full_question = f"{question}\n\nContext: {solver_context}"
 
-        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx.update(kwargs)
         ctx["question"] = full_question
         return await self.router.respond_raw("ask_question", ctx)
 
@@ -119,11 +123,14 @@ class Steward:
         transcript_path: str,
         events_path: str,
         recent_events: str,
+        mode: str,
         tool_name: str,
         tool_input: dict,
+        **kwargs,
     ) -> StewardResponse:
         """Review a restricted tool call. Returns ALLOW/DENY."""
-        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx.update(kwargs)
         ctx["tool_name"] = tool_name
         ctx["tool_input"] = str(tool_input)
         verdict = await self.router.respond("permission", ctx)
@@ -136,14 +143,17 @@ class Steward:
         transcript_path: str,
         events_path: str,
         recent_events: str,
+        mode: str,
         result_text: str,
         stop_reason: str,
         elapsed_time: str,
         total_tool_calls: int,
         error_count: int,
+        **kwargs,
     ) -> StewardResponse:
         """Review whether Solver truly finished. Returns SUCCESS/CONTINUE/ABORT."""
-        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx.update(kwargs)
         ctx.update({
             "result_text": result_text,
             "stop_reason": stop_reason,
@@ -215,11 +225,14 @@ class Steward:
         transcript_path: str,
         events_path: str,
         recent_events: str,
+        mode: str,
         direction: dict,
         reason: str,
+        **kwargs,
     ) -> StewardResponse:
         """Review Solver's request to abandon direction and brainstorm. Returns APPROVED/REDIRECT."""
-        ctx = _base_context(transcript_path, events_path, recent_events)
+        ctx = _base_context(transcript_path, events_path, recent_events, mode)
+        ctx.update(kwargs)
         ctx.update({
             "direction_json": json.dumps(direction, indent=2, ensure_ascii=False),
             "reason": reason,

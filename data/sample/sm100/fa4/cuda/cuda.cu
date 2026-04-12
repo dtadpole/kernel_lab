@@ -2,7 +2,7 @@
  * Flash Attention forward — BF16, SM100 TCGEN05 sample.
  *
  * Simplified FA4 for B200 using Blackwell-native TCGEN05 instructions.
- * Non-causal only. BLOCK_Q=128, BLOCK_KV=128, DIM=128.
+ * Non-causal + causal. BLOCK_Q=128, BLOCK_KV=128, DIM=128.
  *
  * Algorithm:
  *   For each Q-block (128 tokens):
@@ -24,7 +24,6 @@
  */
 #include <cuda_bf16.h>
 #include <cuda.h>
-#include <dlfcn.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -53,10 +52,10 @@
 #define TMEM_OFF    (MBAR_OFF + 256)
 #define SMEM_TOTAL  (TMEM_OFF + 128)
 
-/* idesc: 128×128 BF16→F32, transpose_b=1 */
-#define IDESC_128x128 ((1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(16u<<17)|(8u<<24))
-/* idesc: 128×128 BF16→F32, transpose_b=1 — same for PV GEMM */
-#define IDESC_PV IDESC_128x128
+/* idesc: 128×64 BF16→F32, transpose_b=1 (B in K×N format) */
+#define IDESC_128x64 ((1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(8u<<17)|(8u<<24))
+/* idesc: 128×64 BF16→F32, transpose_b=0 (B in N×K format, transposed) */
+#define IDESC_128x64_NT ((1u<<4)|(1u<<7)|(1u<<10)|(8u<<17)|(8u<<24))
 
 /* ── TCGEN05 + TMA PTX (reuse from matmul sample) ────────────── */
 __device__ __forceinline__ void _alloc(uint32_t*d,uint32_t n){unsigned a=__cvta_generic_to_shared(d);asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0],%1;"::"r"(a),"r"(n):"memory");}
@@ -176,16 +175,18 @@ fa_tcgen05(
     const float softmax_scale = rsqrtf((float)DIM);
     const float softmax_scale_log2 = softmax_scale * 1.4426950408889634f;
 
-    /* Alloc TMEM: S (128 cols for QK scores 128×128), O_lo/O_hi (64 each) */
+    /* Alloc TMEM: S_lo/S_hi (64 each for QK scores), O_lo/O_hi (64 each) */
     if (wid == 0) {
-        _alloc(tmem_slot, 128);     /* S_tmem — QK scores */
-        _alloc(tmem_slot + 1, 64);  /* O_lo — output cols 0-63 */
-        _alloc(tmem_slot + 2, 64);  /* O_hi — output cols 64-127 */
+        _alloc(tmem_slot,     64);  /* S_lo — QK scores KV 0-63 */
+        _alloc(tmem_slot + 1, 64);  /* S_hi — QK scores KV 64-127 */
+        _alloc(tmem_slot + 2, 64);  /* O_lo — output cols 0-63 */
+        _alloc(tmem_slot + 3, 64);  /* O_hi — output cols 64-127 */
     }
     __syncthreads();
-    uint32_t S_tmem = tmem_slot[0];
-    uint32_t O_lo   = tmem_slot[1];
-    uint32_t O_hi   = tmem_slot[2];
+    uint32_t S_lo   = tmem_slot[0];
+    uint32_t S_hi   = tmem_slot[1];
+    uint32_t O_lo   = tmem_slot[2];
+    uint32_t O_hi   = tmem_slot[3];
 
     if (tid == 0) {
         _mi(load_bar, 1);
@@ -229,33 +230,42 @@ fa_tcgen05(
         __syncthreads();
 
         /* ---- QK GEMM: S = Q × K^T ---- */
-        /* Zero S_tmem (128 cols) */
-        for (int c = lid; c < 128; c += 32) _st1(S_tmem + c, 0);
+        /* Two passes: S_lo[128×64] = Q × K[0:64]^T, S_hi[128×64] = Q × K[64:128]^T
+         * Each pass uses IDESC_128x64 (N=64) to avoid 128-wide TMEM output issues. */
+        for (int c = lid; c < 64; c += 32) _st1(S_lo + c, 0);
+        for (int c = lid; c < 64; c += 32) _st1(S_hi + c, 0);
         _ws(); __syncthreads();
 
         if (tid == 0) {
             _mi(mma_bar, 1);
 
-            /* Q is at smem+Q_OFF (128×128 bf16, stored as two 128×64 halves).
-             * K is at smem+K_OFF (128×128 bf16, stored as two 128×64 halves).
-             * For QK GEMM: C[128×128] = Q[128×D] × K^T[D×128]
-             * D=128 → 8 MMA K-steps of K=16.
-             * Q and K are each stored as [lo, hi] with 64 columns each. */
-
-            /* Q half-lo: smem+Q_OFF, stride=64*2=128B, SBO=8*128=1024 */
             uint64_t q_lo = _desc(smem + Q_OFF, 8 * 64 * 2);
             uint64_t q_hi = _desc(smem + Q_OFF + HALF_BYTES, 8 * 64 * 2);
-            /* K half-lo: smem+K_OFF */
-            uint64_t k_lo = _desc(smem + K_OFF, 8 * 64 * 2);
-            uint64_t k_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
 
-            /* 8 K-steps: first 4 from Q_lo×K_lo, next 4 from Q_hi×K_hi */
-            for (int kk = 0; kk < 8; kk++) {
-                uint64_t qd = (kk < 4) ? q_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
-                                       : q_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
-                uint64_t kd = (kk < 4) ? k_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
-                                       : k_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
-                _mma(S_tmem, qd, kd, IDESC_128x128, (kk > 0));
+            /* Pass 1: S_lo = Q × K[rows 0-63]^T — first 64 KV positions */
+            {
+                uint64_t k_lo0 = _desc(smem + K_OFF, 8 * 64 * 2);
+                uint64_t k_hi0 = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
+                for (int kk = 0; kk < 8; kk++) {
+                    uint64_t qd = (kk < 4) ? q_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
+                                           : q_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
+                    uint64_t kd = (kk < 4) ? k_lo0 + (uint64_t)((kk * MMA_K * 2) >> 4)
+                                           : k_hi0 + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
+                    _mma(S_lo, qd, kd, IDESC_128x64_NT, (kk > 0));
+                }
+            }
+            /* Pass 2: S_hi = Q × K[rows 64-127]^T — next 64 KV positions */
+            {
+                /* K rows 64-127: offset by 64 rows × 128 bytes/row = 8192 bytes */
+                uint64_t k_lo1 = _desc(smem + K_OFF + 64 * 64 * 2, 8 * 64 * 2);
+                uint64_t k_hi1 = _desc(smem + K_OFF + HALF_BYTES + 64 * 64 * 2, 8 * 64 * 2);
+                for (int kk = 0; kk < 8; kk++) {
+                    uint64_t qd = (kk < 4) ? q_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
+                                           : q_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
+                    uint64_t kd = (kk < 4) ? k_lo1 + (uint64_t)((kk * MMA_K * 2) >> 4)
+                                           : k_hi1 + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
+                    _mma(S_hi, qd, kd, IDESC_128x64_NT, (kk > 0));
+                }
             }
             _commit(mma_bar);
         }
@@ -265,13 +275,10 @@ fa_tcgen05(
         /* ---- Read S from TMEM, apply softmax in registers ---- */
         _fb(); __syncthreads(); _fa();
 
-        /* Read S (128 cols): two x64 loads at S_tmem and S_tmem+64.
-         * S_tmem was allocated with 128 cols, so +64 addresses cols 64-127
-         * for tcgen05.ld (NOT for tcgen05.mma — ld addressing is different). */
         uint32_t s_regs_lo[64], s_regs_hi[64];
-        _ld64(s_regs_lo, S_tmem);
+        _ld64(s_regs_lo, S_lo);
         _wl();
-        _ld64(s_regs_hi, S_tmem + 64);
+        _ld64(s_regs_hi, S_hi);
         _wl();
 
         /* Causal masking + softmax scaling */
@@ -353,8 +360,7 @@ fa_tcgen05(
         {
             uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
             uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
-            /* PV idesc: 128×64 BF16→F32, transpose_b=1 */
-            uint32_t idesc_pv = (1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(8u<<17)|(8u<<24);
+            /* PV idesc: 128×64 BF16→F32, transpose_b=1 (same as IDESC_128x64) */
 
             /* Pass 1: O_lo = P × V_lo */
             for (int c = lid; c < 64; c += 32) _st1(O_lo + c, 0);
@@ -366,7 +372,7 @@ fa_tcgen05(
                     uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
                                            : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
                     uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_lo, pd, vd, idesc_pv, (kk > 0));
+                    _mma(O_lo, pd, vd, IDESC_128x64, (kk > 0));
                 }
                 _commit(mma_bar);
             }
@@ -382,7 +388,7 @@ fa_tcgen05(
                     uint64_t pd = (kk < 4) ? p_lo + (uint64_t)((kk * MMA_K * 2) >> 4)
                                            : p_hi + (uint64_t)(((kk-4) * MMA_K * 2) >> 4);
                     uint64_t vd = vd0 + (uint64_t)((kk * MMA_K * 64 * 2) >> 4);
-                    _mma(O_hi, pd, vd, idesc_pv, (kk > 0));
+                    _mma(O_hi, pd, vd, IDESC_128x64, (kk > 0));
                 }
                 _commit(mma_bar);
             }
@@ -430,28 +436,14 @@ fa_tcgen05(
     /* Cleanup */
     __syncthreads();
     if (wid == 0) {
-        _dealloc(S_tmem, 128);
+        _dealloc(S_lo, 64);
+        _dealloc(S_hi, 64);
         _dealloc(O_lo, 64);
         _dealloc(O_hi, 64);
     }
 }
 
 /* ── Host ────────────────────────────────────────────────────── */
-typedef CUresult (*enc_fn)(CUtensorMap*,CUtensorMapDataType,cuuint32_t,void*,
-    const cuuint64_t*,const cuuint64_t*,const cuuint32_t*,const cuuint32_t*,
-    CUtensorMapInterleave,CUtensorMapSwizzle,CUtensorMapL2promotion,CUtensorMapFloatOOBfill);
-static enc_fn s_enc = nullptr;
-static bool init_enc() {
-    if(s_enc)return true;
-    void*h=dlopen("libcuda.so.1",RTLD_LAZY|RTLD_NOLOAD);
-    if(!h)h=dlopen("libcuda.so.1",RTLD_LAZY);if(!h)return false;
-    typedef CUresult(*gp)(const char*,void**,int,cuuint64_t,CUdriverProcAddressQueryResult*);
-    gp g=(gp)dlsym(h,"cuGetProcAddress_v2");if(!g)g=(gp)dlsym(h,"cuGetProcAddress");
-    CUdriverProcAddressQueryResult st;
-    return g("cuTensorMapEncodeTiled",(void**)&s_enc,12000,
-             CU_GET_PROC_ADDRESS_DEFAULT,&st)==CUDA_SUCCESS&&s_enc;
-}
-
 static int json_int(const char*j,const char*k,int fb){
     if(!j)return fb;const char*p=strstr(j,k);if(!p)return fb;
     p+=strlen(k);while(*p&&(*p=='"'||*p==':'||*p==' '))++p;

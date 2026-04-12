@@ -197,6 +197,10 @@ hosts:
       python: /usr/local/bin/python3  # 3.12.13+meta
       cc: /opt/rh/gcc-toolset-14/root/usr/bin/gcc  # fbcode/ccache gcc SIGSEGV from fbcode Python subprocess
       tvm_ffi_disable_torch_c_dlpack: true
+      cudnn_include:
+        - "@venv/nvidia/cudnn/include"
+        - /home/zhenc/workspace1/third-party/cudnn_frontend/1.17.0/include
+      cudnn_lib: "@venv/nvidia/cudnn/lib"
     network:
       internet: true                  # pypi.org reachable, but pypi.nvidia.com blocked
       proxy_bypass_method: "ssh_localhost"  # for Claude Code sandbox

@@ -497,15 +497,20 @@ def prepare_run(
     (run_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n")
 
     # 2. Snapshot data/ref/<kernel>/ → ref/<kernel>/
+    #    Always re-copy to pick up added/removed impls (e.g. fa3 removed).
     ref_src = PROJECT_ROOT / "data" / "ref" / kernel
     ref_dst = run_dir / "ref" / kernel
-    if ref_src.exists() and not ref_dst.exists():
+    if ref_src.exists():
+        if ref_dst.exists():
+            shutil.rmtree(ref_dst)
         shutil.copytree(ref_src, ref_dst)
 
     # 2b. Snapshot data/sample/<arch>/<kernel>/ → sample/<arch>/<kernel>/
     sample_src = PROJECT_ROOT / "data" / "sample" / arch / kernel
     sample_dst = run_dir / "sample" / arch / kernel
-    if sample_src.exists() and not sample_dst.exists():
+    if sample_src.exists():
+        if sample_dst.exists():
+            shutil.rmtree(sample_dst)
         shutil.copytree(sample_src, sample_dst)
 
     # peak/ is NOT copied into snapshots — it's static and always read

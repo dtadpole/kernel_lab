@@ -185,6 +185,7 @@ def resolve_host_env() -> Dict[str, str]:
             if Path(expanded).is_dir():
                 lib_dirs.append(expanded)
                 libs.append("cudnn")
+                libs.append("nvrtc")  # cudnn_frontend experimental (SM100) needs nvrtc
                 # Ensure unversioned libcudnn.so symlink exists for the linker
                 _ensure_cudnn_symlink(Path(expanded))
 

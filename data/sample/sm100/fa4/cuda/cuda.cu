@@ -353,6 +353,7 @@ fa_tcgen05(
         {
             uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
             uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
+            /* PV idesc: 128×64 BF16→F32, transpose_b=1 */
             uint32_t idesc_pv = (1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(8u<<17)|(8u<<24);
 
             /* Pass 1: O_lo = P × V_lo */
@@ -386,18 +387,6 @@ fa_tcgen05(
                 _commit(mma_bar);
             }
             _mw(mma_bar, 0); __syncthreads();
-
-            /* Read PV result from TMEM, add to O registers */
-            _fb(); __syncthreads(); _fa();
-            {
-                uint32_t pv_lo[64], pv_hi[64];
-                _ld64(pv_lo, O_lo); _wl();
-                _ld64(pv_hi, O_hi); _wl();
-                for (int i = 0; i < 64; i++) {
-                    O_reg_lo[i] += __int_as_float(pv_lo[i]);
-                    O_reg_hi[i] += __int_as_float(pv_hi[i]);
-                }
-            }
         }
         __syncthreads();
 
@@ -468,6 +457,7 @@ fa_tcgen05(
          * Pass 2: P[128×128] × V_hi[128×64] → S_tmem (cols 0-63, used as O cols 64-127)
          * idesc 128×64 for each pass. K=128, 8 K-steps per pass. */
         {
+            /* PV idesc: 128×64 BF16→F32, transpose_b=1 */
             uint32_t idesc_pv = (1u<<4)|(1u<<7)|(1u<<10)|(1u<<16)|(8u<<17)|(8u<<24);
             uint64_t p_lo = _desc(smem + K_OFF, 8 * 64 * 2);
             uint64_t p_hi = _desc(smem + K_OFF + HALF_BYTES, 8 * 64 * 2);
@@ -520,6 +510,7 @@ fa_tcgen05(
     }
 
     /* ---- Finalize: O = O_reg / rowsum ---- */
+    /* O_reg contains unnormalized P×V sums. Divide by rowsum. */
     float inv_sum = fast_rcp(rowsum);
     for (int i = 0; i < 64; i++) {
         O_reg_lo[i] *= inv_sum;

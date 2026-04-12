@@ -887,9 +887,10 @@ class AgentRunner:
         r'wc|grep|awk|sed|sort|uniq|cut|tr|diff|comm|paste|'
         r'nvcc|g\+\+|gcc|clang|cp|mv|ln|source|\.)\b'
     )
-    # Commands that are always forbidden regardless of path
+    # Commands that are always forbidden regardless of path or tool_rules.
+    # Checked for ALL agents — even those with no tool_rules.
     _FORBIDDEN_COMMANDS = re.compile(
-        r'\b(git|gh)\b'
+        r'\b(git|gh|kill|pkill|killall|sudo|reboot|shutdown)\b'
     )
 
     def _extract_paths_from_command(self, command: str) -> list[str]:
@@ -916,17 +917,20 @@ class AgentRunner:
     def _check_tool_rules(self, tool_name: str, tool_input: dict) -> dict:
         """Enforce tool_rules from config. Returns hook output dict."""
         import os
+
+        # ── Global forbidden commands — checked for ALL agents regardless of tool_rules ──
+        if tool_name == "Bash":
+            command = tool_input.get("command", "")
+            if command and self._FORBIDDEN_COMMANDS.search(command):
+                return self._deny(f"Forbidden command detected in: {command[:100]}")
+            if command and self._RECURSIVE_LS.search(command):
+                return self._deny("Recursive ls (-R) is not allowed. Use ls <dir> instead.")
+
+        # ── Per-agent tool_rules ──
         for rule in self.agent_config.tool_rules:
             if rule.tool == tool_name:
                 if not rule.allow:
                     return self._deny(f"Tool '{tool_name}' is not allowed for this agent role.")
-                # ── Bash: check forbidden commands first (git, etc.) ──
-                if tool_name == "Bash":
-                    command = tool_input.get("command", "")
-                    if command and self._FORBIDDEN_COMMANDS.search(command):
-                        return self._deny(f"Forbidden command detected in: {command[:100]}")
-                    if command and self._RECURSIVE_LS.search(command):
-                        return self._deny("Recursive ls (-R) is not allowed. Use ls <dir> instead.")
 
                 if not rule.blocked_paths:
                     # No path restrictions — just apply constraint

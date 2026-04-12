@@ -56,12 +56,19 @@ class WaveStorage:
     # ── Path properties ──
 
     @property
+    def _subdir(self) -> str:
+        """Agent subdirectory: 'steward' for steward agents, 'solver' for everything else."""
+        if self.agent_name.startswith("steward"):
+            return "steward"
+        return "solver"
+
+    @property
     def events_path(self) -> Path:
-        return self.wave_dir / "solver" / "events.jsonl"
+        return self.wave_dir / self._subdir / "events.jsonl"
 
     @property
     def transcript_path(self) -> Path:
-        return self.wave_dir / "solver" / "transcript.md"
+        return self.wave_dir / self._subdir / "transcript.md"
 
     @property
     def directions_path(self) -> Path:
@@ -104,7 +111,7 @@ class WaveStorage:
     def log_stdin(self, raw_data: str) -> None:
         """Log a raw message written to subprocess stdin."""
         if self._stdin_log is None:
-            self._stdin_log = open(self.wave_dir / "solver" / "stdin.log", "a")
+            self._stdin_log = open(self.wave_dir / self._subdir / "stdin.log", "a")
         ts = datetime.now().isoformat(timespec="seconds")
         self._stdin_log.write(f"[{ts}] {raw_data}\n")
         self._stdin_log.flush()
@@ -112,7 +119,7 @@ class WaveStorage:
     def log_stdout(self, raw_data: str) -> None:
         """Log a raw message read from subprocess stdout."""
         if self._stdout_log is None:
-            self._stdout_log = open(self.wave_dir / "solver" / "stdout.log", "a")
+            self._stdout_log = open(self.wave_dir / self._subdir / "stdout.log", "a")
         ts = datetime.now().isoformat(timespec="seconds")
         self._stdout_log.write(f"[{ts}] {raw_data}\n")
         self._stdout_log.flush()
@@ -120,7 +127,7 @@ class WaveStorage:
     def log_stderr(self, line: str) -> None:
         """Log a line from subprocess stderr."""
         if self._stderr_log is None:
-            self._stderr_log = open(self.wave_dir / "solver" / "stderr.log", "a")
+            self._stderr_log = open(self.wave_dir / self._subdir / "stderr.log", "a")
         ts = datetime.now().isoformat(timespec="seconds")
         self._stderr_log.write(f"[{ts}] {line}\n")
         self._stderr_log.flush()

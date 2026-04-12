@@ -14,7 +14,7 @@ from pathlib import Path
 
 import jinja2
 
-from agents.config import AgentConfig, MonitorConfig, StorageConfig
+from agents.config import AgentConfig, MonitorConfig, StorageConfig, ToolRule
 
 
 # Per-scenario max_turns (how deep each scenario can go with tool calls)
@@ -175,6 +175,13 @@ class ResponseRouter:
         steward_tools = config.tools if config.tools else [
             "Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch",
         ]
+        # Steward is read-only: no Write/Edit, Bash for research only
+        steward_rules = [
+            ToolRule(tool="Bash", allow=True,
+                     constraint="Read-only commands for research. No file modification, no process management."),
+            ToolRule(tool="Write", allow=False),
+            ToolRule(tool="Edit", allow=False),
+        ]
         agent_config = AgentConfig(
             name=f"steward_{config.name}",
             model=config.model,
@@ -182,6 +189,7 @@ class ResponseRouter:
             max_turns=config.max_turns,
             max_budget_usd=5.0,
             builtin_tools=steward_tools,
+            tool_rules=steward_rules,
             system_prompt=config.system_prompt,
         )
 

@@ -107,15 +107,18 @@ Read and understand these before doing anything else:
 - **Reference implementations** — read the ACTUAL source code:
   - `data/ref/{kernel}/cutedsl/cutedsl.py` — the CuTe DSL reference
   - `data/ref/{kernel}/pytorch/pytorch.py` — the PyTorch reference
-- **Sample code** — `data/sample/{arch}/{kernel}/cuda/cuda.cu` — a simplified
-  working kernel with WGMMA + TMA + warp specialization. Use as a starting
-  point or reference for correct PTX patterns. Includes `autotune.yaml`.
+- **Sample code** — `data/sample/{arch}/{kernel}/cuda/cuda.cu` — a working
+  kernel with TMA + warp specialization. **The tensor core instructions differ
+  by arch — you MUST use the correct one:**
+  - SM90 (Hopper): `wgmma.mma_async` + `wgmma.fence` + `wgmma.commit_group` + `wgmma.wait_group`
+  - SM100 (Blackwell): `tcgen05.mma` + `tcgen05.commit` + `tcgen05.wait`
+  Read YOUR arch's sample code to see the correct PTX patterns. Includes `autotune.yaml`.
 - **Roofline data** — `data/roofline/` for GPU peak specs
 - **Compile output** — registers, spills, SMEM, barriers
 
 Understanding HOW the reference implementations achieve 85-90% of peak
 is critical. Study their architecture: tile sizes, warp specialization
-strategy, pipeline depth, SMEM layout, TMA usage, WGMMA scheduling.
+strategy, pipeline depth, SMEM layout, TMA usage, MMA scheduling.
 
 ### 1c. NCU Profile — MANDATORY, NOT OPTIONAL
 
@@ -200,7 +203,7 @@ problem on this exact hardware — this is your blueprint.
   - `long_scoreboard` — memory dependency (TMA loads completing)
   - `barrier` — mbarrier waits (producer/consumer sync)
   - `mio_throttle` — memory I/O back-pressure
-  - `math_pipe_throttle` — WGMMA pipe full (GOOD — compute is saturated)
+  - `math_pipe_throttle` — MMA pipe full (GOOD — compute is saturated)
   - `selected` — warps actively issuing instructions
   → The ratio between these reveals the warp specialization balance.
     Producer warps stall on barrier (waiting for consumers), consumer warps
@@ -209,8 +212,10 @@ problem on this exact hardware — this is your blueprint.
 **D. Compute Pipeline**
 - **Tensor core utilization** (`sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed`)
   — THIS IS YOUR PRIMARY TARGET (e.g., cuBLAS achieves 92%)
-- **WGMMA instruction throughput** (`sm__inst_executed_pipe_tensor_op_gmma`)
-- **HMMA vs GMMA** — if both are nonzero, mixed precision stages are used
+- **MMA instruction throughput**:
+  - SM90: `sm__inst_executed_pipe_tensor_op_gmma` (WGMMA)
+  - SM100: `sm__inst_executed_pipe_tensor_op_tcgen05` (tcgen05)
+- **HMMA vs GMMA/tcgen05** — if both are nonzero, mixed precision stages are used
 - **FMA/ALU pipe** (`pipe_fma`, `pipe_alu`) — epilogue and address computation overhead
 
 **E. Memory Subsystem**
@@ -223,9 +228,11 @@ problem on this exact hardware — this is your blueprint.
 
 **F. SASS Instruction Analysis (gen-cuda only)**
 For your own kernel, the SASS is available via nvdisasm. Check:
-- **WGMMA instruction variant** — e.g., `HGMMA.64x64x16.F32.BF16 R120, gdesc[UR8].tnspB`
-  → exact shape (m64×n64×k16), accumulator type (F32), operand source, transpose
-- **WGMMA count per K-loop** — how many tiles per mainloop iteration
+- **MMA instruction variant**:
+  - SM90: `HGMMA.64x64x16.F32.BF16 R120, gdesc[UR8].tnspB` (wgmma)
+  - SM100: `TCGEN05.MMA ...` (tcgen05)
+  → exact shape, accumulator type, operand source, transpose
+- **MMA count per K-loop** — how many tiles per mainloop iteration
 - **Barrier instruction count** — pipeline synchronization overhead
 - **Register allocation** — which registers hold accumulators vs temporaries
 
@@ -263,10 +270,14 @@ and research tell you HOW to fix it.
 
 Search for instruction semantics, hardware constraints, and tuning guidance:
 ```bash
-# Search for relevant docs
+# Search for relevant docs — use your arch's instruction set:
+# SM90 (Hopper):
 .venv/bin/python -m doc_retrieval find query="wgmma mma_async descriptor" top_k=5
-# Read a specific section
 .venv/bin/python -m doc_retrieval read doc_id=parallel-thread-execution section_id=asynchronous-warpgroup-level-matrix-instructions-wgmma-mma
+# SM100 (Blackwell):
+.venv/bin/python -m doc_retrieval find query="tcgen05 mma tensor core 5th generation" top_k=5
+.venv/bin/python -m doc_retrieval read doc_id=parallel-thread-execution section_id=tcgen05-memory-consistency-model-canonical-sync-patterns-non-pipelined-same-thread
+# General:
 .venv/bin/python -m doc_retrieval read doc_id=cuda-c-best-practices-guide section_id=shared-memory
 ```
 
@@ -285,9 +296,11 @@ ToolSearch("select:WebSearch")   ← call this ONCE, then WebSearch is available
 Then search for architecture-specific features, CUTLASS/CuTe patterns, GTC
 talks, and published benchmarks:
 - `site:docs.nvidia.com hopper tuning guide` — SM90 optimization tips
+- `site:docs.nvidia.com blackwell tuning guide` — SM100 optimization tips
 - `CUTLASS 3.x warp specialization GEMM github` — scheduling patterns
-- `"persistent kernel" GEMM Hopper SM90` — tile scheduling strategies
-- `GTC "efficient GEMM" SM90 wgmma` — conference talks with perf data
+- `"persistent kernel" GEMM Hopper SM90` — SM90 tile scheduling strategies
+- `"tcgen05" GEMM Blackwell SM100 CUDA` — SM100 tensor core patterns
+- `GTC "efficient GEMM" wgmma tcgen05` — conference talks with perf data
 
 **3. Roofline analysis (`data/roofline/`):**
 - Calculate arithmetic intensity for each config size
@@ -307,8 +320,8 @@ If you skipped all research, go back to Phase 2 now.
 Generate optimization ideas. Each idea MUST satisfy ALL FOUR criteria:
 
 1. **Data-backed** — references a specific NCU metric or architectural observation
-   - BAD: "I think WGMMA would be faster"
-   - GOOD: "NCU shows 2% tensor core util vs ref's 85% — WMMA→WGMMA targets this 43x gap"
+   - BAD: "I think tensor core MMA would be faster"
+   - GOOD: "NCU shows 2% tensor core util vs ref's 85% — WMMA→native MMA (wgmma on SM90, tcgen05 on SM100) targets this 43x gap"
 
 2. **Specific** — describes the exact code change
    - BAD: "improve memory access"
@@ -326,9 +339,10 @@ Pick the highest-impact idea first.
 
 Output a short plan as text (NOT a tool call) before writing any code:
 
-1. **What optimization?** (e.g., "replace WMMA with WGMMA m64n128k16 SS mode")
-2. **What code changes?** (e.g., "new kernel function using wgmma.mma_async PTX,
-   TMA descriptors for Q/K/V loads, 3-stage pipeline with mbarrier")
+1. **What optimization?** (e.g., SM90: "replace WMMA with WGMMA m64n128k16 SS mode",
+   SM100: "replace WMMA with tcgen05.mma via TMEM")
+2. **What code changes?** (e.g., SM90: "wgmma.mma_async PTX, TMA descriptors, 3-stage pipeline",
+   SM100: "tcgen05.mma PTX, TMEM alloc, TMA loads, mbarrier pipeline")
 3. **Expected NCU impact?** (e.g., "tensor core util 2% → 60%+, TFLOPS 25 → 400+")
 4. **Architecture sketch**: tile sizes, SMEM layout, warp group roles
 5. **Code skeleton** with TODO placeholders — compile this first
@@ -337,7 +351,9 @@ Output a short plan as text (NOT a tool call) before writing any code:
 if (wg_id == 0) {
     // TODO: TMA producer — cp.async.bulk per stage, mbarrier arrive
 } else {
-    // TODO: WGMMA consumer — mbarrier wait, wgmma.mma_async, accumulate
+    // SM90: wgmma.mma_async consumer — mbarrier wait, wgmma, accumulate
+    // SM100: tcgen05.mma consumer — TMEM alloc, tcgen05.mma, accumulate
+    // TODO: MMA consumer — use YOUR arch's instruction set
 }
 // TODO: Epilogue — store accumulators to GMEM
 ```

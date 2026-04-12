@@ -444,6 +444,22 @@ class AgentRunner:
         log = self.log
 
         async def on_pre_tool_use(input_data, tool_use_id, context):
+            import sys
+            import traceback as _tb
+            try:
+                return await _pre_tool_use_inner(input_data, tool_use_id, context)
+            except Exception as exc:
+                # Capture the ACTUAL Python exception so we can diagnose hook failures
+                err_msg = f"[PreToolUse CRASH] {type(exc).__name__}: {exc}\n{''.join(_tb.format_exception(exc))}"
+                print(err_msg, file=sys.stderr, flush=True)
+                try:
+                    with open("/tmp/pre_tool_hook_crash.log", "a") as f:
+                        f.write(f"[{datetime.now().isoformat()}] {err_msg}\n")
+                except Exception:
+                    pass
+                return {}  # allow tool to proceed on hook failure
+
+        async def _pre_tool_use_inner(input_data, tool_use_id, context):
             tool_name = input_data.get("tool_name", "")
             tool_input = input_data.get("tool_input", {})
 
@@ -475,12 +491,6 @@ class AgentRunner:
                 gate_dirs = getattr(handler, '_direction_gate_dirs', None) or []
 
                 gate_tools = getattr(handler, '_direction_gate_tools', [])
-                # DEBUG: trace direction gate decisions for Write/Edit
-                if tool_name in ("Write", "Edit"):
-                    path = tool_input.get("file_path", "")
-                    debug_msg = f"[DEBUG gate] tool={tool_name} gate_dirs={gate_dirs} gate_tools={gate_tools} path={path[:80]} has_state={hasattr(handler, 'state')} direction={getattr(handler.state, 'current_direction', 'NO_STATE') if hasattr(handler, 'state') else 'NO_STATE'}"
-                    import sys; print(debug_msg, flush=True); sys.stderr.write(debug_msg + "\n"); sys.stderr.flush()
-                    with open("/tmp/debug_gate.log", "a") as f: f.write(debug_msg + "\n")
                 if tool_name in gate_tools:
                     if tool_name in ("Write", "Edit"):
                         path = tool_input.get("file_path", "")
@@ -518,7 +528,6 @@ class AgentRunner:
                         "decision": decision,
                     })
 
-            # SDK requires a dict return — None causes _convert_hook_output_for_cli to crash
             return result if result is not None else {}
 
         async def on_post_tool_use(input_data, tool_use_id, context):

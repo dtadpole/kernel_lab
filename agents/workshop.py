@@ -444,20 +444,9 @@ class Workshop(DefaultHandler):
 
     # ── Prompt builders ──
 
-    @staticmethod
-    def _detect_arch(gpu: int = 0) -> str:
-        """Detect GPU SM architecture from torch."""
-        try:
-            import torch
-            major, minor = torch.cuda.get_device_capability(gpu)
-            return f"sm{major * 10 + minor}"  # e.g. sm90, sm100
-        except Exception:
-            return "sm90"  # fallback
-
     def _build_initial_prompt(self, task: str, run_tag: str, kernel: str, gpu: int = 4) -> str:
-        arch = self._detect_arch(gpu)
         template = _load_prompt("workshop_initial")
-        result = template.format(run_tag=run_tag, kernel=kernel, task=task, gpu=gpu, arch=arch)
+        result = template.format(run_tag=run_tag, kernel=kernel, task=task, gpu=gpu)
         return result.replace("<run_tag>", run_tag)
 
     def _build_continue_prompt(self, verdict: StewardResponse) -> str:

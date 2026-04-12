@@ -30,25 +30,27 @@ Impl slugs are discovered via `list_impls()` — see `artifacts/slug-resolution.
 
 ## Usage
 
+Use `exec.arch=auto` to auto-detect the GPU architecture. Do NOT hardcode sm90/sm100.
+
 ```bash
 cd /home/zhenc/kernel_lab
 
 # Compile
 .venv/bin/python -m cuda_exec.exec_cli exec.action=compile \
-  exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4
+  exec.kernel=matmul exec.arch=auto exec.impl=gen-cuda exec.gpu=4
 
 # Trial all configs
 .venv/bin/python -m cuda_exec.exec_cli exec.action=trial \
-  exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4
+  exec.kernel=matmul exec.arch=auto exec.impl=gen-cuda exec.gpu=4
 
 # Trial specific configs
 .venv/bin/python -m cuda_exec.exec_cli exec.action=trial \
-  exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 \
+  exec.kernel=matmul exec.arch=auto exec.impl=gen-cuda exec.gpu=4 \
   'exec.configs=[mat-256x256,mat-8192x8192]'
 
 # Profile (NCU)
 .venv/bin/python -m cuda_exec.exec_cli exec.action=profile \
-  exec.kernel=matmul exec.arch=sm90 exec.impl=gen-cuda exec.gpu=4 \
+  exec.kernel=matmul exec.arch=auto exec.impl=gen-cuda exec.gpu=4 \
   'exec.configs=[mat-8192x8192]' exec.side=generated
 ```
 

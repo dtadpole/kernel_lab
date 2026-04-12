@@ -232,6 +232,10 @@ hosts:
       ld_preload: null                # fbcode libcuda 580.82.07 matches driver — no workaround needed
       python: /usr/local/bin/python3  # 3.12.13+meta
       tvm_ffi_disable_torch_c_dlpack: true
+      cudnn_include:
+        - "@venv/nvidia/cudnn/include"
+        - /home/zhenc/workspace1/third-party/cudnn_frontend/1.17.0/include
+      cudnn_lib: "@venv/nvidia/cudnn/lib"
     network:
       internet: true
       proxy_bypass_method: "fwdproxy"

@@ -1300,6 +1300,10 @@ def cli_main() -> None:
 
     def _kill_group(signum, frame):
         """Forward kill signal to entire process group, then exit."""
+        # Ignore signals for ourselves so killpg doesn't re-enter this handler.
+        # Children still receive SIGTERM. We exit cleanly via sys.exit below.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         os.killpg(os.getpgrp(), signal.SIGTERM)
         sys.exit(128 + signum)
 

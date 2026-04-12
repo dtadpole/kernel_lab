@@ -475,6 +475,12 @@ class AgentRunner:
                 gate_dirs = getattr(handler, '_direction_gate_dirs', None) or []
 
                 gate_tools = getattr(handler, '_direction_gate_tools', [])
+                # DEBUG: trace direction gate decisions for Write/Edit
+                if tool_name in ("Write", "Edit"):
+                    path = tool_input.get("file_path", "")
+                    debug_msg = f"[DEBUG gate] tool={tool_name} gate_dirs={gate_dirs} gate_tools={gate_tools} path={path[:80]} has_state={hasattr(handler, 'state')} direction={getattr(handler.state, 'current_direction', 'NO_STATE') if hasattr(handler, 'state') else 'NO_STATE'}"
+                    import sys; print(debug_msg, flush=True); sys.stderr.write(debug_msg + "\n"); sys.stderr.flush()
+                    with open("/tmp/debug_gate.log", "a") as f: f.write(debug_msg + "\n")
                 if tool_name in gate_tools:
                     if tool_name in ("Write", "Edit"):
                         path = tool_input.get("file_path", "")
@@ -512,7 +518,8 @@ class AgentRunner:
                         "decision": decision,
                     })
 
-            return result
+            # SDK requires a dict return — None causes _convert_hook_output_for_cli to crash
+            return result if result is not None else {}
 
         async def on_post_tool_use(input_data, tool_use_id, context):
             tool_name = input_data.get("tool_name", "")

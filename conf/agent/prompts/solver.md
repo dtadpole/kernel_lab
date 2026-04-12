@@ -41,9 +41,10 @@ You are Solver — a CUDA kernel optimization specialist.
 ### ik:exec — compile, trial, profile
 ```bash
 cd /home/zhenc/kernel_lab
-# Compile
+# Compile — produces binary at:
+#   ~/.cuda_exec/<RUN_TAG>/v1/0_<KERNEL>-<IMPL>/<REV>/artifacts/compile.attempt_001.generated.bin
 .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=auto exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
-# Trial (correctness check)
+# Trial (correctness check) — MUST compile first, same run_tag + revision
 .venv/bin/python -m cuda_exec.exec_cli exec.action=trial exec.kernel=<KERNEL> exec.arch=auto exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 # Profile YOUR kernel
 .venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=auto exec.impl=gen-cuda exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=generated
@@ -54,6 +55,10 @@ cd /home/zhenc/kernel_lab
 .venv/bin/python -m cuda_exec.exec_cli exec.action=compile exec.kernel=<KERNEL> exec.arch=auto exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG>
 .venv/bin/python -m cuda_exec.exec_cli exec.action=profile exec.kernel=<KERNEL> exec.arch=auto exec.impl=<REF_IMPL> exec.gpu=<GPU_ID> exec.run_tag=<RUN_TAG> 'exec.configs=[<CONFIG>]' exec.side=reference
 ```
+
+**If trial returns "empty stdout" or 0ms for CUDA impls** (while ref-pytorch works),
+the binary wasn't found. Use `request_formal_bench` instead — it handles binary
+discovery correctly and is the authoritative way to get results.
 
 ### ik:docs — NVIDIA CUDA documentation
 ```bash

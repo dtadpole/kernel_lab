@@ -64,12 +64,21 @@ trial (any configs, repeatable)
 profile (1-2 configs, NCU deep dive)
 ```
 
-1. **Compile** — resolves impl slug, loads ref + gen files, runs nvcc/ptxas
-2. **Trial** — runs kernel on selected configs, returns correctness + latency
+1. **Compile** — resolves impl slug, loads ref + gen files, runs nvcc/ptxas.
+   Produces a binary at `~/.cuda_exec/<run_tag>/v1/0_<kernel>-<impl>/<rev>/artifacts/compile.attempt_001.generated.bin`.
+2. **Trial** — runs compiled binary on selected configs, returns correctness + latency.
+   **Trial calls trial.py as a subprocess with `--binary-map` to locate the compiled binary.**
+   If trial returns "empty stdout", it means the binary wasn't found — check that
+   compile succeeded first and that you're using the same `run_tag` and `revision`.
 3. **Profile** — NCU hardware metrics. See `artifacts/profiling-guide.md` for
    key metrics, bottleneck classification, and assembly examination.
 
 New source code → increment `exec.revision`. Old revisions are immutable.
+
+**IMPORTANT**: If trial consistently returns "empty stdout" or 0ms for compiled
+impls (while Python impls like ref-pytorch work fine), use `request_formal_bench`
+instead — it handles binary discovery and `--binary-map` correctly. The formal
+bench is the authoritative way to get correctness + performance results.
 
 ## Rules
 
@@ -77,3 +86,4 @@ New source code → increment `exec.revision`. Old revisions are immutable.
 - One compile fans out to many trial/profile calls
 - Same `run_tag` across compile → trial → profile
 - `exec.revision` must increment when source code changes
+- If trial shows "empty stdout" for CUDA impls, fall back to `request_formal_bench`

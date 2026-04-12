@@ -192,7 +192,7 @@ def test_steward_response_kill():
 def test_parse_bench_improved_true():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
     sup = Workshop(config)
-    result = RunResult(result_text="improved: true, new gem created v002_20260405")
+    result = RunResult(result_text="gen-cuda: improved: true, new gem created v002_20260405")
     assert sup._parse_bench_improved(result) is True
 
 
@@ -208,7 +208,7 @@ def test_parse_bench_improved_false():
 def test_parse_bench_improved_gem_keyword():
     config = SystemConfig.from_yaml("conf/agent/agents.yaml")
     sup = Workshop(config)
-    result = RunResult(result_text="A new gem was created at v003_20260405_120000")
+    result = RunResult(result_text="gen-cuda: A new gem was created at v003_20260405_120000")
     assert sup._parse_bench_improved(result) is True
 
 
@@ -329,7 +329,7 @@ def test_submit_bench_reflection_with_gem():
         # Create fake impls and gem dirs
         impls_dir = Path(tmpdir) / "runs" / "test_run" / "impls" / "20260408_120000"
         impls_dir.mkdir(parents=True)
-        gem_dir = Path(tmpdir) / "runs" / "test_run" / "gems" / "fa4" / "gen-cuda" / "v003_20260408_120000"
+        gem_dir = Path(tmpdir) / "runs" / "test_run" / "gems" / "v003_20260408_120000"
         gem_dir.mkdir(parents=True)
 
         from cuda_exec.reflection import save_bench_reflection

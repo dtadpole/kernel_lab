@@ -312,39 +312,35 @@ def _generate_report(results: dict, gem_info: dict | None = None) -> str:
 # Gem logic
 # ---------------------------------------------------------------------------
 
-def _next_gem_version(gem_base: Path) -> int:
-    """Next gem version, scanning ALL impl slugs under the kernel directory.
+def _next_gem_version(gems_dir: Path) -> int:
+    """Next gem version, globally unique across all kernels and impl slugs.
 
-    gem_base is e.g. gems/matmul/gen-cuda/. We scan the parent (gems/matmul/)
-    across all sibling impl slugs so version numbers never collide.
+    gems_dir is e.g. runs/run_*/gems/. We scan all v* directories directly.
     """
-    kernel_gems = gem_base.parent  # gems/matmul/
     max_ver = 0
-    if kernel_gems.exists():
-        for slug_dir in kernel_gems.iterdir():
-            if not slug_dir.is_dir():
-                continue
-            for d in slug_dir.iterdir():
-                if d.is_dir() and d.name.startswith("v"):
-                    try:
-                        ver = int(d.name.split("_", 1)[0][1:])
-                        max_ver = max(max_ver, ver)
-                    except (ValueError, IndexError):
-                        pass
+    if gems_dir.exists():
+        for d in gems_dir.iterdir():
+            if d.is_dir() and d.name.startswith("v"):
+                try:
+                    ver = int(d.name.split("_", 1)[0][1:])
+                    max_ver = max(max_ver, ver)
+                except (ValueError, IndexError):
+                    pass
     return max_ver + 1
 
 
-def _load_best_historical_gem_results(gem_base: Path) -> dict | None:
+def _load_best_historical_gem_results(gems_dir: Path, kernel: str, impl_slug: str) -> dict | None:
     """Load the best-ever gem results (per-config best across ALL gem versions).
 
+    Filters gems by kernel and impl_slug from results.json.
     For each config, picks the lowest gen_median_ms across all historical gems.
     This prevents regression: a new gem must beat the historical best, not just
     the most recent (possibly regressed) gem.
     """
-    if not gem_base.exists():
+    if not gems_dir.exists():
         return None
     versions = sorted(
-        [d.name for d in gem_base.iterdir() if d.is_dir() and d.name.startswith("v")],
+        [d.name for d in gems_dir.iterdir() if d.is_dir() and d.name.startswith("v")],
     )
     if not versions:
         return None
@@ -354,12 +350,16 @@ def _load_best_historical_gem_results(gem_base: Path) -> dict | None:
     best_configs: dict[str, dict] = {}
 
     for ver_dir in versions:
-        results_file = gem_base / ver_dir / "results.json"
+        results_file = gems_dir / ver_dir / "results.json"
         if not results_file.exists():
             continue
         try:
             data = json.loads(results_file.read_text())
         except (json.JSONDecodeError, OSError):
+            continue
+
+        # Filter: only consider gems for the same kernel and impl
+        if data.get("kernel") != kernel or data.get("impl") != impl_slug:
             continue
 
         if best_result is None:
@@ -380,9 +380,9 @@ def _load_best_historical_gem_results(gem_base: Path) -> dict | None:
     return best_result
 
 
-def _check_gem(current_configs: dict, gem_base: Path) -> dict | None:
+def _check_gem(current_configs: dict, gems_dir: Path, kernel: str, impl_slug: str) -> dict | None:
     """Check if any config beats the latest gem. Returns gem_info or None."""
-    previous = _load_best_historical_gem_results(gem_base)
+    previous = _load_best_historical_gem_results(gems_dir, kernel, impl_slug)
 
     if previous is None:
         # First run — still require correctness
@@ -460,7 +460,7 @@ def prepare_run(
         ref/<kernel>/           — reference snapshot (immutable)
         configs/<kernel>.json   — config snapshot (immutable)
         impls/<bench_ts>/       — formal bench output (immutable)
-        gems/<slug>/v00N/       — per-run best implementations
+        gems/v00N_<ts>/         — per-run best implementations (flat, kernel+impl in results.json)
         command.json            — run metadata
     """
     repo = kb_repo or KB_REPO
@@ -642,15 +642,15 @@ def finalize_run(run_dir: Path, bench_result: dict, *, kb_repo: Path | None = No
         (slug_dir / "report.md").write_text(report)
 
         # Check gem (per-run: gems live inside this run)
-        gem_base = run_dir / "gems" / kernel / impl_slug
-        gem_info = _check_gem(config_results, gem_base)
+        gems_dir = run_dir / "gems"
+        gem_info = _check_gem(config_results, gems_dir, kernel, impl_slug)
         if gem_info:
-            ver = _next_gem_version(gem_base)
+            ver = _next_gem_version(gems_dir)
             gem_dir_name = f"v{ver:03d}_{bench_ts}"
             gem_info["version"] = ver
             gem_info["source_impl"] = f"impls/{bench_ts}"
             new_gems[impl_slug] = gem_info
-            gem_dir = gem_base / gem_dir_name
+            gem_dir = gems_dir / gem_dir_name
             gem_dir.mkdir(parents=True, exist_ok=True)
 
             # Copy gen code to gem for easy seed access

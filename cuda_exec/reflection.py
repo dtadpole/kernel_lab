@@ -22,7 +22,7 @@ Usage (CLI):
 
 Storage:
     reflection_md → impls/<bench_ts>/reflection.md
-    gem_notes_md  → gems/<kernel>/<slug>/v00N_*/notes.md
+    gem_notes_md  → gems/v00N_*/notes.md
 """
 
 from __future__ import annotations
@@ -84,21 +84,19 @@ def save_bench_reflection(
 
     # 2. Save gem notes if gem_id provided
     if gem_id and gem_notes_md:
+        # gem_id can be "gen-cuda/v005" (legacy) or just "v005"
         parts = gem_id.split("/")
-        if len(parts) == 2:
-            slug, version = parts
-            gem_pattern = str(run_dir / "gems" / kernel / slug / f"{version}_*")
-            matches = sorted(glob.glob(gem_pattern))
-            if matches:
-                gem_dir = Path(matches[-1])
-                notes_path = gem_dir / "notes.md"
-                notes_path.write_text(gem_notes_md.strip() + "\n")
-                result["files_written"].append(str(notes_path))
-                result["gem_notes_path"] = str(notes_path)
-            else:
-                result["gem_error"] = f"Gem not found: {gem_pattern}"
+        version = parts[-1]  # always the last part
+        gem_pattern = str(run_dir / "gems" / f"{version}_*")
+        matches = sorted(glob.glob(gem_pattern))
+        if matches:
+            gem_dir = Path(matches[-1])
+            notes_path = gem_dir / "notes.md"
+            notes_path.write_text(gem_notes_md.strip() + "\n")
+            result["files_written"].append(str(notes_path))
+            result["gem_notes_path"] = str(notes_path)
         else:
-            result["gem_error"] = f"Invalid gem_id format: {gem_id}"
+            result["gem_error"] = f"Gem not found: {gem_pattern}"
 
     return result
 

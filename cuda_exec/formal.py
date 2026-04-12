@@ -1299,6 +1299,32 @@ def cli_main() -> None:
     elif hasattr(impls, "__iter__") and not isinstance(impls, str):
         impls = list(impls)
 
+    # --- Resolve gem version → data_root override ---
+    gem_version = bench_cfg.get("gem")
+    data_root_override = bench_cfg.get("data_root")
+
+    if gem_version is not None and data_root_override is None:
+        gem_version = str(gem_version).strip().lstrip("v")
+        # Normalize: "5" → "005", "03" → "003", "002" → "002"
+        gem_num = int(gem_version)
+        gem_prefix = f"v{gem_num:03d}_"
+
+        run_tag = bench_cfg.get("run_tag") or os.environ.get("CUDA_EXEC_RUN_TAG")
+        if not run_tag:
+            from cuda_exec.impls import _resolve_run_tag
+            run_tag = _resolve_run_tag()
+
+        kb_repo_path = Path(bench_cfg.get("kb_repo") or Path.home() / "kernel_lab_kb")
+        gems_dir = kb_repo_path / "runs" / run_tag / "gems"
+
+        gem_matches = sorted(gems_dir.glob(f"{gem_prefix}*"))
+        if not gem_matches:
+            print(f"Error: gem {gem_prefix}* not found in {gems_dir}", file=sys.stderr)
+            sys.exit(1)
+        gem_dir = gem_matches[-1]
+        data_root_override = str(gem_dir)
+        print(f"Using gem: {gem_dir.name} → {data_root_override}", file=sys.stderr)
+
     num_runs = int(bench_cfg.get("runs", 1))
     bench_kwargs = dict(
         kernel=bench_cfg.kernel,
@@ -1308,7 +1334,7 @@ def cli_main() -> None:
         timeout_seconds=bench_cfg.timeout,
         kb_repo=bench_cfg.get("kb_repo"),
         runtime_root=bench_cfg.get("runtime_root"),
-        data_root=bench_cfg.get("data_root"),
+        data_root=data_root_override,
         gpu_lockdown=bench_cfg.get("gpu_lockdown", True),
     )
 

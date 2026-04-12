@@ -681,11 +681,11 @@ class Workshop(DefaultHandler):
             for slug, info in gems.items():
                 ver = info.get("version", "?")
                 n_improved = len(info.get("improved_configs", []))
-                gem_id = f"{slug}/v{ver:03d}"
+                gem_id = f"v{ver:03d}"
 
             # Find previous/best gem path
             import glob
-            gem_pattern = str(kb_root / "runs" / run_tag / "gems" / kernel / "gen-cuda" / "v*")
+            gem_pattern = str(kb_root / "runs" / run_tag / "gems" / "v*")
             gem_matches = sorted(glob.glob(gem_pattern))
             if improved and len(gem_matches) >= 2:
                 prev_gem_path = gem_matches[-2]

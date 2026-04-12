@@ -63,14 +63,26 @@ def list_gems(kernel: str, arch: str, impl_name: str = "cuda",
     runs_dir = repo / "runs"
     run_dirs = [runs_dir / run_tag] if (runs_dir / run_tag).exists() else []
 
-    # New structure: runs/run_*/gems/<slug>/v*/
+    # Flat structure: runs/run_*/gems/v*/
+    impl_slug = f"gen-{impl_name}"
     for run_dir in run_dirs:
-        gem_base = run_dir / "gems" / f"gen-{impl_name}"
-        if not gem_base.exists():
+        gems_dir = run_dir / "gems"
+        if not gems_dir.exists():
             continue
-        for ver_dir in sorted(gem_base.glob("v*"), reverse=True):
-            gen_path = ver_dir / "gen" / arch / kernel
+        for ver_dir in sorted(gems_dir.glob("v*"), reverse=True):
             results_file = ver_dir / "results.json"
+            # Filter by kernel and impl from results.json
+            if results_file.exists():
+                try:
+                    import json
+                    results = json.loads(results_file.read_text())
+                except Exception:
+                    continue
+                if results.get("kernel") != kernel or results.get("impl") != impl_slug:
+                    continue
+            else:
+                continue
+            gen_path = ver_dir / "gen" / arch / kernel
             entry = {
                 "version": ver_dir.name.split("_")[0],  # e.g. "v001"
                 "path": ver_dir,
@@ -78,22 +90,9 @@ def list_gems(kernel: str, arch: str, impl_name: str = "cuda",
                 "run": run_dir.name,
                 "timestamp": "_".join(ver_dir.name.split("_")[1:]),
             }
-            # Extract TFLOPS from results.json if available
-            if results_file.exists():
-                try:
-                    import json
-                    results = json.loads(results_file.read_text())
-                    best_tflops = 0.0
-                    for cfg_data in results.get("configs", {}).values():
-                        ms = cfg_data.get("gen_median_ms") or cfg_data.get("ref_median_ms")
-                        if ms and ms > 0:
-                            # Approximate TFLOPS from the largest config
-                            pass
-                    gem_info = results.get("gem", {})
-                    entry["improved_configs"] = gem_info.get("improved_configs", [])
-                    entry["gem_info"] = gem_info
-                except Exception:
-                    pass
+            gem_info = results.get("gem", {})
+            entry["improved_configs"] = gem_info.get("improved_configs", [])
+            entry["gem_info"] = gem_info
             gems.append(entry)
 
     return gems
@@ -168,10 +167,21 @@ def _find_latest_gem(kernel: str, arch: str, impl_name: str = "cuda",
 
     run_dir = runs_dir / run_tag
     if run_dir.exists():
-        gem_base = run_dir / "gems" / f"gen-{impl_name}"
-        if gem_base.exists():
-            versions = sorted(gem_base.glob("v*"), reverse=True)
+        gems_dir = run_dir / "gems"
+        if gems_dir.exists():
+            impl_slug = f"gen-{impl_name}"
+            versions = sorted(gems_dir.glob("v*"), reverse=True)
             for ver in versions:
+                # Filter by kernel and impl from results.json
+                results_file = ver / "results.json"
+                if results_file.exists():
+                    try:
+                        import json
+                        results = json.loads(results_file.read_text())
+                        if results.get("kernel") != kernel or results.get("impl") != impl_slug:
+                            continue
+                    except Exception:
+                        continue
                 candidate = ver / "gen" / arch / kernel
                 if candidate.exists():
                     return candidate

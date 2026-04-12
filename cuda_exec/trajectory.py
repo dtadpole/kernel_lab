@@ -382,20 +382,21 @@ def _load_best_historical_gem_results(gems_dir: Path, kernel: str, impl_slug: st
 
 def _check_gem(current_configs: dict, gems_dir: Path, kernel: str, impl_slug: str) -> dict | None:
     """Check if any config beats the latest gem. Returns gem_info or None."""
+
+    # Gate: ALL configs must pass correctness. A kernel that produces wrong
+    # results on any config is not a valid gem, even if some configs improved.
+    for slug, cfg in current_configs.items():
+        if not cfg.get("correctness", False):
+            return None
+
     previous = _load_best_historical_gem_results(gems_dir, kernel, impl_slug)
 
     if previous is None:
-        # First run — still require correctness
-        correct_configs = [
-            slug for slug, cfg in current_configs.items()
-            if cfg.get("correctness", False)
-        ]
-        if not correct_configs:
-            return None
+        # First run — all configs already verified correct above
         return {
             "previous_run": None,
-            "improved_configs": correct_configs,
-            "summary": f"first run — {len(correct_configs)} configs (correctness verified)",
+            "improved_configs": list(current_configs.keys()),
+            "summary": f"first run — {len(current_configs)} configs (correctness verified)",
         }
 
     prev_configs = previous.get("configs", {})

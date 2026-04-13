@@ -925,6 +925,12 @@ class AgentRunner:
     _NAV_COMMANDS = re.compile(
         r'^\s*(ls|mkdir|touch|dirname|basename|pwd)\b'
     )
+    # Read-only commands that should bypass blocked_paths even when
+    # the command string contains a blocked directory (e.g., cd ~/kernel_lab && ...)
+    _READONLY_COMMANDS = re.compile(
+        r'doc_retrieval\s+(find|read|browse)\b'
+        r'|nvidia-smi\b'
+    )
     # Recursive ls — blocked (would expose subdirectory contents)
     _RECURSIVE_LS = re.compile(r'\bls\b.*\s+-\S*R')
     # Commands that read content or compile/execute — check blocked paths
@@ -950,6 +956,8 @@ class AgentRunner:
         # Split on pipes/semicolons and check each subcommand
         # But for simplicity, check the whole command
         if self._NAV_COMMANDS.match(command) and not self._DANGEROUS_COMMANDS.search(command):
+            return []
+        if self._READONLY_COMMANDS.search(command):
             return []
         paths = []
         for match in re.finditer(r'(?:~/|/|[a-zA-Z0-9_.]+/)[a-zA-Z0-9_./<>\-]*', command):

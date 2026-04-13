@@ -39,7 +39,7 @@ class MonitorConfig:
         return cls(
             idle_timeout=1800, total_timeout=7200, hard_limit=43200,
             check_interval=60, loop_threshold=5, progress_check_interval=300,
-            heartbeat_timeout=600.0,  # 10 min — Solver may have long thinking phases
+            heartbeat_timeout=1200.0,  # 20 min — Solver may have long thinking phases
             tool_timeout=2400.0,      # 40 min — NCU profiling and formal bench can be slow
         )
 

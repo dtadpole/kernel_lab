@@ -80,6 +80,27 @@ class ResponseVerdict:
                     detail = first_line[len(known):].lstrip(": —-–").strip()
                     break
             if not action:
+                # Scan all lines for a known action (Steward sometimes prefixes
+                # with reminders or markdown before the actual verdict)
+                for line in raw.strip().split("\n"):
+                    line_s = line.strip()
+                    if not line_s:
+                        continue
+                    # Try strict ACTION: format
+                    m2 = re.match(r"^([A-Z_]+)(?::(.*))?$", line_s)
+                    if m2 and m2.group(1) in cls._KNOWN_ACTIONS:
+                        action = m2.group(1)
+                        detail = (m2.group(2) or "").strip()
+                        break
+                    # Try startswith matching
+                    for known in cls._KNOWN_ACTIONS:
+                        if line_s.upper().startswith(known):
+                            action = known
+                            detail = line_s[len(known):].lstrip(": —-–").strip()
+                            break
+                    if action:
+                        break
+            if not action:
                 # Last resort: treat the whole first line as the action
                 action = first_line.upper().replace(" ", "_")
 

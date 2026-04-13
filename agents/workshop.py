@@ -603,13 +603,11 @@ class Workshop(DefaultHandler):
 
         proc_result = await _run_subprocess_async(cmd, cwd, bench_log_path, timeout=1800)
 
-        # stdout = JSON result, stderr = Markdown table + source paths
-        table_output = proc_result.stderr.strip()
+        # stdout = JSON result, stderr = Markdown table + log lines
+        stderr_full = proc_result.stderr.strip()
         json_output = proc_result.stdout.strip()
 
         print(f"[Workshop] Bench exit code: {proc_result.returncode}")
-        if table_output:
-            print(f"[Workshop] Bench table:\n{table_output[:500]}")
 
         # Parse JSON for structured data (gems, improved, etc.)
         bench_data = {}
@@ -619,8 +617,35 @@ class Workshop(DefaultHandler):
             except json.JSONDecodeError:
                 pass
 
-        # result_text = stderr table (human-readable, returned to Solver)
-        result_text = table_output or "(no output)"
+        # Persist full stdout JSON + stderr log under journal/wave/formal_bench/
+        wave_dir = self._solver_runner._storage.wave_dir if self._solver_runner else None
+        if wave_dir:
+            fb_dir = wave_dir / "formal_bench"
+            fb_dir.mkdir(parents=True, exist_ok=True)
+            existing = sorted(fb_dir.glob("*_stdout.json"))
+            seq = len(existing) + 1
+            if json_output:
+                (fb_dir / f"{seq:03d}_stdout.json").write_text(json_output)
+            if stderr_full:
+                (fb_dir / f"{seq:03d}_stderr.log").write_text(stderr_full)
+            print(f"[Workshop] Bench logs saved: {fb_dir}/{seq:03d}_*")
+
+        # Extract table + key summary from stderr (strip verbose log lines)
+        # Table lines start with "|"; summary lines contain key status info
+        table_lines = []
+        summary_lines = []
+        for line in stderr_full.split("\n"):
+            if line.lstrip().startswith("|"):
+                table_lines.append(line)
+            elif any(k in line for k in [
+                "Bench start", "Bench end", "total=",
+                "gen-cuda:", "✓", "✗", "Trial phase",
+                "autotune done", "gem", "GPU", "clocks",
+            ]):
+                summary_lines.append(line)
+        result_text = "\n".join(summary_lines + [""] + table_lines).strip() or "(no output)"
+        if table_lines:
+            print(f"[Workshop] Bench table:\n" + "\n".join(table_lines[:5]))
         if proc_result.returncode != 0:
             result_text = f"BENCHMARK FAILED (exit code {proc_result.returncode})\n\n{result_text}"
 

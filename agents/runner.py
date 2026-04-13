@@ -380,7 +380,10 @@ class AgentRunner:
         await self.start(prompt)
         try:
             result = await self.run_until_result()
-        except Exception:
+        except Exception as exc:
+            import traceback, sys
+            print(f"[Runner] {self.agent_config.name} run() error: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             result = RunResult(log=self.log or SessionLog())
             result.stop_reason = "error"
         finally:

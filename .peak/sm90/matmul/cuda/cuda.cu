@@ -221,7 +221,6 @@ matmul_wgmma_tma(
     constexpr int MBAR_FULL_L   = STAGES * STAGE_BYTES_L;
     constexpr int MBAR_EMPTY_L  = MBAR_FULL_L + 128;
     constexpr int EPI_OFF_L     = MBAR_EMPTY_L + 128;
-    constexpr int SMEM_TOT_L    = EPI_OFF_L + 2 * EPI_BUF_BYTES;
 
     extern __shared__ char smem[];
 

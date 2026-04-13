@@ -5,7 +5,7 @@ BENCHMARK RESULT: IMPROVED
 ★ NEW GEM: {gem_id} ({n_improved} configs improved)
 
 ### References
-- Source snapshot: {impls_dir}/gen/sm90/{kernel}/cuda/cuda.cu
+- Source snapshot: {impls_dir}/gen/{arch}/{kernel}/cuda/cuda.cu
 - Results: {impls_dir}/gen-cuda/results.json
 - Compile logs: {impls_dir}/gen-cuda/compile/
 - Previous gem: {prev_gem_path}

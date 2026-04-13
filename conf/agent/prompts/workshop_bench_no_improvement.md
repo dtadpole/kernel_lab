@@ -3,7 +3,7 @@ BENCHMARK RESULT: NO IMPROVEMENT
 {bench_result_text}
 
 ### References
-- Source snapshot: {impls_dir}/gen/sm90/{kernel}/cuda/cuda.cu
+- Source snapshot: {impls_dir}/gen/{arch}/{kernel}/cuda/cuda.cu
 - Results: {impls_dir}/gen-cuda/results.json
 - Compile logs: {impls_dir}/gen-cuda/compile/
 - Current best gem: {best_gem_path}

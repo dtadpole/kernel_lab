@@ -491,6 +491,16 @@ class Workshop(DefaultHandler):
 
     # ── Prompt builders ──
 
+    @staticmethod
+    def _get_arch(gpu: int = 0) -> str:
+        """Detect GPU SM architecture."""
+        try:
+            import torch
+            major, minor = torch.cuda.get_device_capability(gpu)
+            return f"sm{major * 10 + minor}"
+        except Exception:
+            return "sm90"
+
     def _build_initial_prompt(self, task: str, run_tag: str, kernel: str, gpu: int = 4) -> str:
         template = _load_prompt("workshop_initial")
         result = template.format(run_tag=run_tag, kernel=kernel, task=task, gpu=gpu)
@@ -965,6 +975,7 @@ class Workshop(DefaultHandler):
                 "n_improved": n_improved,
                 "impls_dir": str(impls_dir),
                 "kernel": kernel,
+                "arch": self._get_arch(self.state.gpu),
                 "prev_gem_path": prev_gem_path,
                 "best_gem_path": gem_matches[-1] if gem_matches else "(none)",
             }

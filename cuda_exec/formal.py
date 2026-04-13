@@ -926,8 +926,34 @@ print(json.dumps({{"ok": True, "configs": results}}))
                 per_config_binary: Dict[str, str | None] = {}
                 for cfg_slug, pcw in at_result.per_config_results.items():
                     per_config_binary[cfg_slug] = pcw.binary_path if pcw.binary_path else None
+
+                # Compile default binary for configs WITHOUT autotune
+                # (uses kernel's default #define values)
+                default_binary = None
+                if at_result.configs_without_autotune:
+                    default_dir = autotune_dir / "__default__"
+                    if default_dir.exists():
+                        import shutil as _shutil
+                        _shutil.rmtree(default_dir)
+                    default_dir.mkdir(parents=True)
+                    from cuda_exec.autotune import _compile_variant, combo_tag
+                    from cuda_exec.host_env import resolve_compile_arch
+                    logger.info("[%s] compiling default binary for %d configs without autotune",
+                                cu_impl["slug"], len(at_result.configs_without_autotune))
+                    cr = _compile_variant(
+                        str(Path(cu_impl["entry_point"])),
+                        str(default_dir), "default", {},
+                        resolve_compile_arch(), autotune_env,
+                    )
+                    if cr.ok:
+                        default_binary = cr.binary_path
+                        logger.info("[%s] default binary: %s", cu_impl["slug"], default_binary)
+                    else:
+                        logger.warning("[%s] default binary compile failed: %s",
+                                       cu_impl["slug"], cr.error[:200])
+
                 for cfg_slug in at_result.configs_without_autotune:
-                    per_config_binary[cfg_slug] = None
+                    per_config_binary[cfg_slug] = default_binary
 
                 autotune_binaries[cu_impl["slug"]] = {
                     "per_config_binary": per_config_binary,
@@ -1079,6 +1105,8 @@ print(json.dumps({{"ok": True, "configs": results}}))
                             config_binary_map[at_slug] = binary
 
                     binary_map_str = ",".join(f"{s}={p}" for s, p in config_binary_map.items())
+                    logger.info("  %s: %s", config_slug,
+                                " | ".join(f"{s}={Path(p).name}" for s, p in config_binary_map.items()))
 
                     trial_req = TrialRequest(
                         metadata=trial_meta,

@@ -1365,23 +1365,36 @@ def cli_main() -> None:
     # Kill any existing formal bench on the same GPU.
     # Only one formal bench per GPU — concurrent instances fight for GPU
     # resources and all stall. The newest one wins.
-    # Since each formal.py sets os.setpgrp(), killing the main process via
-    # SIGTERM triggers _kill_group which kills the entire process group
-    # (compile.sh, trial.py, autotune workers, etc.).
     if gpu is not None:
         my_pid = os.getpid()
+        my_ppid = os.getppid()
+        # Grandparent: read /proc/ppid/stat to get ppid's parent
+        my_gppid = 0
         try:
-            result = __import__("subprocess").run(
-                ["pgrep", "-af", f"cuda_exec.formal"],
+            stat = Path(f"/proc/{my_ppid}/stat").read_text().split()
+            my_gppid = int(stat[3])  # field 4 = ppid
+        except Exception:
+            pass
+        try:
+            # Read /proc to find other Python processes running formal bench
+            import subprocess as _sp
+            result = _sp.run(
+                ["pgrep", "-f", "cuda_exec.formal"],
                 capture_output=True, text=True,
             )
             for line in result.stdout.strip().split("\n"):
-                if not line.strip():
+                pid_str = line.strip()
+                if not pid_str.isdigit():
                     continue
-                parts = line.split(None, 1)
-                pid = int(parts[0])
-                cmdline = parts[1] if len(parts) > 1 else ""
-                if pid != my_pid and f"bench.gpu={gpu}" in cmdline:
+                pid = int(pid_str)
+                if pid in (my_pid, my_ppid, my_gppid):
+                    continue
+                # Read cmdline to check GPU match
+                try:
+                    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
+                except OSError:
+                    continue
+                if f"bench.gpu={gpu}" in cmdline:
                     logger.info("Killing existing formal bench PID %d on GPU %s", pid, gpu)
                     try:
                         os.kill(pid, signal.SIGTERM)

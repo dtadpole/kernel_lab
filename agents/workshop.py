@@ -655,15 +655,16 @@ class Workshop(DefaultHandler):
         return result
 
     def _check_correctness_failure(self, bench_data: dict, result_text: str) -> bool:
-        """Check if any gen-* impl has correctness failures.
+        """Check if any gen-* impl has a correctness failure.
 
         Uses structured JSON from formal.py stdout only.
+        Returns True if any gen-* config is not explicitly correct=True.
         """
         summary = bench_data.get("summary", {})
         for impl_slug, impl_info in summary.get("impls", {}).items():
             if impl_slug.startswith("gen-"):
                 for cfg_slug, cfg_info in impl_info.get("configs", {}).items():
-                    if cfg_info.get("correct") is False:
+                    if cfg_info.get("correct") is not True:
                         return True
         return False
 

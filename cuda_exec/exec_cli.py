@@ -23,7 +23,10 @@ from cuda_exec.models import (
     ProfileRequest,
     TrialRequest,
 )
-from cuda_exec.tasks import compile_endpoint, trial_endpoint, profile_endpoint
+from cuda_exec.tasks import (
+    compile_endpoint, trial_endpoint, profile_endpoint,
+    resolve_workspace_bundle, _primary_artifact_from_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +101,44 @@ def do_trial(
         if not trial_configs:
             raise ValueError(f"No matching configs found. Available: {list(all_configs.keys())}")
 
+    # ── Auto-recompile .cu reference impls to avoid stale binaries ──
+    all_impls = resolve_impls(kernel, arch, "all", data_root=data_root)
+    binary_map_parts = []
+    for ref in all_impls:
+        if ref["slug"] == impl_slug:
+            continue  # skip the impl being tested
+        if ref["file_type"] != "cu":
+            continue  # .py impls don't need compilation
+        unique_rev = (int(time.time_ns()) % 10000000) + hash(ref["slug"]) % 1000
+        ref_meta = _build_metadata(kernel, ref["slug"], run_tag, unique_rev)
+        # Stage all impls so trial.py can discover them
+        compile_impls = {ref["slug"]: dict(ref["files"])}
+        for other in all_impls:
+            if other["slug"] != ref["slug"]:
+                compile_impls[other["slug"]] = dict(other["files"])
+        compile_req = CompileRequest(
+            metadata=ref_meta,
+            timeout_seconds=timeout,
+            impls=compile_impls,
+        )
+        try:
+            compile_resp = compile_endpoint(compile_req)
+            if compile_resp.all_ok:
+                ws = resolve_workspace_bundle(**ref_meta.model_dump())
+                target_path, _ = _primary_artifact_from_manifest(ws)
+                binary_map_parts.append(f"{ref['slug']}={target_path}")
+                logger.info("Recompiled %s → %s", ref["slug"], target_path)
+        except Exception as exc:
+            logger.warning("Failed to recompile %s: %s", ref["slug"], exc)
+
+    binary_map = ",".join(binary_map_parts) if binary_map_parts else ""
+
     trial_req = TrialRequest(
         metadata=metadata,
         timeout_seconds=timeout,
         configs=trial_configs,
         gpu_index=gpu_index,
+        binary_map=binary_map,
     )
     resp = trial_endpoint(trial_req)
     return resp.model_dump(mode="json")

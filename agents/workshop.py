@@ -536,14 +536,20 @@ class Workshop(DefaultHandler):
             self.state.mode = MODE_EXPLORING
             print(f"[Workshop] Mode: building → exploring (direction '{old_name}' cleared)")
             guidance = response.detail or ""
-            return f"Direction '{old_name}' cleared. Steward approved.\n{guidance}"
+            msg = f"Direction '{old_name}' cleared. Steward approved.\n{guidance}"
+            if response.reasoning:
+                msg += f"\n\n{response.reasoning}"
+            return msg
         else:
             # REDIRECT — direction not exhausted, keep building
-            return (
+            msg = (
                 f"Direction not exhausted. Continue building: "
                 f"'{self.state.current_direction.get('name', '?')}'.\n"
                 f"Steward: {response.detail}"
             )
+            if response.reasoning:
+                msg += f"\n\n{response.reasoning}"
+            return msg
 
     # ── Benchmarker dispatch ──
 
@@ -743,7 +749,10 @@ class Workshop(DefaultHandler):
             # Only inject if Steward has something to say
             if response.action == "REDIRECT" and response.detail:
                 if self._solver_runner and self._solver_runner._client:
-                    await self._solver_runner._client.query(response.detail)
+                    inject_msg = response.detail
+                    if response.reasoning:
+                        inject_msg += f"\n\n{response.reasoning}"
+                    await self._solver_runner._client.query(inject_msg)
                     print(f"[Workshop] Direction diffusion ({trigger}): {response.action}")
         except Exception as e:
             print(f"[Workshop] Direction diffusion error: {e}")
@@ -875,9 +884,16 @@ class Workshop(DefaultHandler):
             self.state.direction_seq = seq
             self.state.mode = MODE_BUILDING
             print(f"[Workshop] Mode: exploring → building (direction: {direction['name']})")
-            return f"Direction approved: {direction['name']}.\nSteward: {response.detail}"
+            msg = f"Direction approved: {direction['name']}.\nSteward: {response.detail}"
+            if response.reasoning:
+                msg += f"\n\n{response.reasoning}"
+            return msg
         else:  # REDIRECT
-            return f"Direction not approved.\nSteward: {response.detail}\nRevise and call set_direction again."
+            msg = f"Direction not approved.\nSteward: {response.detail}"
+            if response.reasoning:
+                msg += f"\n\n{response.reasoning}"
+            msg += "\nRevise and call set_direction again."
+            return msg
 
     async def _handle_bench_request(self, event: AskEvent) -> str:
         """Solver requested a formal benchmark. Run via subprocess."""
@@ -1016,7 +1032,10 @@ class Workshop(DefaultHandler):
                 print(f"[Workshop] Progress check at {elapsed} — Steward: {response.action}")
                 if response.action == "REDIRECT":
                     self.state.consecutive_stuck = 0
-                    return f"inject:{response.detail}"
+                    inject_msg = response.detail
+                    if response.reasoning:
+                        inject_msg += f"\n\n{response.reasoning}"
+                    return f"inject:{inject_msg}"
             return "continue"
         elif event.alert_type in ("idle_timeout", "loop_detected"):
             # Route through progress_check — Steward decides how to respond
@@ -1029,7 +1048,10 @@ class Workshop(DefaultHandler):
                 print(f"[Workshop] {event.alert_type} at {elapsed} — Steward: {response.action}")
                 if response.action == "REDIRECT":
                     self.state.consecutive_stuck = 0
-                    return f"inject:{response.detail}"
+                    inject_msg = response.detail
+                    if response.reasoning:
+                        inject_msg += f"\n\n{response.reasoning}"
+                    return f"inject:{inject_msg}"
                 if self.state.consecutive_stuck >= 3:
                     print(f"[Workshop] 3 consecutive alerts — forcing interrupt")
                     self.state.consecutive_stuck = 0
@@ -1043,7 +1065,10 @@ class Workshop(DefaultHandler):
             return "continue"
         elif response.action in ("INJECT", "REDIRECT"):
             self.state.consecutive_stuck = 0  # reset on intervention
-            return f"inject:{response.detail}"
+            inject_msg = response.detail
+            if response.reasoning:
+                inject_msg += f"\n\n{response.reasoning}"
+            return f"inject:{inject_msg}"
         elif response.action in ("INTERRUPT", "KILL"):
             return "interrupt"
         return "continue"

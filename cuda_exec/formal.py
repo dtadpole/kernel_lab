@@ -762,10 +762,13 @@ def formal_benchmark(
     resolved = resolve_impls(kernel, arch, impls, data_root=snapshot_data)
     logger.info("Resolve impls done [%s] impls=%s", datetime.now().strftime(_ts_fmt), [r["slug"] for r in resolved])
 
-    # --- Isolate runtime ---
+    # --- Isolate runtime — clear previous binaries for a clean start ---
     ts_str = run_dir.name if run_dir else f"{int(time.time())}"
     bench_runtime = runtime_root_path / kernel / arch / ts_str
-    bench_runtime.mkdir(parents=True, exist_ok=True)
+    if bench_runtime.exists():
+        import shutil as _shutil
+        _shutil.rmtree(bench_runtime)
+    bench_runtime.mkdir(parents=True)
     old_exec_root = os.environ.get("CUDA_EXEC_ROOT")
     os.environ["CUDA_EXEC_ROOT"] = str(bench_runtime)
 

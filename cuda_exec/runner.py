@@ -261,6 +261,10 @@ def _run_command(
         finally:
             _force_kill(pid)
         completed = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+        # Forward subprocess stderr for observability
+        if stderr and stderr.strip():
+            for line in stderr.strip().split("\n"):
+                logger.info("  [%s] %s", kind, line)
     except FileNotFoundError as exc:
         raise ValueError(str(exc)) from exc
 

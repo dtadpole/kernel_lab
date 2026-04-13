@@ -749,6 +749,16 @@ def run_trial_task(
         cfg_dur = (cfg_end - cfg_start).total_seconds()
         logger.info("  trial config %s done  [%s] (%.1fs)", config_slug, cfg_end.strftime(_ts_fmt), cfg_dur)
         payload_json = _parse_structured_stdout(run_result["output"]["stdout"]) or {}
+
+        # Log per-impl results for observability
+        if isinstance(payload_json, dict):
+            for impl_slug, impl_data in payload_json.get("impls", {}).items():
+                if isinstance(impl_data, dict):
+                    lat = (impl_data.get("performance") or {}).get("latency_ms", {}).get("p50")
+                    corr = (impl_data.get("correctness") or {}).get("passed")
+                    lat_str = f"{lat:.3f}ms" if lat else "—"
+                    corr_str = "✓" if corr else ("✗" if corr is False else "?")
+                    logger.info("    %s: %s %s", impl_slug, lat_str, corr_str)
         comparison_path = Path(workspace["root_path"]) / comparison_rel
         comparison_path.parent.mkdir(parents=True, exist_ok=True)
         comparison_path.write_text(json.dumps(payload_json, indent=2) + "\n", encoding="utf-8")

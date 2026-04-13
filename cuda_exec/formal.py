@@ -1105,8 +1105,8 @@ print(json.dumps({{"ok": True, "configs": results}}))
                             config_binary_map[at_slug] = binary
 
                     binary_map_str = ",".join(f"{s}={p}" for s, p in config_binary_map.items())
-                    logger.info("  %s: %s", config_slug,
-                                " | ".join(f"{s}={Path(p).name}" for s, p in config_binary_map.items()))
+                    logger.info("  %s binaries: %s", config_slug,
+                                " | ".join(f"{s}={p}" for s, p in config_binary_map.items()))
 
                     trial_req = TrialRequest(
                         metadata=trial_meta,

@@ -43,6 +43,70 @@ class TestStewardConfig:
         assert sc.tool_rules == []
 
 
+class TestStewardConfigNegative:
+    """Negative cases — verify tools are actually blocked."""
+
+    def test_sendmessage_not_in_builtin(self):
+        cfg = SystemConfig.from_yaml("conf/agent/agents.yaml")
+        assert "SendMessage" not in cfg.steward.builtin_tools
+
+    def test_write_not_in_builtin(self):
+        cfg = SystemConfig.from_yaml("conf/agent/agents.yaml")
+        assert "Write" not in cfg.steward.builtin_tools
+
+    def test_edit_not_in_builtin(self):
+        cfg = SystemConfig.from_yaml("conf/agent/agents.yaml")
+        assert "Edit" not in cfg.steward.builtin_tools
+
+    def test_write_denied_by_tool_rules(self):
+        cfg = SystemConfig.from_yaml("conf/agent/agents.yaml")
+        rules = {r.tool: r for r in cfg.steward.tool_rules}
+        assert "Write" in rules
+        assert rules["Write"].allow is False
+
+    def test_edit_denied_by_tool_rules(self):
+        cfg = SystemConfig.from_yaml("conf/agent/agents.yaml")
+        rules = {r.tool: r for r in cfg.steward.tool_rules}
+        assert "Edit" in rules
+        assert rules["Edit"].allow is False
+
+    def test_disallowed_tools_merged_in_agent_config(self):
+        """AgentConfig.disallowed_tools should be passed through."""
+        from agents.config import AgentConfig
+        ac = AgentConfig(disallowed_tools=["SendMessage", "ToolSearch"])
+        assert "SendMessage" in ac.disallowed_tools
+        assert "ToolSearch" in ac.disallowed_tools
+
+    def test_disallowed_count(self):
+        cfg = SystemConfig.from_yaml("conf/agent/agents.yaml")
+        assert len(cfg.steward.disallowed_tools) >= 5
+
+
+class TestResponseVerdictParseNegative:
+    """Negative cases for verdict parsing."""
+
+    def test_rejected_not_parsed_as_approved(self):
+        v = ResponseVerdict.parse("REDIRECT:evidence is vague")
+        assert v.action != "APPROVED"
+        assert v.action == "REDIRECT"
+
+    def test_random_text_not_parsed_as_approved(self):
+        v = ResponseVerdict.parse("I think this looks good")
+        assert v.action != "APPROVED"
+
+    def test_lowercase_not_matched(self):
+        """Lowercase 'approved' should still match via upper()."""
+        v = ResponseVerdict.parse("approved: looks fine")
+        assert v.action == "APPROVED"
+
+    def test_partial_match_does_not_false_positive(self):
+        """'APPROVAL' should not match 'APPROVED'."""
+        v = ResponseVerdict.parse("APPROVAL granted")
+        # APPROVAL doesn't start with any known action exactly
+        # (APPROVED is longer, won't match APPROVAL)
+        assert v.action != "APPROVED"
+
+
 class TestResponseVerdictParse:
     """ResponseVerdict.parse() robustness."""
 

@@ -139,9 +139,9 @@ class Launcher:
             file.flush()
 
 
-def _create_run_tag(run: str) -> str:
-    """Generate a run tag from agent group and current timestamp."""
-    return f"{run}_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+def _create_run_tag(run: str, kernel: str) -> str:
+    """Generate a run tag: workshop_<kernel>_<timestamp>."""
+    return f"{run}_{kernel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
 async def async_main(cfg) -> int:
@@ -149,7 +149,7 @@ async def async_main(cfg) -> int:
     run = cfg.get("run")
     kernel = cfg.get("kernel", "matmul")
     gpu = cfg.get("gpu", 4)
-    run_tag = cfg.get("run_tag") or _create_run_tag(run)
+    run_tag = cfg.get("run_tag") or _create_run_tag(run, kernel)
     kb_root = Path(cfg.get("kb_root", "~/kernel_lab_kb")).expanduser()
     config_file = cfg.get("config", "conf/agent/agents.yaml")
     task = cfg.get("task")

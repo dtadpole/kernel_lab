@@ -120,7 +120,10 @@ static GpuSnapshot gpu_snapshot() {
     GpuSnapshot s = {};
     if (!g_nvml_ok) return s;
     nvmlDeviceGetClockInfo(g_nvml_dev, NVML_CLOCK_SM, &s.sm_clock_mhz);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     nvmlDeviceGetTemperature(g_nvml_dev, NVML_TEMPERATURE_GPU, &s.temp_c);
+#pragma GCC diagnostic pop
     s.valid = true;
     return s;
 }
@@ -504,7 +507,6 @@ int main() {
         cudaEventCreate(&end_events[i]);
     }
 
-    const int mid = N / 2;
     GpuSnapshot snap_after = {};
 
     /* Pipelined: enqueue all iterations without CPU sync.

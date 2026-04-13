@@ -155,7 +155,7 @@ HARNESS_INCLUDE_ARGS=()
 if [[ -n "$HARNESS" ]]; then
   HARNESS_DIR="$(dirname "$HARNESS")"
   HARNESS_INCLUDE_ARGS=("-I${HARNESS_DIR}")
-  COMMON_NVCC_ARGS+=("-L/usr/lib" "-lnvidia-ml")
+  COMMON_NVCC_ARGS+=("-L/usr/lib64" "-lnvidia-ml")
 fi
 
 # Extra include directories from NVCC_INCLUDE_DIRS (space-separated)

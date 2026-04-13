@@ -97,6 +97,9 @@ class StewardConfig:
     """Steward (guidance agent) settings."""
     model: str = "claude-sonnet-4-6"
     max_tokens: int = 2000
+    builtin_tools: list[str] = field(default_factory=list)
+    disallowed_tools: list[str] = field(default_factory=list)
+    tool_rules: list[ToolRule] = field(default_factory=list)
 
 
 @dataclass
@@ -144,6 +147,7 @@ class AgentConfig:
     max_budget_usd: float = 5.0
     builtin_tools: list[str] = field(default_factory=list)
     custom_tools: list[str] = field(default_factory=list)
+    disallowed_tools: list[str] = field(default_factory=list)
     tool_rules: list[ToolRule] = field(default_factory=list)
     system_prompt: str = ""
     system_prompt_file: str = ""
@@ -178,10 +182,26 @@ class SystemConfig:
         monitor = MonitorConfig(**{k: v for k, v in mon_raw.items()
                                    if k in MonitorConfig.__dataclass_fields__})
 
-        # Response agent
+        # Steward
         ra_raw = raw.get("steward", {})
-        steward = StewardConfig(**{k: v for k, v in ra_raw.items()
-                                                if k in StewardConfig.__dataclass_fields__})
+        steward_tools = ra_raw.get("tools", {})
+        steward_rules_raw = ra_raw.get("tool_rules", [])
+        steward_rules = []
+        for r in steward_rules_raw:
+            steward_rules.append(ToolRule(
+                tool=r.get("tool", ""),
+                allow=r.get("allow", True),
+                constraint=r.get("constraint", ""),
+                blocked_paths=r.get("blocked_paths", []),
+                allowed_paths=r.get("allowed_paths", []),
+            ))
+        steward = StewardConfig(
+            model=ra_raw.get("model", "claude-sonnet-4-6"),
+            max_tokens=ra_raw.get("max_tokens", 2000),
+            builtin_tools=steward_tools.get("builtin", []),
+            disallowed_tools=steward_tools.get("disallowed", []),
+            tool_rules=steward_rules,
+        )
 
         # Storage
         st_raw = raw.get("storage", {})

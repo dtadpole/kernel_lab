@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents.config import StorageConfig
+from agents.config import StewardConfig, StorageConfig
 from agents.response_router import ResponseRouter, ResponseVerdict
 
 
@@ -79,10 +79,12 @@ class Steward:
         prompts_dir: str | Path = "conf/agent/response_prompts",
         model: str = "claude-sonnet-4-6",
         storage_config: StorageConfig | None = None,
+        steward_config: StewardConfig | None = None,
     ):
         self.router = ResponseRouter(
             prompts_dir=Path(prompts_dir), model=model,
             storage_config=storage_config,
+            steward_config=steward_config,
         )
 
     # ── Scenario 1: Solver asks a question ──

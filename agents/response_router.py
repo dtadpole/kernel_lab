@@ -14,7 +14,7 @@ from pathlib import Path
 
 import jinja2
 
-from agents.config import AgentConfig, MonitorConfig, StorageConfig, ToolRule
+from agents.config import AgentConfig, MonitorConfig, StewardConfig, StorageConfig, ToolRule
 
 
 # Per-scenario max_turns (how deep each scenario can go with tool calls)
@@ -47,6 +47,13 @@ class ResponseVerdict:
     detail: str        # text after the colon (if any)
     reasoning: str     # full text after the first line
 
+    # Known action words for startswith matching (longest first to avoid prefix conflicts)
+    _KNOWN_ACTIONS = [
+        "APPROVED", "REDIRECT", "ON_TRACK", "CONTINUE", "ABORT",
+        "SUCCESS", "ALLOW", "DENY", "INJECT", "INTERRUPT", "KILL",
+        "EXTEND", "EXPLORE", "NEEDS_WORK",
+    ]
+
     @classmethod
     def parse(cls, raw: str) -> ResponseVerdict:
         """Parse a structured response (first line = action, rest = reasoning)."""
@@ -57,15 +64,24 @@ class ResponseVerdict:
         first_line = lines[0].strip()
         reasoning = lines[1].strip() if len(lines) > 1 else ""
 
-        # Parse ACTION:detail format
+        # Parse ACTION:detail format (strict)
         match = re.match(r"^([A-Z_]+)(?::(.*))?$", first_line)
         if match:
             action = match.group(1)
             detail = (match.group(2) or "").strip()
         else:
-            # Fallback: treat the whole first line as the action
-            action = first_line.upper().replace(" ", "_")
+            # Fallback: startswith matching for known actions
+            # Handles "APPROVED and sent to the Solver." etc.
+            action = ""
             detail = ""
+            for known in cls._KNOWN_ACTIONS:
+                if first_line.upper().startswith(known):
+                    action = known
+                    detail = first_line[len(known):].lstrip(": —-–").strip()
+                    break
+            if not action:
+                # Last resort: treat the whole first line as the action
+                action = first_line.upper().replace(" ", "_")
 
         return cls(action=action, detail=detail, reasoning=reasoning)
 
@@ -86,9 +102,11 @@ class ResponseRouter:
         model: str = "claude-sonnet-4-6",
         storage_config: StorageConfig | None = None,
         base_prompt_path: str | Path = "conf/agent/prompts/steward.md",
+        steward_config: StewardConfig | None = None,
     ):
         self.model = model
         self.storage_config = storage_config or StorageConfig()
+        self.steward_config = steward_config or StewardConfig()
         self.scenarios: dict[str, ResponseScenario] = {}
         self._base_prompt = self._load_base_prompt(Path(base_prompt_path))
         self._jinja_env = jinja2.Environment(
@@ -171,12 +189,12 @@ class ResponseRouter:
         import asyncio
         from agents.runner import AgentRunner  # deferred to avoid circular import
 
-        # Steward gets read-only tools + web research + doc_retrieval via Bash
-        steward_tools = config.tools if config.tools else [
-            "Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch",
-        ]
-        # Steward is read-only: no Write/Edit, Bash for research only
-        steward_rules = [
+        # Steward tools from config (agents.yaml steward section)
+        sc = self.steward_config
+        steward_tools = config.tools if config.tools else (
+            sc.builtin_tools or ["Read", "Grep", "Glob", "Bash"]
+        )
+        steward_rules = sc.tool_rules if sc.tool_rules else [
             ToolRule(tool="Bash", allow=True,
                      constraint="Read-only commands for research. No file modification, no process management."),
             ToolRule(tool="Write", allow=False),
@@ -189,6 +207,7 @@ class ResponseRouter:
             max_turns=config.max_turns,
             max_budget_usd=5.0,
             builtin_tools=steward_tools,
+            disallowed_tools=sc.disallowed_tools,
             tool_rules=steward_rules,
             system_prompt=config.system_prompt,
         )

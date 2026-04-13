@@ -172,6 +172,7 @@ class Workshop(DefaultHandler):
             prompts_dir=Path(response_prompts_dir),
             model=steward_config.model,
             storage_config=config.storage,
+            steward_config=steward_config,
         )
 
         self._solver_runner: AgentRunner | None = None

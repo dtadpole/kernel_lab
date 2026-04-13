@@ -44,6 +44,26 @@ direction:
 steward:
   model: claude-sonnet-4-6
   max_tokens: 2000
+  tools:
+    builtin:
+      - Read
+      - Grep
+      - Glob
+      - Bash
+    disallowed:
+      - SendMessage
+      - ToolSearch
+      - AskUserQuestion
+      - EnterPlanMode
+      - NotebookEdit
+  tool_rules:
+    - tool: Bash
+      allow: true
+      constraint: "Read-only commands for research. No file modification, no process management."
+    - tool: Write
+      allow: false
+    - tool: Edit
+      allow: false
 
 storage:
   kb_root: ~/kernel_lab_kb

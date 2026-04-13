@@ -86,6 +86,7 @@ def _run_cu_impl(
     workspace_path: str,
     timeout_seconds: int,
     binary_path: str | None = None,
+    config_slug: str = "",
 ) -> dict:
     """Run a compiled .cu impl binary and return performance payload."""
     if binary_path:
@@ -93,7 +94,14 @@ def _run_cu_impl(
     else:
         target_path, _ = _primary_artifact_from_manifest(workspace)
 
-    output_dir = Path(workspace_path) / f"_output_{impl['slug']}"
+    if config_slug:
+        output_dir = Path(workspace_path) / f"_output_{impl['slug']}_{config_slug}"
+    else:
+        output_dir = Path(workspace_path) / f"_output_{impl['slug']}"
+    # Clean stale output files before each run to prevent cross-config contamination
+    if output_dir.exists():
+        for old_file in output_dir.glob("output_*.bin"):
+            old_file.unlink()
     output_dir.mkdir(parents=True, exist_ok=True)
     run_env = {**os.environ, **env, "CUDA_EXEC_OUTPUT_DIR": str(output_dir)}
 
@@ -205,7 +213,11 @@ def main() -> int:
     parser.add_argument("--num-warmups", type=int, default=NUM_WARMUP_RUNS)
     parser.add_argument("--num-perf-trials", type=int, default=NUM_PERF_TRIALS)
     parser.add_argument("--num-correctness-trials", type=int, default=NUM_CORRECTNESS_TRIALS)
+    parser.add_argument("--gpu", type=int, required=True,
+                        help="GPU device index. Sets CUDA_VISIBLE_DEVICES.")
     args = parser.parse_args()
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
     metadata = Metadata(
         run_tag=args.run_tag,
@@ -324,7 +336,8 @@ def main() -> int:
                     # Run compiled binary (use binary-map if available)
                     bp = binary_map.get(impl["slug"])
                     r = _run_cu_impl(workspace, impl, env, workspace_path,
-                                     args.timeout, binary_path=bp)
+                                     args.timeout, binary_path=bp,
+                                     config_slug=args.config_slug)
                     if "error" in r and "performance" not in r:
                         impl_results[slug] = {"error": r["error"]}
                     else:

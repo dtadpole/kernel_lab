@@ -708,6 +708,7 @@ def formal_benchmark(
     runtime_root: str | None = None,
     data_root: str | None = None,
     gpu_lockdown: bool = True,
+    gpu_index: int = 0,
 ) -> dict:
     """Atomic compile + trial ALL configs for specified implementations.
 
@@ -1081,6 +1082,7 @@ print(json.dumps({{"ok": True, "configs": results}}))
                     metadata=trial_meta,
                     timeout_seconds=timeout_seconds,
                     configs=configs,
+                    gpu_index=gpu_index,
                     binary_map=binary_map_str,
                 )
                 trial_resp = trial_endpoint(trial_req)
@@ -1112,6 +1114,7 @@ print(json.dumps({{"ok": True, "configs": results}}))
                         metadata=trial_meta,
                         timeout_seconds=timeout_seconds,
                         configs={config_slug: config_params},
+                        gpu_index=gpu_index,
                         binary_map=binary_map_str,
                     )
                     trial_resp_single = trial_endpoint(trial_req)
@@ -1472,6 +1475,7 @@ def cli_main() -> None:
         print(f"Using gem: {gem_dir.name} → {data_root_override}", file=sys.stderr)
 
     num_runs = int(bench_cfg.get("runs", 1))
+    gpu_index = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
     bench_kwargs = dict(
         kernel=bench_cfg.kernel,
         arch=bench_cfg.arch,
@@ -1482,6 +1486,7 @@ def cli_main() -> None:
         runtime_root=bench_cfg.get("runtime_root"),
         data_root=data_root_override,
         gpu_lockdown=bench_cfg.get("gpu_lockdown", True),
+        gpu_index=gpu_index,
     )
 
     if num_runs <= 1:

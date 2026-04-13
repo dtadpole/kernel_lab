@@ -81,6 +81,11 @@ class TrialRequest(RequestBase):
     - .cu impls export `extern "C" int kernel_run(...)`
     """
 
+    gpu_index: int = Field(
+        ...,
+        ge=0,
+        description="GPU device index. Passed as --gpu to trial.py which sets CUDA_VISIBLE_DEVICES.",
+    )
     configs: Dict[str, Dict[str, Any]] = Field(
         ...,
         min_length=1,

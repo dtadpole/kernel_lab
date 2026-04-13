@@ -678,6 +678,7 @@ def run_trial_task(
     metadata,
     timeout_seconds: int,
     configs: Dict[str, dict],
+    gpu_index: int,
     binary_map: str = "",
 ) -> dict:
     workspace = resolve_workspace_bundle(**metadata.model_dump())
@@ -713,6 +714,8 @@ def run_trial_task(
         command = [
             sys.executable,
             str(TRIAL_SCRIPT),
+            "--gpu",
+            str(gpu_index),
             "--run-tag",
             metadata.run_tag,
             "--version",
@@ -1269,6 +1272,7 @@ def trial_endpoint(request: TrialRequest) -> TrialResponse:
         metadata=request.metadata,
         timeout_seconds=request.timeout_seconds,
         configs=request.configs,
+        gpu_index=request.gpu_index,
         binary_map=getattr(request, "binary_map", ""),
     )
     attempt = result["attempt"]

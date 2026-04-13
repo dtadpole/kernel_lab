@@ -84,6 +84,7 @@ def do_trial(
     run_tag: str = "auto",
     revision: int = 1,
     timeout: int = 120,
+    gpu_index: int = 0,
     data_root: Path | None = None,
 ) -> dict:
     """Trial an implementation across configs."""
@@ -101,6 +102,7 @@ def do_trial(
         metadata=metadata,
         timeout_seconds=timeout,
         configs=trial_configs,
+        gpu_index=gpu_index,
     )
     resp = trial_endpoint(trial_req)
     return resp.model_dump(mode="json")
@@ -227,9 +229,11 @@ def cli_main() -> None:
             run_tag=run_tag, revision=revision, timeout=timeout, data_root=data_root,
         )
     elif action == "trial":
+        gpu_index = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
         result = do_trial(
             kernel, arch, impl_slug,
-            configs=configs_val, run_tag=run_tag, revision=revision, timeout=timeout, data_root=data_root,
+            configs=configs_val, run_tag=run_tag, revision=revision, timeout=timeout,
+            gpu_index=gpu_index, data_root=data_root,
         )
     elif action == "profile":
         result = do_profile(

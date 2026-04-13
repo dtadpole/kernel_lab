@@ -657,8 +657,7 @@ class Workshop(DefaultHandler):
     def _check_correctness_failure(self, bench_data: dict, result_text: str) -> bool:
         """Check if any gen-* impl has correctness failures.
 
-        Primary: structured JSON from formal.py stdout.
-        Fallback: ✗ character in stderr table.
+        Uses structured JSON from formal.py stdout only.
         """
         summary = bench_data.get("summary", {})
         for impl_slug, impl_info in summary.get("impls", {}).items():
@@ -666,9 +665,6 @@ class Workshop(DefaultHandler):
                 for cfg_slug, cfg_info in impl_info.get("configs", {}).items():
                     if cfg_info.get("correct") is False:
                         return True
-        # Fallback: check stderr table
-        if "✗" in result_text:
-            return True
         return False
 
     def _parse_bench_improved(self, bench_result: RunResult) -> bool:

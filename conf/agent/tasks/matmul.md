@@ -1,15 +1,16 @@
-Optimize the CUDA matmul kernel for SM90.
-Write your kernel to ~/kernel_lab_kb/runs/<run_tag>/gen/sm90/matmul/cuda/cuda.cu.
-Use ik:exec to compile, trial, and profile.
+Optimize the CUDA matmul kernel.
+Write your kernel to ~/kernel_lab_kb/runs/<run_tag>/gen/<arch>/matmul/cuda/cuda.cu
+where <arch> is auto-detected by exec.arch=auto (e.g. sm90, sm100).
+Use ik:exec (with exec.arch=auto) to compile, trial, and profile.
 Target: beat the current best gem in kernel_lab_kb.
 
 IMPORTANT: Write raw CUDA/PTX code only. Do NOT use CUTLASS, cuDNN, cuBLAS,
-or any high-level GPU library. Implement WGMMA, TMA, mbarrier, and all
-optimization logic yourself.
+or any high-level GPU library. Use the native tensor core instructions for
+your GPU architecture (detect with exec.arch=auto).
 
-A high-quality reference implementation is available at:
-  ~/kernel_lab_kb/runs/<run_tag>/pick/sm90/matmul/cuda/cuda.cu
-Read this code first — it represents the current peak performance.
+A high-quality reference implementation may be available at:
+  ~/kernel_lab_kb/runs/<run_tag>/pick/<arch>/matmul/cuda/cuda.cu
+If it exists, read this code first — it represents the current peak performance.
 Study its architecture (tile sizes, warp specialization, TMA, pipeline
 strategy) and use it as a starting point for your optimization.
 

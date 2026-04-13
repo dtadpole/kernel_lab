@@ -1,11 +1,12 @@
-Optimize the Flash Attention 4 kernel for SM90.
-Write your kernel to ~/kernel_lab_kb/runs/<run_tag>/gen/sm90/fa4/cuda/cuda.cu.
-Use ik:exec to compile, trial, and profile.
+Optimize the Flash Attention 4 kernel.
+Write your kernel to ~/kernel_lab_kb/runs/<run_tag>/gen/<arch>/fa4/cuda/cuda.cu
+where <arch> is auto-detected by exec.arch=auto (e.g. sm90, sm100).
+Use ik:exec (with exec.arch=auto) to compile, trial, and profile.
 Target: beat the current best gem.
 
 IMPORTANT: Write raw CUDA/PTX code only. Do NOT use CUTLASS, cuDNN, cuBLAS,
-or any high-level GPU library. Implement WGMMA, TMA, mbarrier, and all
-optimization logic yourself.
+or any high-level GPU library. Use the native tensor core instructions for
+your GPU architecture (detect with exec.arch=auto).
 
 Follow THE OPTIMIZATION LOOP in your system prompt (Phases 1-7).
 You MUST complete Phase 1 (Understand), Phase 2 (Analyze), and Phase 3
@@ -13,7 +14,7 @@ You MUST complete Phase 1 (Understand), Phase 2 (Analyze), and Phase 3
 
 1. Read the reference implementations (.peak/ and data/ref/) to understand
    what 85-90% peak performance looks like — their architecture, tile sizes,
-   WGMMA usage, TMA patterns, pipeline depth.
+   MMA usage, TMA patterns, pipeline depth.
 2. NCU profile the best reference (peak-cuda or ref-cutedsl) to see what
    the hardware is actually doing. This is not optional.
 3. Search NVIDIA docs (ik:docs) and the web (WebSearch) for the target

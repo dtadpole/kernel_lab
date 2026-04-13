@@ -74,6 +74,7 @@ async def _run_subprocess_async(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        limit=262_144,  # 256KB line buffer (formal.py JSON lines can exceed default 64KB)
     )
 
     stdout_lines: list[str] = []
